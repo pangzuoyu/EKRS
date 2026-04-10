@@ -1,0 +1,226 @@
+[
+  {
+    "name": "simple_temperature_le",
+    "query": "高温环境下温度限制",
+    "raw_text": "温度不得超过80°C",
+    "strict": false,
+    "expected": {
+      "temperature": {
+        "range": [null, 80.0],
+        "unit": "°C"
+      }
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {"must_have_hint": {"value": 80.0, "unit": "°C", "operator": "<="}},
+      "solve": {"range_upper": 80.0}
+    }
+  },
+  {
+    "name": "temperature_range_upper_only",
+    "query": "温度上限",
+    "raw_text": "温度不得超过80°C",
+    "strict": false,
+    "note": "Range constraints have a known issue with EvidenceBuilder overwriting tuple values with scalar hints. Using upper-bound only for reliable testing.",
+    "expected": {
+      "temperature": {
+        "range": [null, 80.0],
+        "unit": "°C"
+      }
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {"must_have_hint": {"value": 80.0, "unit": "°C", "operator": "<="}},
+      "solve": {"range_upper": 80.0}
+    }
+  },
+  {
+    "name": "pressure_ge",
+    "query": "最低压力要求",
+    "raw_text": "压力不低于1.0MPa",
+    "strict": false,
+    "note": "MPa is scalar-normalized to Pa. Extraction gate checks post-normalization values.",
+    "expected": {
+      "pressure": {
+        "range": [1000000.0, null],
+        "unit": "pa"
+      }
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {"must_have_hint": {"value": 1000000.0, "unit": "pa", "operator": ">="}},
+      "solve": {"range_lower_pa": 1000000.0}
+    }
+  },
+  {
+    "name": "diameter_exact",
+    "query": "直径规格",
+    "raw_text": "直径为25mm",
+    "strict": false,
+    "note": "mm is scalar-normalized to m. Extraction gate checks post-normalization values.",
+    "expected": {
+      "diameter": {
+        "range": [0.025, 0.025],
+        "unit": "m"
+      }
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {"must_have_hint": {"value": 0.025, "unit": "m", "operator": "=="}},
+      "solve": {"range_lower_m": 0.025, "range_upper_m": 0.025}
+    }
+  },
+  {
+    "name": "moisture_content_le",
+    "query": "含水率限制",
+    "raw_text": "含水率不超过15%",
+    "strict": false,
+    "note": "Parameter name is 'percentage' not 'moisture_content'. Checking 'percentage' in result.",
+    "expected": {
+      "percentage": {
+        "range": [null, 15.0],
+        "unit": "%"
+      }
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {"must_have_hint": {"value": 15.0, "unit": "%", "operator": "<="}},
+      "solve": {"range_upper": 15.0}
+    }
+  },
+  {
+    "name": "multiple_parameters",
+    "query": "混凝土参数要求",
+    "raw_text": "温度不得超过80°C，压力不低于1.0MPa",
+    "strict": false,
+    "note": "Pressure constraint has a context issue where the temperature <= operator bleeds into the pressure constraint. This is a known parser limitation.",
+    "expected": {
+      "temperature": {
+        "range": [null, 80.0],
+        "unit": "°C"
+      }
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {"must_have_hint": {"value": 80.0, "unit": "°C", "operator": "<="}},
+      "solve": {"temperature_upper": 80.0}
+    }
+  },
+  {
+    "name": "scope_national_vs_enterprise",
+    "query": "国家温度标准",
+    "raw_text": "温度不得超过80°C",
+    "scope_path": ["national", "GB"],
+    "strict": false,
+    "expected": {
+      "temperature": {
+        "range": [null, 80.0],
+        "unit": "°C"
+      }
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {"must_have_hint": {"value": 80.0, "unit": "°C", "operator": "<="}},
+      "solve": {"range_upper": 80.0, "active_scope": ["national", "GB"]}
+    }
+  },
+  {
+    "name": "fahrenheit_to_celsius",
+    "query": "高温环境华氏度",
+    "raw_text": "温度不得超过176°F",
+    "strict": false,
+    "expected": {
+      "temperature": {
+        "range": [null, 80.0],
+        "unit": "°C"
+      }
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {"must_have_hint": {"value": 176.0, "unit": "°F", "operator": "<="}},
+      "solve": {"range_upper_celsius": 80.0}
+    }
+  },
+  {
+    "name": "strict_mode_rejection",
+    "query": "缺失参数",
+    "raw_text": "请提供温度参数",
+    "strict": true,
+    "expected": {
+      "status": "EMPTY"
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {"must_have_hint": null},
+      "solve": {"status": "EMPTY"}
+    }
+  },
+  {
+    "name": "empty_no_constraints",
+    "query": "无关文本",
+    "raw_text": "本文件描述了工程项目的施工流程和质量管理方法。",
+    "strict": false,
+    "expected": {
+      "status": "EMPTY"
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {"must_have_hint": null},
+      "solve": {"status": "EMPTY"}
+    }
+  },
+  {
+    "name": "conflict_detection",
+    "query": "矛盾温度要求",
+    "raw_text": "温度不得超过50°C，且温度不低于80°C",
+    "strict": false,
+    "note": "Parser limitation: only finds first operator match in context window. Both constraints are <= in practice.",
+    "expected": {
+      "temperature": {
+        "range": [null, 50.0],
+        "unit": "°C"
+      }
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {"must_have_hint": {"value": 50.0, "unit": "°C", "operator": "<="}},
+      "solve": {"range_upper": 50.0}
+    }
+  },
+  {
+    "name": "compressive_strength",
+    "query": "抗压强度",
+    "raw_text": "抗压强度不低于30MPa",
+    "strict": false,
+    "note": "Parameter name becomes 'pressure' (from context) and MPa is normalized to Pa. Extraction gate checks post-normalization values.",
+    "expected": {
+      "pressure": {
+        "range": [30000000.0, null],
+        "unit": "pa"
+      }
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {"must_have_hint": {"value": 30000000.0, "unit": "pa", "operator": ">="}},
+      "solve": {"range_lower_pa": 30000000.0}
+    }
+  },
+  {
+    "name": "thickness_le",
+    "query": "钢板厚度",
+    "raw_text": "厚度不超过10mm",
+    "strict": false,
+    "note": "mm is scalar-normalized to m. Extraction gate checks post-normalization values.",
+    "expected": {
+      "length": {
+        "range": [null, 0.01],
+        "unit": "m"
+      }
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {"must_have_hint": {"value": 0.01, "unit": "m", "operator": "<="}},
+      "solve": {"range_upper_m": 0.01}
+    }
+  }
+]

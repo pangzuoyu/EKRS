@@ -1,0 +1,42 @@
+# Environment
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Test / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OpenWolf (local AI context)
+.wolf/
+
+# Claude Code
+.claude/
+
+# Models (downloaded, gitignored per spec)
+rag/models/
+
+# Qdrant data
+qdrant_data/
+
+# Logs
+*.log

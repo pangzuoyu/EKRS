@@ -1,0 +1,36 @@
+[project]
+name = "ekrs-rag"
+version = "0.1.0"
+description = "EKRS RAG service — ingestion, retrieval, constraint solving"
+requires-python = ">=3.11"
+dependencies = [
+    "ekrs-shared",
+    "fastapi>=0.115",
+    "uvicorn[standard]",
+    "qdrant-client>=1.11",
+    "redis>=5.0",
+    "aiosqlite",
+    "tenacity>=8.2",
+    "python-json-logger>=2.0",
+    "httpx",
+    "pydantic-settings>=2.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ekrs_rag*"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov",
+    "httpx",  # for TestClient async
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

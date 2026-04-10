@@ -1,0 +1,60 @@
+version: "3.8"
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rag:
+    build:
+      context: ../rag
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - PARSER_TOKEN=${PARSER_TOKEN:-change-me-to-a-secure-random-string-32chars}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_GRPC_PORT=6334
+      - REDIS_URL=redis://redis:6379
+      - SHARED_STORAGE_PATH=/parsed_lib
+      - EKRS_DEBUG=${EKRS_DEBUG:-false}
+      - COLLECTION_NAME=rag_documents
+      - MAX_CHUNK_TOKENS=500
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-bge-small-en-v1.5}
+    volumes:
+      - parsed_lib:/parsed_lib
+    mem_limit: 6g
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  qdrant_data:
+  parsed_lib:
