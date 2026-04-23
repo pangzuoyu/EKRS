@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 import portion  # type: ignore[import]
 
-from ekrs_shared.models import Constraint, Evidence
+from ekrs_shared.models import ConstraintV2, Evidence
 from ekrs_shared.normalizer import normalize_temperature, normalize_parameter
 
 
@@ -49,13 +49,13 @@ class IntervalSolver:
 
     @staticmethod
     def solve(
-        constraints: list[Constraint],
+        constraints: list[ConstraintV2],
         active_scope: Optional[list[str]] = None,
     ) -> dict:
-        """Solve constraints and return structured result.
+        """Solve constraints and return structured result (V2).
 
         Args:
-            constraints: List of Constraint objects
+            constraints: List of ConstraintV2 objects
             active_scope: Optional scope filter (scope_path must match to be applied)
 
         Returns:
@@ -100,7 +100,7 @@ class IntervalSolver:
                     "parameter": param,
                     "interval": str(result.interval),
                     "constraints": [
-                        {"operator": c.operator, "value": c.value, "unit": c.unit}
+                        {"interval": c.interval, "value_type": c.value_type, "unit": c.unit}
                         for c in param_constraints
                     ],
                 })
@@ -149,17 +149,17 @@ class IntervalSolver:
 
 def _solve_parameter(
     param: str,
-    constraints: list[Constraint],
+    constraints: list[ConstraintV2],
     active_scope: Optional[list[str]],
 ) -> _ParameterResult:
-    """Solve constraints for a single parameter.
+    """Solve constraints for a single parameter (V2).
 
     Returns _ParameterResult with interval, unit, confidence, evidence, trace.
     """
-    # Sort by priority (desc), then confidence (desc)
+    # Sort by priority.explicit_level (desc), then confidence (desc)
     sorted_constraints = sorted(
         constraints,
-        key=lambda c: (-c.priority.value, -c.confidence),
+        key=lambda c: (-c.priority.get("explicit_level", 0), -c.confidence),
     )
 
     # Current working interval (starts as open(-inf, +inf) = full real line)
@@ -180,27 +180,31 @@ def _solve_parameter(
                 trace.append(_TraceEntry(
                     parameter=param,
                     action="skipped_scope",
-                    operator=c.operator,
-                    value=c.value,
+                    operator="interval",
+                    value=c.interval,
                     interval_snapshot=str(interval),
                     reason=f"scope {c.scope_path} != {active_scope}",
                 ))
                 continue
 
-        # --- Convert value (handle temperature affine) ---
-        value = c.value
+        # --- Build constraint interval from V2 interval dict ---
+        c_interval = _v2_interval_to_portion(c.interval)
+        if c_interval is None:
+            continue  # Skip if no interval
+
+        # --- Get unit (handle temperature affine) ---
         unit = c.unit
         if _is_temperature_unit(c.unit):
-            value, unit = normalize_temperature(c.value, c.unit)
-
-        # --- Build constraint interval ---
-        c_interval = _operator_to_interval(c.operator, value)
+            # Extract scalar value for temperature conversion
+            scalar = c.scalar_value if c.value_type == "scalar" else None
+            if scalar is not None:
+                _, unit = normalize_temperature(scalar, c.unit)
 
         trace.append(_TraceEntry(
             parameter=param,
             action="applied",
-            operator=c.operator,
-            value=c.value,
+            operator="interval",
+            value=c.interval,
             interval_snapshot=str(interval),
         ))
 
@@ -209,7 +213,7 @@ def _solve_parameter(
         if new_interval.empty:
             # Conflict — record but keep going to record full trace
             trace[-1].action = "conflict"
-            trace[-1].reason = f"intersection with {c.operator}{c.value} is empty"
+            trace[-1].reason = f"intersection with interval {c.interval} is empty"
             interval = new_interval
             had_conflict = True
         else:
@@ -219,10 +223,10 @@ def _solve_parameter(
             if c.source:
                 ev = Evidence(
                     doc_id=c.source.get("doc_id", ""),
-                    block_id=c.source.get("block_id", ""),
-                    page_num=c.source.get("page_num"),
+                    block_id="",
+                    page_num=None,
                     scope_path=c.scope_path,
-                    source_text=c.source.get("source_text", ""),
+                    source_text="",
                 )
                 evidence.append(ev)
 
@@ -239,29 +243,49 @@ def _solve_parameter(
     )
 
 
-def _operator_to_interval(operator: str, value: float | tuple[float, float]) -> portion.Interval:
-    """Convert a constraint operator and value to a portion.Interval.
+def _v2_interval_to_portion(interval_dict: dict) -> portion.Interval | None:
+    """Convert V2 interval dict to portion.Interval using factory functions.
 
-    portion API:
-      closed(a, b)     = [a, b]
-      open(a, b)       = (a, b)
-      closedopen(a, b) = [a, b)   — left closed, right open
-      openclosed(a, b) = (a, b]   — left open, right closed
+    V2 interval dict: {lower, upper, lower_inclusive, upper_inclusive}
+    portion factory functions:
+      closed(lower, upper)      — [lower, upper]
+      open(lower, upper)        — (lower, upper)
+      closedopen(lower, upper)  — [lower, upper)
+      openclosed(lower, upper)  — (lower, upper]
     """
-    if operator == "<=":
-        # upper bound closed: (-inf, value]
-        return portion.openclosed(-portion.inf, value)
-    elif operator == ">=":
-        # lower bound closed: [value, +inf)
-        return portion.closedopen(value, portion.inf)
-    elif operator == "==":
-        return portion.closed(value, value)
-    elif operator == "range":
-        lo, hi = value  # type: ignore[misc]
-        return portion.closed(lo, hi)
-    else:
-        # Unknown operator — treat as no-op (full range)
+    if interval_dict is None:
+        return None
+
+    lower = interval_dict.get("lower")
+    upper = interval_dict.get("upper")
+    lower_inc = interval_dict.get("lower_inclusive", True)
+    upper_inc = interval_dict.get("upper_inclusive", True)
+
+    # Handle None bounds (infinite)
+    if lower is None and upper is None:
         return portion.open(-portion.inf, portion.inf)
+    elif lower is None:
+        # Only upper bound
+        if upper_inc:
+            return portion.openclosed(-portion.inf, upper)
+        else:
+            return portion.open(-portion.inf, upper)
+    elif upper is None:
+        # Only lower bound
+        if lower_inc:
+            return portion.closedopen(lower, portion.inf)
+        else:
+            return portion.open(lower, portion.inf)
+    else:
+        # Both bounds specified
+        if lower_inc and upper_inc:
+            return portion.closed(lower, upper)
+        elif lower_inc and not upper_inc:
+            return portion.closedopen(lower, upper)
+        elif not lower_inc and upper_inc:
+            return portion.openclosed(lower, upper)
+        else:
+            return portion.open(lower, upper)
 
 
 def _scope_matches(constraint_scope: Optional[list[str]], active_scope: list[str]) -> bool:

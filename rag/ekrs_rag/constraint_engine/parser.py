@@ -5,7 +5,7 @@ import re
 from typing import List, Optional
 
 from ekrs_shared.models import Constraint, NumericHint, Priority
-from ekrs_rag.constraint_engine.normalizer import normalize_constraint_parameter
+from ekrs_rag.constraint_engine.normalizer import normalize_constraint_hint, normalize_constraint_parameter, is_temperature_unit
 
 
 # =============================================================================
@@ -23,14 +23,24 @@ _OPERATOR_PATTERNS: list[tuple[str, str, re.Pattern]] = [
     ("<=", "不超过", re.compile(r"不超过")),
     ("<=", "no more than", re.compile(r"no more than", re.IGNORECASE)),
     ("<=", "at most", re.compile(r"at most", re.IGNORECASE)),
+    # >= operators
     (">=", "不低于", re.compile(r"不低于")),
     (">=", "不少于", re.compile(r"不少于")),
     (">=", "not less than", re.compile(r"not less than", re.IGNORECASE)),
     (">=", "at least", re.compile(r"at least", re.IGNORECASE)),
+    # == operators
     ("==", "等于", re.compile(r"等于")),
     ("==", "为", re.compile(r"为")),  # "直径为25mm"
     ("==", "is", re.compile(r"\bis\b", re.IGNORECASE)),
     ("==", "equals", re.compile(r"equals", re.IGNORECASE)),
+    # > operators (open lower bound)
+    (">", "大于", re.compile(r"大于")),
+    (">", "高于", re.compile(r"高于")),
+    (">", ">", re.compile(r">(?![=])")),  # > but not >=
+    # < operators (open upper bound)
+    ("<", "小于", re.compile(r"小于")),
+    ("<", "低于", re.compile(r"低于")),
+    ("<", "<", re.compile(r"<(?![=])")),  # < but not <=
 ]
 
 # Context window radius for searching near hint
@@ -167,30 +177,157 @@ def _find_operator_in_context(
 def _find_range_in_context(context: str, value: float) -> tuple[float, float] | None:
     """Find a range in the context given one endpoint.
 
-    Looks for "value ...至... X" or "X ...至... value" or "value ...到... X"
+    Looks for "X ...至... Y" or "X ...到... Y" and extracts both numbers.
+    Handles units (°C, etc.) between number and operator.
     Returns (lo, hi) or None.
     """
-    # Pattern: any two numbers with 至 or 到 between them
-    range_pattern = re.compile(
-        r"([+-]?\d+\.?\d*)\s*至\s*([+-]?\d+\.?\d*)"
-        r"|"
-        r"([+-]?\d+\.?\d*)\s*到\s*([+-]?\d+\.?\d*)"
-        r"|"
-        r"([+-]?\d+\.?\d*)\s*to\s([+-]?\d+\.?\d*)",
-        re.IGNORECASE,
-    )
+    # Find all numbers in the context
+    num_pattern = re.compile(r"[+-]?\d+\.?\d*")
+    numbers = [(m.start(), float(m.group())) for m in num_pattern.finditer(context)]
+    if len(numbers) < 2:
+        return None
 
-    for m in range_pattern.finditer(context):
-        # Extract both numbers from the match groups
-        groups = m.groups()
-        if groups[0] is not None and groups[1] is not None:
-            lo, hi = float(groups[0]), float(groups[1])
-            return (lo, hi)
-        elif groups[2] is not None and groups[3] is not None:
-            lo, hi = float(groups[2]), float(groups[3])
-            return (lo, hi)
-        elif groups[4] is not None and groups[5] is not None:
-            lo, hi = float(groups[4]), float(groups[5])
-            return (lo, hi)
+    # Find range operators: 至, 到, or "to"
+    op_pattern = re.compile(r"至|到|\bto\b", re.IGNORECASE)
+    for m in op_pattern.finditer(context):
+        op_pos = m.start()
+        # Numbers before and after operator
+        before = [(abs(n[1] - value), n[1]) for n in numbers if n[0] < op_pos]
+        after = [(abs(n[1] - value), n[1]) for n in numbers if n[0] > op_pos]
+        if before and after:
+            before.sort()
+            after.sort()
+            return (before[0][1], after[0][1])
+    return None
 
+
+def _extract_numeric(s: str) -> float | None:
+    """Extract numeric value from a string that may contain unit suffixes like °C."""
+    numeric = re.sub(r"[^\d.\-]", "", s)
+    if not numeric:
+        return None
+    return float(numeric)
+
+
+def parse_interval(
+    text: str, hints: List[NumericHint]
+) -> List[dict]:
+    """Parse constraints from text using numeric hints as anchors. Returns V2 interval structures.
+
+    Args:
+        text: The raw text to parse
+        hints: NumericHint anchors found in the text
+
+    Returns:
+        List of V2 interval dicts with {lower, upper, lower_inclusive, upper_inclusive}
+    """
+    if not hints:
+        return []
+
+    intervals: list[dict] = []
+    seen: set[tuple] = set()
+
+    for hint in hints:
+        start = max(0, hint.span[0] - _CONTEXT_RADIUS)
+        end = min(len(text), hint.span[1] + _CONTEXT_RADIUS)
+        context = text[start:end]
+
+        operator, value = _find_operator_in_context(
+            context, hint.value, hint.unit, hint.span[0]
+        )
+
+        if operator is None:
+            continue
+
+        # Normalize temperature to base unit (°C) before building interval
+        norm_value, norm_unit = normalize_constraint_hint(hint)
+
+        # For range operator, use the tuple from _find_operator_in_context directly
+        # (it's already a tuple of two values from the text)
+        # For other operators, use the normalized single value
+        if operator == "range" and isinstance(value, tuple):
+            # Normalize range values if temperature unit
+            if is_temperature_unit(hint.unit):
+                lo_raw, hi_raw = value
+                lo_norm, _ = normalize_constraint_hint(
+                    NumericHint(parameter_hint=hint.parameter_hint, value=lo_raw, unit=hint.unit, span=hint.span, source_text=hint.source_text)
+                )
+                hi_norm, _ = normalize_constraint_hint(
+                    NumericHint(parameter_hint=hint.parameter_hint, value=hi_raw, unit=hint.unit, span=hint.span, source_text=hint.source_text)
+                )
+                op_value = (lo_norm, hi_norm)
+            else:
+                op_value = value
+        else:
+            op_value = norm_value
+
+        # Build V2 interval structure
+        interval = _operator_to_interval(operator, op_value)
+        if interval is None:
+            continue
+
+        # Deduplicate by (parameter, lower, upper, unit)
+        key = (
+            hint.parameter_hint,
+            interval.get("lower"),
+            interval.get("upper"),
+            norm_unit,
+        )
+        if key not in seen:
+            seen.add(key)
+            intervals.append(interval)
+
+    return intervals
+
+
+def _operator_to_interval(
+    operator: str, value: float | tuple[float, float]
+) -> dict | None:
+    """Convert operator and value to V2 interval structure.
+
+    Returns dict with {lower, upper, lower_inclusive, upper_inclusive}.
+    """
+    if operator == "range" and isinstance(value, tuple):
+        lo, hi = value
+        return {
+            "lower": lo,
+            "upper": hi,
+            "lower_inclusive": True,
+            "upper_inclusive": True,
+        }
+    elif operator == ">":
+        return {
+            "lower": value,
+            "upper": None,
+            "lower_inclusive": False,
+            "upper_inclusive": True,
+        }
+    elif operator == "<":
+        return {
+            "lower": None,
+            "upper": value,
+            "lower_inclusive": True,
+            "upper_inclusive": False,
+        }
+    elif operator == ">=":
+        return {
+            "lower": value,
+            "upper": None,
+            "lower_inclusive": True,
+            "upper_inclusive": True,
+        }
+    elif operator == "<=":
+        return {
+            "lower": None,
+            "upper": value,
+            "lower_inclusive": True,
+            "upper_inclusive": True,
+        }
+    elif operator == "==":
+        return {
+            "lower": value,
+            "upper": value,
+            "lower_inclusive": True,
+            "upper_inclusive": True,
+        }
     return None

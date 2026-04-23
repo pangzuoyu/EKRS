@@ -6,7 +6,7 @@ Mirrors doc-to-md DocumentBlock IR schema and adds RAG-specific types.
 from __future__ import annotations
 
 from enum import IntEnum
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field
 
@@ -82,8 +82,53 @@ class Condition(BaseModel):
     value: Any
 
 
+class ConstraintV2(BaseModel):
+    """A single constraint on a parameter (IR V2).
+
+    R2: Constraints are pure data objects consumed by the pure-function solver.
+    """
+
+    parameter: str
+    value_type: Literal["interval", "enum", "scalar", "boolean"] = "scalar"
+    unit: str = ""
+    category: str = "general"
+
+    # Interval bounds (used when value_type == "interval")
+    interval: Optional[dict] = None  # {lower, upper, lower_inclusive, upper_inclusive}
+
+    # Scalar value (used when value_type == "scalar")
+    scalar_value: Optional[float] = None
+
+    # Enum values (used when value_type == "enum")
+    enum_values: Optional[List[str]] = None
+
+    # Boolean value (used when value_type == "boolean")
+    boolean_value: Optional[bool] = None
+
+    # Priority restructured: separate explicit_level from recency/authority scores
+    priority: dict = Field(default_factory=dict)  # {explicit_level, recency_score, authority_score}
+
+    # Confidence
+    confidence: float = 1.0
+
+    # Inferred flag: True if constraint is inferred from context
+    inferred: bool = False
+
+    # Lifecycle (elevated from content_hash/version)
+    lifecycle: dict = Field(default_factory=dict)  # {status, effective_date, expiry_date, is_binding}
+
+    # Source restructured: flat structure
+    source: dict = Field(default_factory=dict)  # {doc_id, provision_id, doc_type, authority_score}
+
+    # Conditions for conditional constraints
+    conditions: List[Condition] = Field(default_factory=list)
+
+    # Scope path for filtering
+    scope_path: Optional[List[str]] = None
+
+
 class Constraint(BaseModel):
-    """A single constraint on a parameter.
+    """A single constraint on a parameter (IR V1 — kept for reference during migration).
 
     R2: Constraints are pure data objects consumed by the pure-function solver.
     """

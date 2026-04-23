@@ -113,6 +113,16 @@ async def query_constraints(query: ConstraintQuery, request: Request) -> Constra
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="No constraints extracted")
 
+    # --- Strict mode validation (R6) ---
+    if query.strict:
+        for c in constraints:
+            if c.inferred:
+                from fastapi import HTTPException
+                raise HTTPException(
+                    status_code=400,
+                    detail="missing_context: inferred constraint not allowed in strict mode",
+                )
+
     # --- Step 6: Solving ---
     result = IntervalSolver.solve(constraints, active_scope=active_scope)
 
@@ -121,6 +131,8 @@ async def query_constraints(query: ConstraintQuery, request: Request) -> Constra
     if result["status"] == "CONFLICT":
         conflicts = result.get("conflicts", [])
         logger.info("Gate 3 CONFLICT: %d conflict(s)", len(conflicts))
+        from fastapi import HTTPException
+        raise HTTPException(status_code=409, detail={"conflicts": conflicts})
 
     # Determine mode
     mode = "multi_branch" if active_scope else "single"
