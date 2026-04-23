@@ -88,9 +88,9 @@ def run_pipeline(chunk: Chunk, strict: bool = False) -> dict[str, Any]:
 def assert_extraction_gate(case: dict[str, Any], constraints: list) -> None:
     """Assert extraction gate: expected hints are found in constraints.
 
-    Note: Values and units are normalized by EvidenceBuilder. For temperature hints,
-    the value is affine-converted to Celsius. So we primarily check operator match,
-    and for temperature constraints we accept any reasonable value.
+    V2: ConstraintV2 has interval {lower, upper, lower_inclusive, upper_inclusive}.
+    The golden set uses V1-style operators (<=, >=, ==) which we translate to
+    interval bounds for matching.
     """
     gate = case.get("gates", {}).get("extraction", {})
 
@@ -110,28 +110,132 @@ def assert_extraction_gate(case: dict[str, Any], constraints: list) -> None:
         unit = hint_spec["unit"]
         operator = hint_spec.get("operator")
 
-        # Find matching constraint by operator
+        # Find matching constraint by translating V1 operator -> V2 interval bounds
         matching = []
         for c in constraints:
-            if operator and c.operator != operator:
+            if not _constraint_matches_v2(c, operator, value, unit):
                 continue
-            # For temperature (°F to °C conversion), the value is normalized
-            # so we can't check exact value match for temperature hints
-            if unit == "°F" and c.unit == "°C":
-                # Temperature was converted - accept any reasonable value
-                matching.append(c)
-            elif isinstance(c.value, tuple):
-                # Range constraint
-                if value in c.value:
-                    matching.append(c)
-            else:
-                if abs(c.value - value) < 0.001:
-                    matching.append(c)
+            matching.append(c)
 
-        assert matching, (
-            f"No constraint found for value={value}, unit={unit}, operator={operator}. "
-            f"Constraints: {[(c.parameter, c.operator, c.value, c.unit) for c in constraints]}"
+        if not matching:
+            constraint_repr = [
+                (c.parameter, _operator_from_interval(c.interval), _value_from_interval(c.interval), c.unit)
+                for c in constraints
+            ]
+            assert False, (
+                f"No constraint found for value={value}, unit={unit}, operator={operator}. "
+                f"Constraints: {constraint_repr}"
+            )
+
+
+def _operator_matches(c, operator: str | None) -> bool:
+    """Check if V2 constraint's interval matches the expected V1-style operator."""
+    if operator is None:
+        return True
+    iv = c.interval
+    if iv is None:
+        return False
+    if operator == "<=":
+        return iv.get("upper_inclusive", True) and iv.get("upper") is not None
+    elif operator == ">=":
+        return iv.get("lower_inclusive", True) and iv.get("lower") is not None
+    elif operator == "==":
+        return (
+            iv.get("lower_inclusive", True)
+            and iv.get("upper_inclusive", True)
+            and iv.get("lower") is not None
+            and iv.get("upper") is not None
+            and abs(iv["lower"] - iv["upper"]) < 0.001
         )
+    elif operator == ">":
+        return not iv.get("lower_inclusive", True) and iv.get("lower") is not None
+    elif operator == "<":
+        return not iv.get("upper_inclusive", True) and iv.get("upper") is not None
+    return False
+
+
+def _constraint_matches_v2(c, operator: str | None, value: float, unit: str) -> bool:
+    """Check if V2 constraint matches expected operator/value/unit.
+
+    Handles three cases:
+    1. Scalar constraints (diameter_exact): check scalar_value
+    2. Temperature conversion (°F->°C): accept operator match only (value normalized)
+    3. Interval constraints: check operator + unit + value
+    """
+    if operator is None:
+        return True
+
+    # Temperature conversion: golden set uses raw values (e.g., °F not pre-converted).
+    # If golden set expects °F and constraint uses °C, the value was normalized.
+    # Accept based on operator match only.
+    if unit == "°F" and c.unit == "°C":
+        return _operator_matches(c, operator)
+
+    # Check unit matches
+    if c.unit != unit:
+        return False
+
+    # Scalar constraint (e.g., exact diameter): check scalar_value
+    if c.value_type == "scalar":
+        sv = c.scalar_value
+        if sv is not None and abs(sv - value) < 0.001:
+            return True
+        return False
+
+    # Interval constraint
+    iv = c.interval
+    if iv is None:
+        return False
+
+    if operator == "<=":
+        return iv.get("upper_inclusive", True) and iv.get("upper") is not None and abs(iv["upper"] - value) < 0.001
+    elif operator == ">=":
+        return iv.get("lower_inclusive", True) and iv.get("lower") is not None and abs(iv["lower"] - value) < 0.001
+    elif operator == "==":
+        return (
+            iv.get("lower_inclusive", True)
+            and iv.get("upper_inclusive", True)
+            and iv.get("lower") is not None
+            and iv.get("upper") is not None
+            and abs(iv["lower"] - value) < 0.001
+            and abs(iv["upper"] - value) < 0.001
+        )
+    elif operator == ">":
+        return not iv.get("lower_inclusive", True) and iv.get("lower") is not None and abs(iv["lower"] - value) < 0.001
+    elif operator == "<":
+        return not iv.get("upper_inclusive", True) and iv.get("upper") is not None and abs(iv["upper"] - value) < 0.001
+    return False
+
+
+def _operator_from_interval(interval: dict) -> str:
+    """Derive V1-style operator string from V2 interval dict."""
+    if interval is None:
+        return "?"
+    lower_inc = interval.get("lower_inclusive", True)
+    upper_inc = interval.get("upper_inclusive", True)
+    lower = interval.get("lower")
+    upper = interval.get("upper")
+
+    if lower is not None and upper is not None:
+        if lower == upper and lower_inc and upper_inc:
+            return "=="
+        return "range"
+    elif lower is None and upper is not None:
+        return "<=" if upper_inc else "<"
+    elif upper is None and lower is not None:
+        return ">=" if lower_inc else ">"
+    return "?"
+
+
+def _value_from_interval(interval: dict) -> float | tuple | None:
+    """Extract representative value(s) from V2 interval dict."""
+    if interval is None:
+        return None
+    lower = interval.get("lower")
+    upper = interval.get("upper")
+    if lower is not None and upper is not None:
+        return (lower, upper)
+    return lower or upper
 
 
 def assert_solve_gate(case: dict[str, Any], result: dict[str, Any]) -> None:

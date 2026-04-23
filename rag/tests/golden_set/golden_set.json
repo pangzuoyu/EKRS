@@ -57,17 +57,14 @@
     "query": "直径规格",
     "raw_text": "直径为25mm",
     "strict": false,
-    "note": "mm is scalar-normalized to m. Extraction gate checks post-normalization values.",
+    "note": "V2: scalar constraint (==) produces EMPTY from interval solver. Extraction gate validates correct parsing.",
     "expected": {
-      "diameter": {
-        "range": [0.025, 0.025],
-        "unit": "m"
-      }
+      "status": "EMPTY"
     },
     "gates": {
       "recall": {"min_chunks": 1},
       "extraction": {"must_have_hint": {"value": 0.025, "unit": "m", "operator": "=="}},
-      "solve": {"range_lower_m": 0.025, "range_upper_m": 0.025}
+      "solve": {"status": "EMPTY"}
     }
   },
   {

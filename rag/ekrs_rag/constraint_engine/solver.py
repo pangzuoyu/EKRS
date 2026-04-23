@@ -9,6 +9,7 @@ import portion  # type: ignore[import]
 
 from ekrs_shared.models import ConstraintV2, Evidence
 from ekrs_shared.normalizer import normalize_temperature, normalize_parameter
+from ekrs_shared.models import Constraint as ConstraintV1
 
 
 # =============================================================================
@@ -39,6 +40,82 @@ class _ParameterResult:
 # =============================================================================
 # IntervalSolver
 # =============================================================================
+
+
+
+def _ensure_v2(c: ConstraintV2 | ConstraintV1) -> ConstraintV2:
+    """Convert V1 Constraint to V2 if needed (backward compat for existing tests)."""
+    if isinstance(c, ConstraintV2):
+        return c
+    # V1 -> V2 conversion
+    op = c.operator
+    if op == "==":
+        interval = {"lower": c.value, "upper": c.value, "lower_inclusive": True, "upper_inclusive": True}
+    elif op == "<=":
+        interval = {"lower": None, "upper": c.value, "lower_inclusive": True, "upper_inclusive": True}
+    elif op == ">=":
+        interval = {"lower": c.value, "upper": None, "lower_inclusive": True, "upper_inclusive": True}
+    elif op == "<":
+        interval = {"lower": None, "upper": c.value, "lower_inclusive": True, "upper_inclusive": False}
+    elif op == ">":
+        interval = {"lower": c.value, "upper": None, "lower_inclusive": False, "upper_inclusive": True}
+    elif op == "range":
+        # V1 range: value is a tuple (lower, upper)
+        if isinstance(c.value, tuple) and len(c.value) == 2:
+            interval = {
+                "lower": c.value[0],
+                "upper": c.value[1],
+                "lower_inclusive": True,
+                "upper_inclusive": True,
+            }
+        else:
+            interval = {"lower": None, "upper": None, "lower_inclusive": True, "upper_inclusive": True}
+    else:
+        interval = {"lower": None, "upper": None, "lower_inclusive": True, "upper_inclusive": True}
+
+    # Map V1 Priority IntEnum to V2 explicit_level
+    from ekrs_shared.models import Priority as V1Priority
+    if isinstance(c.priority, V1Priority):
+        explicit_level = int(c.priority)  # NATIONAL=100, INDUSTRY=80, etc.
+    else:
+        explicit_level = 50
+
+    # Apply temperature affine conversion if needed (V1 doesn't normalize)
+    unit = c.unit
+    if _is_temperature_unit(unit):
+        scalar = c.value[0] if isinstance(c.value, tuple) else c.value
+        if scalar is not None:
+            scalar, unit = normalize_temperature(scalar, unit)
+            # Update interval bounds with converted value
+            if op == "<=":
+                interval = {"lower": None, "upper": scalar, "lower_inclusive": True, "upper_inclusive": True}
+            elif op == ">=":
+                interval = {"lower": scalar, "upper": None, "lower_inclusive": True, "upper_inclusive": True}
+            elif op == "<":
+                interval = {"lower": None, "upper": scalar, "lower_inclusive": True, "upper_inclusive": False}
+            elif op == ">":
+                interval = {"lower": scalar, "upper": None, "lower_inclusive": False, "upper_inclusive": True}
+            elif op == "==":
+                interval = {"lower": scalar, "upper": scalar, "lower_inclusive": True, "upper_inclusive": True}
+            elif op == "range" and isinstance(c.value, tuple) and len(c.value) == 2:
+                # Use ORIGINAL unit for range bounds (unit was updated above for scalar case)
+                orig_unit = c.unit
+                lo_norm, _ = normalize_temperature(c.value[0], orig_unit)
+                hi_norm, _ = normalize_temperature(c.value[1], orig_unit)
+                interval = {"lower": lo_norm, "upper": hi_norm, "lower_inclusive": True, "upper_inclusive": True}
+
+    return ConstraintV2(
+        parameter=c.parameter,
+        value_type="interval",
+        interval=interval,
+        unit=unit,
+        inferred=False,
+        priority={"explicit_level": explicit_level, "recency_score": 0.0, "authority_score": 0.0},
+        scope_path=c.scope_path or None,
+        confidence=c.confidence,
+        source=c.source,
+        lifecycle={"status": "active", "is_binding": True},
+    )
 
 
 class IntervalSolver:
@@ -77,8 +154,11 @@ class IntervalSolver:
         if not constraints:
             return {"status": "EMPTY", "parameters": {}, "conflicts": [], "trace": []}
 
+        # Convert V1 Constraint objects to V2 ConstraintV2 (backward compat)
+        constraints = [_ensure_v2(c) for c in constraints]
+
         # Group constraints by normalized parameter
-        grouped: dict[str, list[Constraint]] = defaultdict(list)
+        grouped: dict[str, list[ConstraintV2]] = defaultdict(list)
         for c in constraints:
             param = normalize_parameter(c.parameter)
             grouped[param].append(c)

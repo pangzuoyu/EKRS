@@ -1,41 +1,37 @@
-# OpenWolf
-
-@.wolf/OPENWOLF.md
-
-This project uses OpenWolf for context management. Read and follow .wolf/OPENWOLF.md every session. Check .wolf/cerebrum.md before generating code. Check .wolf/anatomy.md before reading files.
-
-
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Engineering Knowledge Recovery System (EKRS) — extracts structured engineering constraints (temperature, pressure, material limits) from unstructured documents (PDF/Word/DWG), computes parameter feasible ranges via a deterministic solver, and provides scope-aware conflict detection. Full specification: `ekrs-handbook.md`.
 
-## Project Overview
+## Quick Commands
 
-Engineering Knowledge Recovery System (EKRS) — extracts structured engineering constraints (temperature, pressure, material limits) from unstructured documents (PDF/Word/DWG), computes parameter feasible ranges via a deterministic solver, and provides scope-aware conflict detection. Full specification: `ekrs.md`.
+```bash
+make install      # Install dependencies (shared + rag)
+make dev          # Start docker-compose + uvicorn + streamlit
+make dev-down     # Stop docker
+make test         # pytest rag/tests/ -v --tb=short
+make test-cov     # With coverage report
+make lint         # flake8 + mypy on shared/ and rag/
+make mock-notify  # Simulate parser notification for testing
 
-## Current State
+# Run single test
+cd rag && pytest tests/unit/test_solver.py -k "test_name" -v
 
-Phase 1 implementation complete (as of 2026-04-10):
-- shared/ekrs_shared/ — Pydantic models, normalizer (affine temp conversion), audit, utils
-- rag/ekrs_rag/ingestion/ — IR parser, chunker (semantic, scope-aware), pipeline
-- rag/ekrs_rag/retrieval/ — Qdrant client (Phase 1: dummy vectors)
-- rag/ekrs_rag/api/routes/ — Ingestion notify/status endpoints, metrics
-- rag/tests/ — 90 unit/integration tests, all passing
-
-Phase 2 (solver core) not yet implemented.
+# Run RAG service locally (without Docker)
+make run-local
+```
 
 ## Architecture
 
 Monorepo with three deployable units:
 
 ```
-shared/ekrs_shared/   → Pydantic models, normalizer, audit base (installed as editable dep)
+shared/ekrs_shared/   → Pydantic models, normalizer (affine temp conversion), audit base
 rag/ekrs_rag/         → FastAPI service: ingestion, retrieval (Qdrant), constraint solving
 dev_ui/               → Streamlit debug UI (dev only)
 deployment/           → docker-compose, k8s manifests
 ```
 
-Key data flow: Parser (external) → `POST /v1/ingestion/notify` → RAG reads JSONL, vectorizes into Qdrant → callback to Parser. Queries: `POST /v1/constraints` → semantic retrieval → NumericHint extraction → interval solver → structured result.
+Data flow: Parser (external) → `POST /v1/ingestion/notify` → RAG reads JSONL, vectorizes into Qdrant → callback to Parser. Queries: `POST /v1/constraints` → semantic retrieval → NumericHint extraction → interval solver → structured result.
 
 ## Seven Iron Rules (must never be violated)
 
@@ -49,44 +45,39 @@ Key data flow: Parser (external) → `POST /v1/ingestion/notify` → RAG reads J
 | R6 | strict=true forbids inference; missing context returns 400 | API test |
 | R7 | Every hint carries scope_path; queries can filter by scope | Multi-branch tests |
 
-## Commands (once code exists)
-
-```bash
-make dev          # Start docker-compose + uvicorn + streamlit
-make test         # pytest rag/tests/
-make golden       # Golden set CI gate (must 100% pass)
-make lint         # flake8 + mypy on shared/ and rag/
-make mock-notify  # Simulate parser notification for testing
-
-docs/solutions/  # documented solutions to past problems (bugs, best practices, workflow patterns), organized by category with YAML frontmatter (module, tags, problem_type)
-
-Run a single test:
-```bash
-cd rag && pytest tests/unit/test_solver.py -k "test_name" -v
-```
-
 ## Key Dependencies
 
 - **Python 3.11+**, FastAPI 0.115, Pydantic 2.8, Qdrant client 1.11
-- **portion** (interval arithmetic library — critical for solver)
+- **portion** — interval arithmetic library (critical for solver, uses factory functions NOT `Interval(left=, right=)` kwargs)
 - **bge-m3** ONNX for embeddings (dense 1024d + sparse)
 - **Redis** for distributed locks and replay cache
 - **aiosqlite** for task state
 
-## Code Conventions
-
-- All logs: structured JSON via `python-json-logger` (see spec §12 for required fields)
-- Audit log (`audit.log`): permanent, never disabled, records every solve with evidence
-- Debug log: only when `EKRS_DEBUG=true`, rotatable, max 100MB x 5 backups
-- `shared/` is installed as editable dep (`pip install -e ../shared`) from both `rag/` and `dev_ui/`
-
 ## Environment Variables
 
-Minimal set defined in `.env.example` (spec §18). Key ones:
+Minimal set in `.env.example`:
 - `PARSER_TOKEN` — shared secret for parser↔RAG auth (≥32 chars)
 - `SHARED_STORAGE_PATH` — where parser writes JSONL, RAG reads
 - `EKRS_DEBUG` — enables debug UI at `/dev-ui` and verbose logging
 - `QDRANT_HOST`, `QDRANT_GRPC_PORT`, `REDIS_URL`
+
+## Code Conventions
+
+- All logs: structured JSON via `python-json-logger` (spec §12)
+- Audit log (`audit.log`): permanent, never disabled, records every solve with evidence
+- Debug log: only when `EKRS_DEBUG=true`, rotatable, max 100MB x 5 backups
+- `shared/` installed as editable dep from both `rag/` and `dev_ui/`
+
+## Current State (as of 2026-04-10)
+
+Phase 1 implementation complete:
+- shared/ekrs_shared/ — Pydantic models, normalizer (affine temp conversion), audit, utils
+- rag/ekrs_rag/ingestion/ — IR parser, chunker (semantic, scope-aware), pipeline
+- rag/ekrs_rag/retrieval/ — Qdrant client (Phase 1: dummy vectors)
+- rag/ekrs_rag/api/routes/ — Ingestion notify/status endpoints, metrics
+- rag/tests/ — 90 unit/integration tests, all passing
+
+Phase 2 (solver core) not yet implemented.
 
 ## Development Phases (from spec §6)
 
@@ -96,22 +87,8 @@ Minimal set defined in `.env.example` (spec §18). Key ones:
 4. System integration: idempotent callbacks, distributed locks, reconciliation
 5. Observability: Prometheus metrics, audit log, CI gate, Replay mode
 
-## Skill routing
+## Important Code Patterns
 
-When the user's request matches an available skill, ALWAYS invoke it using the Skill
-tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
-The skill has specialized workflows that produce better results than ad-hoc answers.
-
-Key routing rules:
-- Product ideas, "is this worth building", brainstorming → invoke office-hours
-- Bugs, errors, "why is this broken", 500 errors → invoke investigate
-- Ship, deploy, push, create PR → invoke ship
-- QA, test the site, find bugs → invoke qa
-- Code review, check my diff → invoke review
-- Update docs after shipping → invoke document-release
-- Weekly retro → invoke retro
-- Design system, brand → invoke design-consultation
-- Visual audit, design polish → invoke design-review
-- Architecture review → invoke plan-eng-review
-- Save progress, checkpoint, resume → invoke checkpoint
-- Code quality, health check → invoke health
+- **portion.Interval**: Use factory functions (`portion.closedopen`, `portion.openclosed`, `portion.open`) NOT `Interval(left=, right=)` kwargs
+- **Priority dedup**: Dedup key = (parameter, operator, value, unit) — excludes scope_path. Priority from scope_path prefix: national(100) > industry(80) > enterprise(60) > project(40) > reference(20)
+- **Temperature conversion**: Affine (F→C uses (F-32)*5/9, not scalar)
