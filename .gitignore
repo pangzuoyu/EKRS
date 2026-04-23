@@ -40,3 +40,4 @@ qdrant_data/
 
 # Logs
 *.log
+.claude/skills/gstack/
