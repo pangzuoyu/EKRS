@@ -129,7 +129,7 @@ class IntervalSolver:
         constraints: list[ConstraintV2],
         active_scope: Optional[list[str]] = None,
     ) -> dict:
-        """Solve constraints and return structured result (V2).
+        """Solve constraints and return structured result with multi-branch support (V2).
 
         Args:
             constraints: List of ConstraintV2 objects
@@ -138,85 +138,106 @@ class IntervalSolver:
         Returns:
             {
                 "status": "OK" | "CONFLICT" | "EMPTY",
-                "parameters": {
-                    "temperature": {
-                        "range": [lower, upper],  # None = -inf, None = +inf
-                        "unit": "°C",
-                        "confidence": 0.95,
-                        "evidence": [...],
+                "branches": {
+                    "general": {
+                        "temperature": {"range": [lower, upper], "unit": "C", ...},
                     },
-                    ...
+                    "高温环境": {
+                        "temperature": {"range": [60, 100], "unit": "C", ...},
+                    },
                 },
-                "conflicts": [...],  # only if CONFLICT
-                "trace": [...],  # every intersection step
+                "primary_branch": "general",
+                "conflicts": [...],
+                "trace": [...],
             }
         """
         if not constraints:
-            return {"status": "EMPTY", "parameters": {}, "conflicts": [], "trace": []}
+            return {
+                "status": "EMPTY",
+                "branches": {},
+                "primary_branch": None,
+                "conflicts": [],
+                "trace": [],
+            }
 
         # Convert V1 Constraint objects to V2 ConstraintV2 (backward compat)
         constraints = [_ensure_v2(c) for c in constraints]
 
-        # Group constraints by normalized parameter
-        grouped: dict[str, list[ConstraintV2]] = defaultdict(list)
+        # Step 1: Group constraints by branch key (conditions)
+        branch_groups: dict[str, list[ConstraintV2]] = defaultdict(list)
         for c in constraints:
-            param = normalize_parameter(c.parameter)
-            grouped[param].append(c)
+            branch_key = _get_branch_key(c)
+            branch_groups[branch_key].append(c)
 
-        # Process each parameter group
-        parameters: dict[str, dict] = {}
+        # Step 2: Solve each branch independently
+        branches: dict[str, dict] = {}
         all_trace: list[dict] = []
         has_conflict = False
         conflicts: list[dict] = []
 
-        for param, param_constraints in grouped.items():
-            result = _solve_parameter(param, param_constraints, active_scope)
-            all_trace.extend(_trace_entry_to_dict(t) for t in result.trace)
+        for branch_key, branch_constraints in branch_groups.items():
+            # Group by parameter within this branch
+            grouped: dict[str, list[ConstraintV2]] = defaultdict(list)
+            for c in branch_constraints:
+                param = normalize_parameter(c.parameter)
+                grouped[param].append(c)
 
-            if result.had_conflict:
-                # Constraints were applied but resulted in empty intersection
-                has_conflict = True
-                conflicts.append({
-                    "parameter": param,
-                    "interval": str(result.interval),
-                    "constraints": [
-                        {"interval": c.interval, "value_type": c.value_type, "unit": c.unit}
-                        for c in param_constraints
-                    ],
-                })
-            elif result.interval.empty or result.interval == portion.Interval():
-                # No constraints applied at all (e.g. all filtered by scope)
-                continue
-            else:
-                # Extract closed/open bounds
-                # portion uses CLOSED=0, OPEN=1 for bound types
-                if result.interval.left == portion.CLOSED:
-                    lo_val: Optional[float] = result.interval.lower
-                else:
-                    lo_val = None
-                if result.interval.right == portion.CLOSED:
-                    hi_val: Optional[float] = result.interval.upper
-                else:
-                    hi_val = None
+            branch_params: dict[str, dict] = {}
 
-                parameters[param] = {
-                    "range": [lo_val, hi_val],
-                    "unit": result.unit,
-                    "confidence": result.confidence,
-                    "evidence": [e.model_dump() for e in result.evidence],
-                }
+            for param, param_constraints in grouped.items():
+                result = _solve_parameter(param, param_constraints, active_scope)
+                all_trace.extend(_trace_entry_to_dict(t) for t in result.trace)
+
+                if result.had_conflict:
+                    has_conflict = True
+                    conflicts.append({
+                        "parameter": param,
+                        "branch": branch_key,
+                        "interval": str(result.interval),
+                        "constraints": [
+                            {"interval": c.interval, "value_type": c.value_type, "unit": c.unit}
+                            for c in param_constraints
+                        ],
+                    })
+                elif result.interval.empty or result.interval == portion.Interval():
+                    continue
+                else:
+                    if result.interval.left == portion.CLOSED:
+                        lo_val: Optional[float] = result.interval.lower
+                    else:
+                        lo_val = None
+                    if result.interval.right == portion.CLOSED:
+                        hi_val: Optional[float] = result.interval.upper
+                    else:
+                        hi_val = None
+
+                    branch_params[param] = {
+                        "range": [lo_val, hi_val],
+                        "unit": result.unit,
+                        "confidence": result.confidence,
+                        "evidence": [e.model_dump() for e in result.evidence],
+                    }
+
+            branches[branch_key] = branch_params
 
         # Determine status
-        if not parameters and not has_conflict:
+        non_empty_branches = {k: v for k, v in branches.items() if v}
+        if not non_empty_branches and not has_conflict:
             status = "EMPTY"
         elif has_conflict:
             status = "CONFLICT"
         else:
             status = "OK"
 
+        # Primary branch is "general" if it exists, otherwise first non-empty
+        primary = "general" if "general" in non_empty_branches else (
+            next(iter(non_empty_branches)) if non_empty_branches else None
+        )
+
         return {
             "status": status,
-            "parameters": parameters,
+            "branches": non_empty_branches,
+            "primary_branch": primary,
             "conflicts": conflicts,
             "trace": all_trace,
         }
@@ -225,6 +246,23 @@ class IntervalSolver:
 # =============================================================================
 # Internal helpers
 # =============================================================================
+
+
+def _get_branch_key(constraint: ConstraintV2) -> str:
+    """Get branch key from constraint conditions.
+
+    Returns "general" for no conditions, otherwise the first
+    environment/condition parameter value as the branch identifier.
+    """
+    if not constraint.conditions:
+        return "general"
+    for cond in constraint.conditions:
+        param = cond.parameter if hasattr(cond, 'parameter') else cond.get("parameter", "")
+        if param in ("environment", "condition"):
+            val = cond.value if hasattr(cond, 'value') else cond.get("value", "general")
+            if val:
+                return val
+    return "general"
 
 
 def _solve_parameter(
@@ -371,15 +409,16 @@ def _v2_interval_to_portion(interval_dict: dict) -> portion.Interval | None:
 def _scope_matches(constraint_scope: Optional[list[str]], active_scope: list[str]) -> bool:
     """Check if constraint scope matches active scope.
 
-    Active scope must be a prefix of constraint scope for a match.
-    OR constraint scope is None (unscoped = applies everywhere).
+    Constraint scope must be a prefix of active_scope (constraint applies
+    at least as broadly as the query). OR constraint scope is None
+    (unscoped = applies everywhere).
     """
     if constraint_scope is None:
         return True
-    # Active scope must match the constraint scope prefix
-    if len(active_scope) > len(constraint_scope):
+    # constraint_scope must be a prefix of active_scope
+    if len(constraint_scope) > len(active_scope):
         return False
-    return constraint_scope[:len(active_scope)] == active_scope
+    return active_scope[:len(constraint_scope)] == constraint_scope
 
 
 def _is_temperature_unit(unit: str) -> bool:

@@ -54,7 +54,8 @@ class ConstraintQuery(BaseModel):
 class ConstraintQueryResponse(BaseModel):
     """Response from /v1/constraints."""
 
-    parameters: dict
+    branches: dict  # {"general": {...}, "高温环境": {...}}
+    primary_branch: str | None  # "general" or branch key
     conflicts: list[dict] = []
     trace: list[dict] = []
     mode: str  # "single" or "multi_branch"
@@ -138,7 +139,8 @@ async def query_constraints(query: ConstraintQuery, request: Request) -> Constra
     mode = "multi_branch" if active_scope else "single"
 
     return ConstraintQueryResponse(
-        parameters=result.get("parameters", {}),
+        branches=result.get("branches", {}),
+        primary_branch=result.get("primary_branch"),
         conflicts=conflicts,
         trace=result.get("trace", []),
         mode=mode,

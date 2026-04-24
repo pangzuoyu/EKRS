@@ -147,6 +147,39 @@ def _infer_doc_type(scope_path: list[str] | None) -> str:
     return "project"
 
 
+def _extract_conditions(text: str) -> list[dict]:
+    """Extract applicability conditions from constraint text.
+
+    Looks for patterns like "在...环境下" (in ... environment).
+
+    Returns:
+        List of Condition dicts matching Pydantic model: [{"parameter": "environment", "operator": "=", "value": "高温"}]
+    """
+    import re
+
+    conditions = []
+
+    # 在...环境下 pattern
+    m = re.search(r"在([^。，,，\\s]+)环境下", text)
+    if m:
+        conditions.append({
+            "parameter": "environment",
+            "operator": "=",
+            "value": m.group(1),
+        })
+
+    # 在...条件下 pattern
+    m = re.search(r"在([^。，,，\\s]+)条件下", text)
+    if m:
+        conditions.append({
+            "parameter": "condition",
+            "operator": "=",
+            "value": m.group(1),
+        })
+
+    return conditions
+
+
 class EvidenceBuilder:
     """Builds constraint evidence chains from chunks (V2).
 
@@ -183,18 +216,12 @@ class EvidenceBuilder:
             if not intervals:
                 continue
 
+            # Extract conditions from text (scope/applicability)
+            conditions = _extract_conditions(chunk.text)
+
             # Step 3: Build V2 constraints from intervals
-            for interval in intervals:
-                # Find the matching hint for normalization
-                matching_hint = None
-                for hint in hints:
-                    if _hint_matches_interval(hint, interval):
-                        matching_hint = hint
-                        break
-
-                if not matching_hint:
-                    continue
-
+            # intervals and hints are 1:1 from parse_interval (parallel iteration)
+            for interval, matching_hint in zip(intervals, hints):
                 # Normalize parameter and unit
                 normalized_param = normalize_constraint_parameter(
                     matching_hint.parameter_hint
@@ -238,7 +265,7 @@ class EvidenceBuilder:
                     inferred=inferred,
                     lifecycle=lifecycle,
                     source=source,
-                    conditions=[],
+                    conditions=conditions,
                     scope_path=matching_hint.scope_path,
                 )
                 all_constraints.append(constraint)
@@ -270,43 +297,4 @@ class EvidenceBuilder:
                     deduped[key] = c
 
         return list(deduped.values())
-
-
-def _hint_matches_interval(hint: NumericHint, interval: dict) -> bool:
-    """Check if a hint matches an interval (approximate span overlap)."""
-    # Match by block_id if available
-    if hint.block_id:
-        # For V2, we store block_id differently - check if it matches via source
-        return True  # Simplified for now
-    # Fallback: check if hint value is within interval bounds
-    try:
-        lower = interval.get("lower")
-        upper = interval.get("upper")
-        if lower is not None and upper is not None:
-            return lower <= hint.value <= upper
-        elif lower is not None:
-            return hint.value >= lower
-        elif upper is not None:
-            return hint.value <= upper
-    except (ValueError, TypeError):
-        pass
-    return False
-
-
-def _hint_matches_constraint(hint: NumericHint, constraint: Constraint) -> bool:
-    """Check if a hint matches a constraint (approximate span overlap)."""
-    if hint.block_id and constraint.source.get("block_id"):
-        return hint.block_id == constraint.source["block_id"]
-    # Fallback: check if hint value is consistent with constraint value
-    try:
-        if isinstance(constraint.value, tuple):
-            # Range constraint
-            return any(
-                abs(hint.value - v) < 0.001 for v in constraint.value
-            )
-        else:
-            return abs(hint.value - constraint.value) < 0.001
-    except (ValueError, TypeError):
-        return False
-
 

@@ -74,7 +74,7 @@ def run_pipeline(chunk: Chunk, strict: bool = False) -> dict[str, Any]:
 
     if strict and not constraints:
         # strict=true + no constraints -> EMPTY per R6
-        return {"status": "EMPTY", "parameters": {}, "conflicts": [], "trace": []}
+        return {"status": "EMPTY", "branches": {}, "primary_branch": None, "conflicts": [], "trace": []}
 
     active_scope = chunk.scope_path if chunk.scope_path else None
     return IntervalSolver.solve(constraints, active_scope=active_scope)
@@ -255,7 +255,7 @@ def assert_solve_gate(case: dict[str, Any], result: dict[str, Any]) -> None:
     )
 
     if expected_status == "EMPTY":
-        assert result["parameters"] == {}
+        assert result["branches"] == {}
         return
 
     if expected_status == "CONFLICT":
@@ -265,7 +265,7 @@ def assert_solve_gate(case: dict[str, Any], result: dict[str, Any]) -> None:
     # Check parameter ranges via solve gate specs
     # solve gate can have: range_upper, range_lower, range_upper_celsius, range_lower_pa,
     # range_upper_m, temperature_upper, pressure_lower, active_scope
-    params = result.get("parameters", {})
+    params = result.get("branches", {}).get("general", {})
 
     # Determine which parameter to check based on gate keys or expected keys
     if "range_upper_celsius" in gate:

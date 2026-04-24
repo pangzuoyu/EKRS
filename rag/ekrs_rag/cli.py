@@ -54,14 +54,17 @@ def _make_request(api_url: str, payload: dict) -> dict:
 def _print_response(data: dict) -> None:
     """Print the API response in a human-readable format."""
     mode = data.get("mode", "unknown")
-    parameters = data.get("parameters", {})
+    branches = data.get("branches", {})
     conflicts = data.get("conflicts", [])
     trace = data.get("trace", [])
 
     print(f"[mode: {mode}]")
-    print(f"[parameters: {len(parameters)} items]")
-    for key, val in parameters.items():
-        print(f"  {key}: {val}")
+    print(f"[branches: {len(branches)} items]")
+    for branch_key, branch_params in branches.items():
+        marker = " *" if branch_key == data.get("primary_branch") else ""
+        print(f"  [{branch_key}]{marker}")
+        for key, val in branch_params.items():
+            print(f"    {key}: {val}")
 
     if conflicts:
         print(f"\n[conflicts: {len(conflicts)}]")
