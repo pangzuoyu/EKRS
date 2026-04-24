@@ -12,7 +12,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from ekrs_rag.constraint_engine.evidence_builder import EvidenceBuilder
 from ekrs_rag.constraint_engine.solver import IntervalSolver
@@ -55,10 +55,18 @@ class ConstraintQueryResponse(BaseModel):
     """Response from /v1/constraints."""
 
     branches: dict  # {"general": {...}, "高温环境": {...}}
-    primary_branch: str | None  # "general" or branch key
+    primary_branch: str | None = None  # "general" or branch key
     conflicts: list[dict] = []
     trace: list[dict] = []
     mode: str  # "single" or "multi_branch"
+
+    @model_validator(mode="after")
+    def _validate_primary_branch(self) -> "ConstraintQueryResponse":
+        if self.primary_branch is not None and self.primary_branch not in self.branches:
+            raise ValueError(
+                f"primary_branch '{self.primary_branch}' must be one of the branch keys: {list(self.branches.keys())}"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
