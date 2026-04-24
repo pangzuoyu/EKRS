@@ -269,3 +269,52 @@ class TestPriorityStructure:
         c = constraints[0]
         assert "recency_score" in c.priority
         assert "authority_score" in c.priority
+
+
+class TestProvisionIdDerivation:
+    """Tests for provision_id derivation from heading_path clause numbers."""
+
+    def test_provision_id_from_scope_path(self):
+        """Provision_id extracted from scope_path clause number pattern like '5.2.3'."""
+        chunk = Chunk(
+            text="温度不得超过80°C",
+            scope_path=["national", "GB", "第5.2.3条"],
+            source_block_ids=["b1"],
+            page_numbers=[1],
+            doc_hash="test-provision",
+        )
+        constraints = EvidenceBuilder.build([chunk])
+        temp_constraints = [c for c in constraints if c.parameter == "temperature"]
+        assert len(temp_constraints) >= 1
+        c = temp_constraints[0]
+        assert c.source.get("provision_id") == "5.2.3"
+
+    def test_provision_id_no_match(self):
+        """No provision_id when scope_path has no clause number."""
+        chunk = Chunk(
+            text="温度不得超过80°C",
+            scope_path=["national", "GB"],
+            source_block_ids=["b1"],
+            page_numbers=[1],
+            doc_hash="test-no-provision",
+        )
+        constraints = EvidenceBuilder.build([chunk])
+        temp_constraints = [c for c in constraints if c.parameter == "temperature"]
+        assert len(temp_constraints) >= 1
+        c = temp_constraints[0]
+        assert c.source.get("provision_id") is None
+
+    def test_provision_id_nested_paragraph(self):
+        """Provision_id extracted from deeply nested scope_path."""
+        chunk = Chunk(
+            text="压力不低于1.0MPa",
+            scope_path=["industry", "JB", "第10.1.2a条"],
+            source_block_ids=["b1"],
+            page_numbers=[1],
+            doc_hash="test-nested",
+        )
+        constraints = EvidenceBuilder.build([chunk])
+        pressure_constraints = [c for c in constraints if c.parameter == "pressure"]
+        assert len(pressure_constraints) >= 1
+        c = pressure_constraints[0]
+        assert c.source.get("provision_id") == "10.1.2"
