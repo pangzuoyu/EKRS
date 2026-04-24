@@ -1,7 +1,7 @@
 """Dense-only retriever for EKRS RAG.
 
 Phase 2b: Embeds queries with BGESmall and searches Qdrant with dense vectors.
-Scope filtering is applied post-retrieval.
+Phase 3: Scope-aware ranking (national > industry > enterprise > project).
 Numeric hints are extracted from retrieved chunks for downstream solving.
 """
 
@@ -20,17 +20,31 @@ from ekrs_rag.retrieval.qdrant_client import QdrantManager
 logger = logging.getLogger(__name__)
 
 
+# Scope priority: national > industry > enterprise > project > reference
+_SCOPE_PRIORITY_MAP = {
+    "national": 100,
+    "industry": 80,
+    "enterprise": 60,
+    "project": 40,
+    "reference": 20,
+}
+
+
 @dataclass
 class RetrievalResult:
     """Result of a retrieval query.
 
     Attributes:
         chunks: List of retrieved Chunk objects, filtered by scope if applicable.
-        scores: Parallel list of cosine similarity scores (0.0-1.0).
+        vector_scores: Parallel list of cosine similarity scores (0.0-1.0).
+        scope_scores: Parallel list of scope priority scores (0.0-1.0).
+        final_scores: Composite scores = vector * (1 + scope/100).
     """
 
     chunks: List[Chunk]
-    scores: List[float]
+    vector_scores: List[float]
+    scope_scores: List[float]
+    final_scores: List[float]
 
 
 class EKRSRetriever:
@@ -76,7 +90,7 @@ class EKRSRetriever:
         query_vectors = self._embedder.encode([query])
         if not query_vectors:
             logger.warning("Embedder returned no vectors for query")
-            return RetrievalResult(chunks=[], scores=[])
+            return RetrievalResult(chunks=[], vector_scores=[], scope_scores=[], final_scores=[])
 
         query_vector = query_vectors[0]
 
@@ -84,13 +98,13 @@ class EKRSRetriever:
         hits = self._qdrant.search(query_vector=query_vector, top_k=top_k)
 
         if not hits:
-            return RetrievalResult(chunks=[], scores=[])
+            return RetrievalResult(chunks=[], vector_scores=[], scope_scores=[], final_scores=[])
 
         payloads, raw_scores = zip(*hits)
 
         # Step 3: Build Chunk objects from payloads
         chunks: List[Chunk] = []
-        scores: List[float] = []
+        vector_scores: List[float] = []
 
         for payload, score in zip(payloads, raw_scores):
             # Reconstruct Chunk from Qdrant payload
@@ -118,7 +132,12 @@ class EKRSRetriever:
             chunk.numeric_hints = hints
 
             chunks.append(chunk)
-            scores.append(score)
+            vector_scores.append(score)
+
+        # Step 6: Scope-aware ranking (composite score)
+        chunks, vector_scores, scope_scores, final_scores = self._rank_by_scope(
+            chunks, vector_scores
+        )
 
         logger.debug(
             "Retrieved %d chunks (of %d hits), scope=%s",
@@ -127,7 +146,47 @@ class EKRSRetriever:
             active_scope,
         )
 
-        return RetrievalResult(chunks=chunks, scores=scores)
+        return RetrievalResult(
+            chunks=chunks,
+            vector_scores=vector_scores,
+            scope_scores=scope_scores,
+            final_scores=final_scores,
+        )
+
+    @staticmethod
+    def _scope_priority(chunk: Chunk) -> float:
+        """Get scope priority score for a chunk.
+
+        Returns normalized priority (0.0-1.0) based on first element of scope_path.
+        """
+        if not chunk.scope_path:
+            return 0.0
+        first = chunk.scope_path[0].lower()
+        return _SCOPE_PRIORITY_MAP.get(first, 40) / 100.0
+
+    def _rank_by_scope(
+        self, chunks: List[Chunk], vector_scores: List[float]
+    ) -> tuple[List[Chunk], List[float], List[float], List[float]]:
+        """Rank chunks by composite score: vector_similarity * (1 + scope_priority).
+
+        Returns (sorted_chunks, sorted_vector_scores, scope_scores, final_scores)
+        sorted by final_scores descending.
+        """
+        if not chunks:
+            return [], [], [], []
+
+        scope_scores = [self._scope_priority(c) for c in chunks]
+        # final = vec * (1 + scope/100)
+        final_scores = [
+            vec * (1 + scope) for vec, scope in zip(vector_scores, scope_scores)
+        ]
+
+        # Sort descending by final_scores, keeping parallel lists aligned
+        combined = list(zip(chunks, vector_scores, scope_scores, final_scores))
+        combined.sort(key=lambda x: x[3], reverse=True)
+
+        sorted_chunks, sorted_vec, sorted_scope, sorted_final = zip(*combined)
+        return list(sorted_chunks), list(sorted_vec), list(sorted_scope), list(sorted_final)
 
     @staticmethod
     def _scope_matches(chunk_scope: List[str], active_scope: List[str]) -> bool:

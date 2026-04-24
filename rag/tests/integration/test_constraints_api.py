@@ -44,7 +44,12 @@ class MockRetriever:
         self._chunks = chunks
 
     def retrieve(self, query: str, top_k: int = 40, active_scope=None) -> RetrievalResult:
-        return RetrievalResult(chunks=self._chunks, scores=[1.0] * len(self._chunks))
+        return RetrievalResult(
+            chunks=self._chunks,
+            vector_scores=[1.0] * len(self._chunks),
+            scope_scores=[1.0] * len(self._chunks),
+            final_scores=[1.0] * len(self._chunks),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +230,7 @@ class TestStrictMode:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["parameters"]["temperature"]["range"][1] == 80.0
+        assert data["branches"]["general"]["temperature"]["range"][1] == 80.0
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +265,7 @@ class TestHardConflict:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert "parameters" in data
+        assert "branches" in data
 
 
 # ---------------------------------------------------------------------------
