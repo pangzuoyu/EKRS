@@ -191,11 +191,11 @@ def temperature_affine_constraints() -> list[Constraint]:
 
 
 class TestSolveEmpty:
-    def test_empty_input_returns_empty_parameters(self, empty_constraints):
-        """Empty constraint list should return EMPTY status with no parameters."""
+    def test_empty_input_returns_empty_branches(self, empty_constraints):
+        """Empty constraint list should return EMPTY status with no branches."""
         result = IntervalSolver.solve(empty_constraints)
         assert result["status"] == "EMPTY"
-        assert result["parameters"] == {}
+        assert result["branches"] == {}
         assert result["conflicts"] == []
         assert result["trace"] == []
 
@@ -205,8 +205,8 @@ class TestSolveSingle:
         """<= constraint produces upper-bounded interval"""
         result = IntervalSolver.solve(single_le_constraint)
         assert result["status"] == "OK"
-        assert "temperature" in result["parameters"]
-        temp = result["parameters"]["temperature"]
+        assert "temperature" in result["branches"]["general"]
+        temp = result["branches"]["general"]["temperature"]
         assert temp["range"][0] is None  # no lower bound
         assert temp["range"][1] == 80.0
         assert temp["unit"] == "°C"
@@ -216,7 +216,7 @@ class TestSolveSingle:
         """>= constraint produces lower-bounded interval"""
         result = IntervalSolver.solve(single_ge_constraint)
         assert result["status"] == "OK"
-        temp = result["parameters"]["temperature"]
+        temp = result["branches"]["general"]["temperature"]
         assert temp["range"][0] == 10.0
         assert temp["range"][1] is None  # no upper bound
 
@@ -224,7 +224,7 @@ class TestSolveSingle:
         """range constraint produces bounded interval"""
         result = IntervalSolver.solve(range_constraint)
         assert result["status"] == "OK"
-        temp = result["parameters"]["temperature"]
+        temp = result["branches"]["general"]["temperature"]
         assert temp["range"][0] == 10.0
         assert temp["range"][1] == 80.0
 
@@ -244,11 +244,11 @@ class TestSolveMultiParameter:
         """Multiple parameters should all appear in result"""
         result = IntervalSolver.solve(multi_parameter_constraints)
         assert result["status"] == "OK"
-        assert "temperature" in result["parameters"]
-        assert "pressure" in result["parameters"]
-        temp = result["parameters"]["temperature"]
+        assert "temperature" in result["branches"]["general"]
+        assert "pressure" in result["branches"]["general"]
+        temp = result["branches"]["general"]["temperature"]
         assert temp["range"][1] == 80.0
-        press = result["parameters"]["pressure"]
+        press = result["branches"]["general"]["pressure"]
         assert press["range"][0] == 1.0
 
 
@@ -257,7 +257,7 @@ class TestPriorityOrdering:
         """When same parameter has multiple constraints, highest priority wins"""
         result = IntervalSolver.solve(priority_override_constraints)
         assert result["status"] == "OK"
-        temp = result["parameters"]["temperature"]
+        temp = result["branches"]["general"]["temperature"]
         # NATIONAL(100) << REFERENCE(20), so 60°C should be the upper bound
         assert temp["range"][1] == 60.0
 
@@ -268,7 +268,7 @@ class TestScopeFilter:
         # Filter to only national/GB scope
         result = IntervalSolver.solve(scope_filter_constraints, active_scope=["national", "GB"])
         assert result["status"] == "OK"
-        temp = result["parameters"]["temperature"]
+        temp = result["branches"]["general"]["temperature"]
         # Only the <=80°C constraint should be applied (from GB scope)
         assert temp["range"][1] == 80.0
         assert temp["range"][0] is None  # no lower bound from this constraint
@@ -287,7 +287,7 @@ class TestTemperatureAffine:
         """°F constraints should be converted using affine transformation"""
         result = IntervalSolver.solve(temperature_affine_constraints)
         assert result["status"] == "OK"
-        temp = result["parameters"]["temperature"]
+        temp = result["branches"]["general"]["temperature"]
         # 80°C = (80-32)*9/5 = 176°F — but we check the conversion is affine
         # The constraint is 176°F, so upper bound should be (176-32)*5/9 = 80°C
         assert abs(temp["range"][1] - 80.0) < 0.01

@@ -318,3 +318,101 @@ class TestProvisionIdDerivation:
         assert len(pressure_constraints) >= 1
         c = pressure_constraints[0]
         assert c.source.get("provision_id") == "10.1.2"
+
+
+class TestConditionsExtraction:
+    """Tests for conditions extraction from constraint text."""
+
+    def test_conditions_extracted_from_text(self):
+        """Conditions like '在...环境下' are extracted."""
+        chunk = Chunk(
+            text="在高温环境下，温度不得超过100°C",
+            scope_path=["national", "GB"],
+            source_block_ids=["b1"],
+            page_numbers=[1],
+            doc_hash="test-conditions",
+        )
+        constraints = EvidenceBuilder.build([chunk])
+        assert len(constraints) >= 1
+        c = constraints[0]
+        assert len(c.conditions) >= 1
+        assert c.conditions[0].parameter == "environment"
+        assert c.conditions[0].value == "高温"
+
+    def test_no_conditions_general(self):
+        """No conditions -> general branch."""
+        chunk = Chunk(
+            text="温度不得超过80°C",
+            scope_path=["national", "GB"],
+            source_block_ids=["b1"],
+            page_numbers=[1],
+            doc_hash="test-general",
+        )
+        constraints = EvidenceBuilder.build([chunk])
+        assert len(constraints) >= 1
+        c = constraints[0]
+        assert len(c.conditions) == 0
+
+
+class TestMultiBranchSolver:
+    """Tests for multi-branch solver output."""
+
+    def test_solver_returns_branches(self):
+        """Solver returns branches dict with primary_branch."""
+        from ekrs_rag.constraint_engine.solver import IntervalSolver
+        from ekrs_shared.models import ConstraintV2
+
+        constraints = [
+            ConstraintV2(
+                parameter="temperature",
+                value_type="interval",
+                interval={"lower": None, "upper": 80.0, "lower_inclusive": True, "upper_inclusive": True},
+                unit="°C",
+                inferred=False,
+                priority={"explicit_level": 100, "recency_score": 0.0, "authority_score": 0.0},
+                scope_path=["national", "GB"],
+                conditions=[],
+            )
+        ]
+        result = IntervalSolver.solve(constraints)
+        assert "branches" in result
+        assert "general" in result["branches"]
+        assert result["primary_branch"] == "general"
+
+    def test_solver_multi_branch_different_conditions(self):
+        """Solver separates constraints by branch (conditions)."""
+        from ekrs_rag.constraint_engine.solver import IntervalSolver
+        from ekrs_shared.models import ConstraintV2
+
+        constraints = [
+            # General constraint
+            ConstraintV2(
+                parameter="temperature",
+                value_type="interval",
+                interval={"lower": None, "upper": 80.0, "lower_inclusive": True, "upper_inclusive": True},
+                unit="°C",
+                inferred=False,
+                priority={"explicit_level": 100, "recency_score": 0.0, "authority_score": 0.0},
+                scope_path=["national", "GB"],
+                conditions=[],
+            ),
+            # High temp constraint
+            ConstraintV2(
+                parameter="temperature",
+                value_type="interval",
+                interval={"lower": 60.0, "upper": 120.0, "lower_inclusive": True, "upper_inclusive": True},
+                unit="°C",
+                inferred=False,
+                priority={"explicit_level": 100, "recency_score": 0.0, "authority_score": 0.0},
+                scope_path=["national", "GB"],
+                conditions=[{"parameter": "environment", "operator": "=", "value": "高温"}],
+            ),
+        ]
+        result = IntervalSolver.solve(constraints)
+        assert "branches" in result
+        assert "general" in result["branches"]
+        assert "高温" in result["branches"]
+        assert result["branches"]["general"]["temperature"]["range"][1] == 80.0
+        assert result["branches"]["高温"]["temperature"]["range"][0] == 60.0
+        assert result["branches"]["高温"]["temperature"]["range"][1] == 120.0
+        assert result["primary_branch"] == "general"
