@@ -38,13 +38,19 @@ class RetrievalResult:
         chunks: List of retrieved Chunk objects, filtered by scope if applicable.
         vector_scores: Parallel list of cosine similarity scores (0.0-1.0).
         scope_scores: Parallel list of scope priority scores (0.0-1.0).
-        final_scores: Composite scores = vector * (1 + scope/100).
+        final_scores: Composite scores = vector * (1 + scope), where scope
+            is already normalized to 0.0-1.0 from _scope_priority().
     """
 
     chunks: List[Chunk]
     vector_scores: List[float]
     scope_scores: List[float]
     final_scores: List[float]
+
+    @property
+    def scores(self) -> List[float]:
+        """Backward-compat alias — returns vector_scores."""
+        return self.vector_scores
 
 
 class EKRSRetriever:
@@ -167,7 +173,11 @@ class EKRSRetriever:
     def _rank_by_scope(
         self, chunks: List[Chunk], vector_scores: List[float]
     ) -> tuple[List[Chunk], List[float], List[float], List[float]]:
-        """Rank chunks by composite score: vector_similarity * (1 + scope_priority).
+        """Rank chunks by composite score: vec * (1 + scope).
+
+        scope is already normalized to 0.0-1.0 by _scope_priority().
+        For example: national (scope=1.0) + vec=1.0 -> final=2.0;
+                     project (scope=0.4) + vec=1.0 -> final=1.4.
 
         Returns (sorted_chunks, sorted_vector_scores, scope_scores, final_scores)
         sorted by final_scores descending.

@@ -96,6 +96,9 @@ def query(args: argparse.Namespace) -> None:
             print(f"Error: Invalid --context JSON: {e}", file=sys.stderr)
             sys.exit(1)
 
+    if args.scope_path:
+        context["scope_path"] = args.scope_path
+
     payload = _build_payload(
         query=args.query,
         context=context,
@@ -136,6 +139,15 @@ def cli() -> None:
         type=int,
         default=40,
         help="Number of chunks to retrieve (default: 40)",
+    )
+    query_parser.add_argument(
+        "--scope-path",
+        type=str,
+        action="append",
+        dest="scope_path",
+        default=None,
+        help="Scope path prefix filter, e.g. 'national' or 'national GB'. "
+             "Can be specified multiple times for hierarchical scopes.",
     )
     query_parser.add_argument(
         "--json",
