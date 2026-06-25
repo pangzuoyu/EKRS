@@ -118,3 +118,23 @@ def test_claim_for_retry_respects_eligibility(repo):
     ok_c2 = repo.claim_for_retry("req_c", max_attempts=3, threshold_sec=60.0)
     assert ok_c2 is False
     assert repo.get("req_c")["attempts"] == 1  # attempts 不再被自增
+
+
+def test_mark_running_sets_status(repo):
+    """mark_running 是 mark_status 的薄包装 — 仍需覆盖以免被重构掉."""
+    repo.try_insert("req1", "doc_a")
+    repo.mark_running("req1")
+    assert repo.get("req1")["status"] == "RUNNING"
+
+
+def test_close_resets_conn_and_is_idempotent(tmp_path):
+    """close 应关闭连接并把 _conn 重置为 None, 再次调用是 no-op."""
+    db = str(tmp_path / "close.db")
+    r = TaskRepo(db_path=db)
+    r.init()
+    assert r._conn is not None
+    r.close()
+    assert r._conn is None
+    # 再次调用不应抛错
+    r.close()
+    assert r._conn is None
