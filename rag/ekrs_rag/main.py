@@ -8,16 +8,20 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
+import redis.asyncio as aioredis
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 
 from .api.routes import constraints, ingestion, metrics
+from .concurrency.compensation import CompensationScanner
+from .concurrency.redis_lock import RedisLock
 from .core.config import settings
 from .core.logging import setup_logging
 from .ingestion.pipeline import IngestionPipeline
 from .retrieval.embedder import BGESmallEmbedder
 from .retrieval.qdrant_client import QdrantManager
 from .retrieval.retriever import EKRSRetriever
+from .storage.task_repo import TaskRepo
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +67,29 @@ async def lifespan(app: FastAPI):
 
     _pipeline = IngestionPipeline(_qdrant, settings.SHARED_STORAGE_PATH)
     ingestion.set_pipeline(_pipeline)
+
+    # Phase 4: redis, task_repo, lock, compensation
+    _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+    _redis_lock = RedisLock(_redis)
+    _task_repo = TaskRepo(db_path=settings.TASK_DB_PATH)
+    _task_repo.init()
+    app.state.redis = _redis
+    app.state.redis_lock = _redis_lock
+    app.state.task_repo = _task_repo
+
+    async def _compensation_handler(task: dict) -> None:
+        """重试入队: 重新触发 ingest (需 pipeline 支持重试入口)."""
+        # TODO: wire to IngestionPipeline.ingest via callback_url (Task 7)
+        logger.warning("Compensation handler not yet wired for %s", task["request_id"])
+
+    _scanner = CompensationScanner(
+        task_repo=_task_repo,
+        handler=_compensation_handler,
+        max_attempts=settings.MAX_ATTEMPTS,
+        threshold_sec=60.0,
+    )
+    retried = await _scanner.scan()
+    logger.info("Compensation scan completed: retried=%d", retried)
 
     yield
 

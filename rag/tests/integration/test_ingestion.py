@@ -29,19 +29,28 @@ def mock_qdrant():
 
 @pytest.fixture
 def client(mock_qdrant):
-    """Create TestClient with mocked Qdrant."""
+    """Create TestClient with mocked Qdrant + Phase 4 components."""
+    mock_task_repo = MagicMock()
+    mock_task_repo.init.return_value = None
+    mock_redis = MagicMock()
+    mock_scanner = MagicMock()
+    mock_scanner.scan = AsyncMock(return_value=0)
     with patch("ekrs_rag.main.QdrantManager", return_value=mock_qdrant):
         with patch("ekrs_rag.main.setup_logging"):
-            from ekrs_rag.main import app
-            # Re-init pipeline with mock
-            from ekrs_rag.ingestion.pipeline import IngestionPipeline
-            from ekrs_rag.core.config import settings
-            pipeline = IngestionPipeline(mock_qdrant, settings.SHARED_STORAGE_PATH)
-            from ekrs_rag.api.routes import ingestion
-            ingestion.set_pipeline(pipeline)
+            with patch("ekrs_rag.main.TaskRepo", return_value=mock_task_repo):
+                with patch("ekrs_rag.main.aioredis.from_url", return_value=mock_redis):
+                    with patch("ekrs_rag.main.RedisLock"):
+                        with patch("ekrs_rag.main.CompensationScanner", return_value=mock_scanner):
+                            from ekrs_rag.main import app
+                            # Re-init pipeline with mock
+                            from ekrs_rag.ingestion.pipeline import IngestionPipeline
+                            from ekrs_rag.core.config import settings
+                            pipeline = IngestionPipeline(mock_qdrant, settings.SHARED_STORAGE_PATH)
+                            from ekrs_rag.api.routes import ingestion
+                            ingestion.set_pipeline(pipeline)
 
-            with TestClient(app) as c:
-                yield c
+                            with TestClient(app) as c:
+                                yield c
 
 
 @pytest.fixture

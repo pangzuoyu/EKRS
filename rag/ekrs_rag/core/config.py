@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     # Distributed lock
     INGESTION_LOCK_TIMEOUT: int = 300  # seconds
 
+    # Phase 4: 分布式锁 & 任务表
+    LOCK_TTL_SEC: int = 300
+    MAX_ATTEMPTS: int = 3
+    TASK_DB_PATH: str = "/var/lib/ekrs/tasks.db"
+
     # Server
     HOST: str = "0.0.0.0"
     PORT: int = 8000
