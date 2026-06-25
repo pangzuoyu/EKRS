@@ -29,6 +29,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-cov",
     "httpx",  # for TestClient async
+    "fakeredis>=2.20",
 ]
 
 [tool.pytest.ini_options]
