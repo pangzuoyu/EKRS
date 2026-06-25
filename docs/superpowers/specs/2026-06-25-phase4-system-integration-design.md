@@ -60,8 +60,21 @@ CREATE INDEX idx_tasks_status_updated ON tasks(status, updated_at);
 - Redlock 多实例 → 单 Redis 够用
 - 状态机一致性检查 → 启动扫描器 + aiosqlite UNIQUE 已覆盖
 
+### Multi-instance deployment note
+Phase 4 的 `TaskRepo` 使用本地 SQLite 文件 (默认 `/var/lib/ekrs/tasks.db`).
+在多 Pod 部署中, 每个 Pod 拥有各自的 SQLite, 因此 UNIQUE `request_id`
+约束仅在单个 Pod 内提供幂等去重. 跨实例的并发摄取防御由 Redis 分布式锁
+(`lock:ingest:{doc_hash}`) 提供: 同一时刻只有一个 Pod 能持有锁, 因此只有
+该 Pod 的 `try_insert` 会成功, 其余 Pod 会在 acquire 时收到 None. 跨实例
+在数据库层面的幂等去重 (例如共享 Postgres) 显式排除在 Phase 4 范围之外.
+
 ## 未决问题
 1. Redis 连接是 lazy-init 还是 startup eager-init? (倾向 eager + 健康检查)
 2. tasks 表清理策略: 永久保留还是 7 天滚动? (倾向永久, 容量小)
 3. callback 失败重试是否也走 compensation 任务表? (倾向单独 callback_retry 表)
 4. 锁 TTL 300s 是否覆盖大型文档? (需实测, 可能需按 doc_size 动态)
+5. 是否应将 tasks 表迁移到共享数据库 (Postgres/MySQL) 以实现真正的跨实例
+   幂等? 当前 Redis 锁 + 每 Pod SQLite 的组合是否足够?
+6. Phase 4.5: 扩展 tasks 表结构, 增加 `output_path TEXT, callback_url TEXT,
+   trace_id TEXT, version INTEGER` 字段以支持真实 handler 的重放. 需要
+   schema migration; 当前生产环境无数据, 未来变更成本低.
