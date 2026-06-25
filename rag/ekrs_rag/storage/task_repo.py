@@ -77,20 +77,34 @@ class TaskRepo:
         ).fetchone()
         return int(row["attempts"]) if row else 0
 
-    def claim_for_retry(self, request_id: str) -> None:
+    def claim_for_retry(
+        self,
+        request_id: str,
+        max_attempts: int,
+        threshold_sec: float,
+    ) -> bool:
         """原子地将任务置为 RUNNING 并增加 attempts, 不更新 updated_at.
+
+        SQL 内同时校验 status / attempts / updated_at, 杜绝两个并发 scan 拿到
+        同一行都进入 handler 路径 (双 claim). 返回 rowcount>0 表示成功, 调用方
+        拿到 False 应当当作 "输掉竞争 / 行已不在窗口内" 而跳过该任务.
 
         不更新 updated_at 的关键原因: 失败时 mark_failed_with_error 也不会更新
         updated_at, 这样下次 scan() 通过 updated_at < now - threshold 仍能挑出
         该任务, 真正实现 max_attempts 次重试. 一次 SQL = 一次事务, 避免
         mark_running 与 increment_attempts 之间的崩溃导致任务永久 RUNNING.
         """
-        self._c().execute(
+        threshold = time.time() - threshold_sec
+        cur = self._c().execute(
             "UPDATE tasks SET status='RUNNING', attempts=attempts+1 "
-            "WHERE request_id=?",
-            (request_id,),
+            "WHERE request_id=? "
+            "AND status IN ('PENDING','FAILED') "
+            "AND attempts < ? "
+            "AND updated_at < ?",
+            (request_id, max_attempts, threshold),
         )
         self._c().commit()
+        return cur.rowcount > 0
 
     def mark_failed_with_error(self, request_id: str, error: str) -> None:
         """记录失败, 追加错误到 last_error (保留历史), 不刷新 updated_at.

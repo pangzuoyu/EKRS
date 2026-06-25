@@ -28,13 +28,17 @@ class CompensationScanner:
         tasks = self._repo.pending_tasks_older_than(self._threshold)
         retried = 0
         for task in tasks:
-            if task["attempts"] >= self._max:
-                logger.warning("Skip task %s: max attempts reached", task["request_id"])
+            # SQL 内再次校验 status / attempts / updated_at, 避免两个并发 scan
+            # 拿到同一行都进入 handler. claim 失败 = 输掉竞争 / 行已不在窗口内,
+            # 当作 "被别人接管了" 静默跳过.
+            claimed = self._repo.claim_for_retry(
+                task["request_id"],
+                max_attempts=self._max,
+                threshold_sec=self._threshold,
+            )
+            if not claimed:
+                logger.warning("Skip task %s: lost claim race", task["request_id"])
                 continue
-            # 原子地把任务置为 RUNNING 并 attempts+=1, 不刷 updated_at.
-            # 失败时 mark_failed_with_error 也不刷 updated_at, 任务能再被
-            # pending_tasks_older_than 挑出重试, 直到 attempts >= max_attempts.
-            self._repo.claim_for_retry(task["request_id"])
             try:
                 await self._handler(task)
                 self._repo.mark_status(task["request_id"], "COMPLETED")
