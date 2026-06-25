@@ -34,7 +34,11 @@ class TaskRepo:
 
     def init(self) -> None:
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self._db_path)
+        # check_same_thread=False: SQLite is shared across FastAPI worker threads
+        # (route handlers and BackgroundTasks). SQLite serializes writes via its
+        # own file lock. Concurrent reads may be inconsistent, which is
+        # acceptable for an idempotency/status table that is rarely read.
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
