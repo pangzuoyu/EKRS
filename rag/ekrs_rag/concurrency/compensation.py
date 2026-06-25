@@ -31,13 +31,15 @@ class CompensationScanner:
             if task["attempts"] >= self._max:
                 logger.warning("Skip task %s: max attempts reached", task["request_id"])
                 continue
-            self._repo.mark_running(task["request_id"])
-            self._repo.increment_attempts(task["request_id"])
+            # 原子地把任务置为 RUNNING 并 attempts+=1, 不刷 updated_at.
+            # 失败时 mark_failed_with_error 也不刷 updated_at, 任务能再被
+            # pending_tasks_older_than 挑出重试, 直到 attempts >= max_attempts.
+            self._repo.claim_for_retry(task["request_id"])
             try:
                 await self._handler(task)
                 self._repo.mark_status(task["request_id"], "COMPLETED")
                 retried += 1
             except Exception as e:
                 logger.exception("Compensation handler failed for %s", task["request_id"])
-                self._repo.mark_status(task["request_id"], "FAILED", error=str(e))
+                self._repo.mark_failed_with_error(task["request_id"], str(e))
         return retried

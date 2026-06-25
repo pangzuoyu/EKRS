@@ -77,6 +77,38 @@ class TaskRepo:
         ).fetchone()
         return int(row["attempts"]) if row else 0
 
+    def claim_for_retry(self, request_id: str) -> None:
+        """原子地将任务置为 RUNNING 并增加 attempts, 不更新 updated_at.
+
+        不更新 updated_at 的关键原因: 失败时 mark_failed_with_error 也不会更新
+        updated_at, 这样下次 scan() 通过 updated_at < now - threshold 仍能挑出
+        该任务, 真正实现 max_attempts 次重试. 一次 SQL = 一次事务, 避免
+        mark_running 与 increment_attempts 之间的崩溃导致任务永久 RUNNING.
+        """
+        self._c().execute(
+            "UPDATE tasks SET status='RUNNING', attempts=attempts+1 "
+            "WHERE request_id=?",
+            (request_id,),
+        )
+        self._c().commit()
+
+    def mark_failed_with_error(self, request_id: str, error: str) -> None:
+        """记录失败, 追加错误到 last_error (保留历史), 不刷新 updated_at.
+
+        updated_at 不刷新, 是为了让 pending_tasks_older_than 的窗口过滤
+        能继续命中此任务以触发重试. 不会覆盖已有 last_error, 用 " | " 拼接.
+        """
+        row = self._c().execute(
+            "SELECT last_error FROM tasks WHERE request_id=?", (request_id,)
+        ).fetchone()
+        prior = row["last_error"] if row and row["last_error"] else ""
+        merged = f"{prior} | {error}" if prior else error
+        self._c().execute(
+            "UPDATE tasks SET status='FAILED', last_error=? WHERE request_id=?",
+            (merged, request_id),
+        )
+        self._c().commit()
+
     def get(self, request_id: str) -> dict[str, Any] | None:
         row = self._c().execute(
             "SELECT * FROM tasks WHERE request_id=?", (request_id,)
