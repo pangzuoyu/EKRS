@@ -32,6 +32,10 @@ def client(mock_qdrant):
     """Create TestClient with mocked Qdrant + Phase 4 components."""
     mock_task_repo = MagicMock()
     mock_task_repo.init.return_value = None
+    mock_task_repo.try_insert.return_value = True
+    mock_redis_lock = MagicMock()
+    mock_redis_lock.acquire = AsyncMock(return_value="lock-token")
+    mock_redis_lock.release = AsyncMock(return_value=True)
     mock_redis = MagicMock()
     mock_scanner = MagicMock()
     mock_scanner.scan = AsyncMock(return_value=0)
@@ -39,7 +43,7 @@ def client(mock_qdrant):
         with patch("ekrs_rag.main.setup_logging"):
             with patch("ekrs_rag.main.TaskRepo", return_value=mock_task_repo):
                 with patch("ekrs_rag.main.aioredis.from_url", return_value=mock_redis):
-                    with patch("ekrs_rag.main.RedisLock"):
+                    with patch("ekrs_rag.main.RedisLock", return_value=mock_redis_lock):
                         with patch("ekrs_rag.main.CompensationScanner", return_value=mock_scanner):
                             from ekrs_rag.main import app
                             # Re-init pipeline with mock
@@ -48,6 +52,8 @@ def client(mock_qdrant):
                             pipeline = IngestionPipeline(mock_qdrant, settings.SHARED_STORAGE_PATH)
                             from ekrs_rag.api.routes import ingestion
                             ingestion.set_pipeline(pipeline)
+                            ingestion.set_redis_lock(mock_redis_lock)
+                            ingestion.set_task_repo(mock_task_repo)
 
                             with TestClient(app) as c:
                                 yield c
