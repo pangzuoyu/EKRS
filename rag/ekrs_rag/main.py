@@ -76,6 +76,8 @@ async def lifespan(app: FastAPI):
     app.state.redis = _redis
     app.state.redis_lock = _redis_lock
     app.state.task_repo = _task_repo
+    ingestion.set_redis_lock(_redis_lock)
+    ingestion.set_task_repo(_task_repo)
 
     async def _compensation_handler(task: dict) -> None:
         """重试入队: 重新触发 ingest (需 pipeline 支持重试入口)."""
