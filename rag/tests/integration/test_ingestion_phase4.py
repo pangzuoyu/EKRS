@@ -154,3 +154,23 @@ def test_compensation_picks_up_old_failed(client):
     assert final is not None
     assert final["status"] == "COMPLETED"
     assert final["attempts"] == 3
+
+
+def test_lock_acquire_none_skips_try_insert(client):
+    """回归测试 (I1): 当 Redis 锁已被持有时, /notify 必须直接返回 in_flight,
+    不能在 tasks 表里留下未完成的 PENDING 行."""
+    c, repo, lock, _pipeline = client
+
+    token = asyncio.run(lock.acquire("lock:ingest:doc_d", ttl_sec=10))
+    assert token is not None  # sanity: lock was actually acquired
+
+    headers = {"X-Parser-Token": PARSER_TOKEN}
+    payload = _notify_payload(doc_hash="doc_d", trace_id="t_d")
+
+    r = c.post("/v1/ingestion/notify", json=payload, headers=headers)
+    assert r.status_code == 202
+    assert r.json()["status"] == "in_flight"
+
+    # 关键断言: tasks 表不应被本次 notify 写入任何行
+    rows = repo._conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()
+    assert rows["n"] == 0

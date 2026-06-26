@@ -77,17 +77,25 @@ async def notify(
         notification.trace_id or "", doc_hash, version
     )
 
-    # Idempotency: UNIQUE constraint → already processed
-    if not _repo.try_insert(request_id, doc_hash):
-        logger.info("Duplicate notify (idempotent): %s", request_id)
-        return {"status": "duplicate", "doc_hash": doc_hash, "version": version}
-
-    # Distributed lock: prevent concurrent ingestion of same doc
+    # Distributed lock FIRST: if another pod is processing this doc_hash,
+    # return "in_flight" without touching the tasks table (no PENDING row
+    # left stranded for the local compensation scanner to clean up).
     lock_key = f"lock:ingest:{doc_hash}"
     token = await _lock.acquire(lock_key, ttl_sec=settings.LOCK_TTL_SEC)
     if token is None:
-        logger.warning("Lock held for %s, mark PENDING for compensation", doc_hash)
+        logger.info("Lock held for %s; another pod is processing", doc_hash)
         return {"status": "in_flight", "doc_hash": doc_hash, "version": version}
+
+    try:
+        # Idempotency: UNIQUE constraint → already processed. Released lock
+        # because we hold the lock but won't be doing background work.
+        if not _repo.try_insert(request_id, doc_hash):
+            logger.info("Duplicate notify (idempotent): %s", request_id)
+            await _lock.release(lock_key, token)
+            return {"status": "duplicate", "doc_hash": doc_hash, "version": version}
+    except Exception:
+        await _lock.release(lock_key, token)
+        raise
 
     async def _locked_ingest() -> None:
         try:
