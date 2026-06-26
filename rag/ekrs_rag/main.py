@@ -32,6 +32,18 @@ logger = logging.getLogger(__name__)
 # trail reflects that the work never ran.
 COMPENSATION_HANDLER_IMPLEMENTED = False
 
+
+async def _stub_compensation_handler(task: dict) -> None:
+    """重试入队: 重新触发 ingest (需 pipeline 支持重试入口)."""
+    # TODO: wire to IngestionPipeline.ingest via callback_url (Task 7)
+    logger.warning("Compensation handler not yet wired for %s", task["request_id"])
+
+
+def _get_compensation_handler():
+    """Lookup indirection so tests can monkeypatch this function to inject
+    a real handler without rewriting main.py."""
+    return _stub_compensation_handler
+
 # Shared across app via module-level state
 _qdrant: QdrantManager | None = None
 _pipeline: IngestionPipeline | None = None
@@ -86,18 +98,16 @@ async def lifespan(app: FastAPI):
     ingestion.set_redis_lock(_redis_lock)
     ingestion.set_task_repo(_task_repo)
 
-    async def _compensation_handler(task: dict) -> None:
-        """重试入队: 重新触发 ingest (需 pipeline 支持重试入口)."""
-        # TODO: wire to IngestionPipeline.ingest via callback_url (Task 7)
-        logger.warning("Compensation handler not yet wired for %s", task["request_id"])
-
+    # handler lookup is dynamic so tests can patch compensation_handler.
+    handler = _get_compensation_handler()
     _scanner = CompensationScanner(
         task_repo=_task_repo,
-        handler=_compensation_handler,
+        handler=handler,
         max_attempts=settings.MAX_ATTEMPTS,
         threshold_sec=60.0,
         handler_is_wired=COMPENSATION_HANDLER_IMPLEMENTED,
     )
+    app.state.compensation_scanner = _scanner
     retried = await _scanner.scan()
     logger.info("Compensation scan completed: retried=%d", retried)
 
