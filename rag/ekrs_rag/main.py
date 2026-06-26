@@ -25,6 +25,13 @@ from .storage.task_repo import TaskRepo
 
 logger = logging.getLogger(__name__)
 
+# Phase 4.5: real handler will be wired to IngestionPipeline.ingest via
+# callback_url (per Task 7). Until then, the stub handler in lifespan() does
+# no work, so the scanner must NOT claim-and-bump attempts for orphan rows;
+# it must mark them unwired-skipped so attempts stays at 0 and the audit
+# trail reflects that the work never ran.
+COMPENSATION_HANDLER_IMPLEMENTED = False
+
 # Shared across app via module-level state
 _qdrant: QdrantManager | None = None
 _pipeline: IngestionPipeline | None = None
@@ -89,6 +96,7 @@ async def lifespan(app: FastAPI):
         handler=_compensation_handler,
         max_attempts=settings.MAX_ATTEMPTS,
         threshold_sec=60.0,
+        handler_is_wired=COMPENSATION_HANDLER_IMPLEMENTED,
     )
     retried = await _scanner.scan()
     logger.info("Compensation scan completed: retried=%d", retried)

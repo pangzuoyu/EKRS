@@ -138,3 +138,37 @@ def test_close_resets_conn_and_is_idempotent(tmp_path):
     # 再次调用不应抛错
     r.close()
     assert r._conn is None
+
+
+def test_init_adds_unwired_skipped_column(repo):
+    """回归测试 (C1): init() 必须在 fresh schema 中加入 unwired_skipped 列,
+    并对已存在缺列的旧 DB 执行迁移."""
+    cols = [r["name"] for r in repo._conn.execute("PRAGMA table_info(tasks)").fetchall()]
+    assert "unwired_skipped" in cols
+
+
+def test_pending_tasks_older_than_excludes_unwired_skipped(repo):
+    """回归测试 (C1): pending_tasks_older_than 必须过滤 unwired_skipped=1 的行,
+    确保 scanner 永久跳过 unwired 行."""
+    repo.try_insert("req_unwired", "doc_a")
+    repo.mark_handler_unwired("req_unwired", "handler not implemented")
+    repo._conn.execute(
+        "UPDATE tasks SET updated_at=? WHERE request_id='req_unwired'",
+        (time.time() - 3600,),
+    )
+    repo._conn.commit()
+
+    found = repo.pending_tasks_older_than(60.0)
+    ids = [t["request_id"] for t in found]
+    assert "req_unwired" not in ids
+
+
+def test_mark_handler_unwired_keeps_updated_at_unchanged(repo):
+    """回归测试 (C1): mark_handler_unwired 不应刷新 updated_at (避免触发
+    重试窗口的边缘条件)."""
+    repo.try_insert("req1", "doc_a")
+    before = repo.get("req1")["updated_at"]
+    repo.mark_handler_unwired("req1", "handler not implemented")
+    after = repo.get("req1")["updated_at"]
+    assert before == after
+    assert repo.get("req1")["unwired_skipped"] == 1

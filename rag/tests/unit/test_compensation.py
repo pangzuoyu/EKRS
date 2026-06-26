@@ -115,3 +115,56 @@ async def test_mark_failed_with_error_appends_history(repo):
     repo.mark_failed_with_error("req1", "retry 2 blew up")
     rec = repo.get("req1")
     assert rec["last_error"] == "original boom | retry 1 blew up | retry 2 blew up"
+
+
+@pytest.mark.asyncio
+async def test_scan_skips_tasks_with_unwired_handler(repo):
+    """回归测试 (C1): 当 handler 未实现时, scanner 必须调用 mark_handler_unwired,
+    不调用 handler, 不 bump attempts, 且下次 scan 不再选中该任务."""
+    repo.try_insert("req1", "doc_a")
+    repo.mark_status("req1", "FAILED", error="prev")
+    old = time.time() - 3600
+    repo._conn.execute("UPDATE tasks SET updated_at=? WHERE request_id='req1'", (old,))
+    repo._conn.commit()
+
+    called = []
+
+    async def handler(task: dict) -> None:
+        called.append(task["request_id"])
+
+    scanner = CompensationScanner(
+        task_repo=repo,
+        handler=handler,
+        threshold_sec=60.0,
+        handler_is_wired=False,
+    )
+    n = await scanner.scan()
+    assert n == 0  # no successful retries
+    assert called == []  # handler must NOT be invoked
+
+    rec = repo.get("req1")
+    assert rec["status"] == "FAILED"
+    assert rec["attempts"] == 0  # attempts MUST NOT be bumped
+    assert rec["unwired_skipped"] == 1
+    assert "handler not implemented" in rec["last_error"]
+
+    # 后续 scan 必须跳过该任务
+    n2 = await scanner.scan()
+    assert n2 == 0
+    assert called == []
+    # unwired_skipped 仍为 1, 状态未再被改动
+    rec2 = repo.get("req1")
+    assert rec2["unwired_skipped"] == 1
+    assert rec2["attempts"] == 0
+
+
+@pytest.mark.asyncio
+async def test_mark_handler_unwired_sets_flag_without_bumping_attempts(repo):
+    """mark_handler_unwired 必须设置 unwired_skipped=1 且不增加 attempts."""
+    repo.try_insert("req1", "doc_a")
+    repo.increment_attempts("req1")  # attempts=1
+    repo.mark_handler_unwired("req1", "handler not implemented")
+    rec = repo.get("req1")
+    assert rec["unwired_skipped"] == 1
+    assert rec["attempts"] == 1  # 未被修改
+    assert rec["last_error"] == "handler not implemented"

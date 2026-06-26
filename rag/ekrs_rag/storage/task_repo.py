@@ -19,10 +19,18 @@ CREATE TABLE IF NOT EXISTS tasks (
   attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
   created_at REAL NOT NULL,
-  updated_at REAL NOT NULL
+  updated_at REAL NOT NULL,
+  unwired_skipped INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_status_updated ON tasks(status, updated_at);
 """
+
+# Idempotent migration: existing DBs (pre-Phase4.5) lack unwired_skipped.
+# ALTER TABLE ADD COLUMN with NOT NULL DEFAULT requires an explicit default
+# in older SQLite; safe to re-run (OperationalError swallowed).
+_MIGRATIONS = [
+    "ALTER TABLE tasks ADD COLUMN unwired_skipped INTEGER NOT NULL DEFAULT 0",
+]
 
 
 class TaskRepo:
@@ -41,6 +49,12 @@ class TaskRepo:
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        for ddl in _MIGRATIONS:
+            try:
+                self._conn.execute(ddl)
+            except sqlite3.OperationalError:
+                # Column already exists; migration is idempotent.
+                pass
         self._conn.commit()
 
     def _c(self) -> sqlite3.Connection:
@@ -127,6 +141,21 @@ class TaskRepo:
         )
         self._c().commit()
 
+    def mark_handler_unwired(self, request_id: str, error: str) -> None:
+        """标记任务为 unwired-skipped: 写入 last_error 并置 unwired_skipped=1.
+
+        调用方负责不 bump attempts (此方法不动 attempts). 不刷新 updated_at,
+        以保持与 mark_failed_with_error 行为一致 — 真正的跳过由
+        pending_tasks_older_than 的 unwired_skipped=0 过滤承担, 因此后续
+        scan() 不再选中该任务.
+        """
+        self._c().execute(
+            "UPDATE tasks SET status='FAILED', last_error=?, unwired_skipped=1 "
+            "WHERE request_id=?",
+            (error, request_id),
+        )
+        self._c().commit()
+
     def get(self, request_id: str) -> dict[str, Any] | None:
         row = self._c().execute(
             "SELECT * FROM tasks WHERE request_id=?", (request_id,)
@@ -136,7 +165,8 @@ class TaskRepo:
     def pending_tasks_older_than(self, seconds: float) -> list[dict[str, Any]]:
         threshold = time.time() - seconds
         rows = self._c().execute(
-            "SELECT * FROM tasks WHERE status IN ('PENDING','FAILED') AND updated_at < ?",
+            "SELECT * FROM tasks WHERE status IN ('PENDING','FAILED') "
+            "AND unwired_skipped=0 AND updated_at < ?",
             (threshold,),
         ).fetchall()
         return [dict(r) for r in rows]

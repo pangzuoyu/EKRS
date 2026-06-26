@@ -18,16 +18,34 @@ class CompensationScanner:
         handler: Handler,
         max_attempts: int = 3,
         threshold_sec: float = 60.0,
+        handler_is_wired: bool = True,
     ):
         self._repo = task_repo
         self._handler = handler
         self._max = max_attempts
         self._threshold = threshold_sec
+        # When False, scanner calls mark_handler_unwired on each task instead
+        # of claim_for_retry + handler invocation. attempts is not bumped and
+        # pending_tasks_older_than will skip the row on subsequent scans.
+        self._handler_is_wired = handler_is_wired
 
     async def scan(self) -> int:
         tasks = self._repo.pending_tasks_older_than(self._threshold)
         retried = 0
         for task in tasks:
+            if not self._handler_is_wired:
+                # Stub handler path: skip the task permanently without
+                # bumping attempts (audit trail shows last_error but not
+                # "completed" for work that never ran).
+                logger.warning(
+                    "Compensation handler not wired; marking %s as unwired-skipped",
+                    task["request_id"],
+                )
+                self._repo.mark_handler_unwired(
+                    task["request_id"],
+                    "handler not implemented (Phase 4.5)",
+                )
+                continue
             # SQL 内再次校验 status / attempts / updated_at, 避免两个并发 scan
             # 拿到同一行都进入 handler. claim 失败 = 输掉竞争 / 行已不在窗口内,
             # 当作 "被别人接管了" 静默跳过.
