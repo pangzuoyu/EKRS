@@ -6,13 +6,19 @@ GET /v1/ingestion/status/{doc_hash} — query ingestion status
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
+import time
+from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
+from pydantic import BaseModel
 
 from ekrs_shared.idempotency import request_id_from_trace
 from ekrs_shared.models import IngestionStatus, IngestionNotification
+
+from ..auth import require_parser_token
 
 from ...concurrency.redis_lock import RedisLock
 from ...core.config import settings
@@ -122,3 +128,100 @@ async def get_status(doc_hash: str):
         raise HTTPException(status_code=404, detail=f"No ingestion record for {doc_hash}")
 
     return status
+
+
+class IngestionReplayRequest(BaseModel):
+    """POST /v1/ingestion/replay body."""
+    request_id: str
+    replayed_by: str  # ops user / trace id
+
+
+@router.post("/replay")
+async def replay_ingestion(
+    req: IngestionReplayRequest,
+    request: Request,
+    _auth: None = Depends(require_parser_token),
+):
+    """Replay a completed ingestion by request_id.
+
+    Re-runs parse+chunk+upsert for an already-indexed document. Does NOT
+    trigger parser callback. Rejects in-flight, failed, and pre-Phase-5
+    (NULL source_path) tasks with 409.
+    """
+    # Lazy imports for audit (writers may not be initialized in tests).
+    from ekrs_rag.observability.audit import get_writer
+
+    task_repo = getattr(request.app.state, "task_repo", None) or _repo
+    pipeline = _pipeline
+    if task_repo is None:
+        raise HTTPException(status_code=503, detail="task_repo not initialized")
+    if pipeline is None:
+        raise HTTPException(status_code=503, detail="pipeline not initialized")
+
+    row = task_repo.get(req.request_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="request_id not found")
+    if row["status"] in ("PENDING", "RUNNING"):
+        raise HTTPException(status_code=409, detail={"reason": "in_flight"})
+    if row["status"] != "COMPLETED":
+        raise HTTPException(status_code=409, detail={"reason": "not_completed"})
+
+    source_path = row.get("source_path")
+    if not source_path:
+        raise HTTPException(status_code=409, detail={"reason": "pre_phase5"})
+
+    expected_sha = row.get("payload_sha256")
+    jsonl_path = Path(source_path)
+    if not jsonl_path.exists():
+        raise HTTPException(status_code=409, detail={"reason": "file_missing"})
+
+    actual_sha = hashlib.sha256(jsonl_path.read_bytes()).hexdigest()
+    if actual_sha != expected_sha:
+        writer = get_writer()
+        if writer:
+            writer.write(
+                "ingestion_replay_sha256_mismatch",
+                request_id=req.request_id,
+                expected_sha256=expected_sha or "",
+                actual_sha256=actual_sha,
+            )
+        raise HTTPException(status_code=409, detail={"reason": "sha256_mismatch"})
+
+    # Audit started (best-effort: writer may be None in tests).
+    writer = get_writer()
+    if writer:
+        writer.write(
+            "ingestion_replay_started",
+            request_id=req.request_id,
+            replayed_by=req.replayed_by,
+            source_path=source_path,
+        )
+
+    # Re-run ingestion (no callback, no idempotency skip).
+    start = time.monotonic()
+    try:
+        chunks_written = await pipeline.replay(
+            jsonl_path=jsonl_path,
+            doc_hash=row["doc_id"],
+            version=row.get("version", 1),
+        )
+        duration_ms = int((time.monotonic() - start) * 1000)
+    except Exception as e:
+        logger.error("Replay failed for %s: %s", req.request_id, e)
+        raise HTTPException(status_code=500, detail=f"replay failed: {e}")
+
+    if writer:
+        writer.write(
+            "ingestion_replay_completed",
+            request_id=req.request_id,
+            sha256_match=True,
+            duration_ms=duration_ms,
+            chunks_written=chunks_written,
+        )
+
+    return {
+        "request_id": req.request_id,
+        "status": "completed",
+        "chunks_written": chunks_written,
+        "duration_ms": duration_ms,
+    }

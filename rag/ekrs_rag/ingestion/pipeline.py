@@ -94,6 +94,38 @@ class IngestionPipeline:
         # Step 6: Callback success
         await self._send_callback(notification, "success")
 
+    async def replay(
+        self,
+        jsonl_path: Path,
+        doc_hash: str,
+        version: int,
+    ) -> int:
+        """Re-run parse+chunk+upsert for an already-indexed document.
+
+        Used by /v1/ingestion/replay. Shares parse/chunk/upsert primitives
+        with ingest() but skips the parser callback and the idempotency
+        check (caller has already verified the source_path + sha256).
+
+        Returns the number of chunks written to Qdrant.
+        """
+        logger.info("Replaying ingestion: doc=%s v=%d path=%s",
+                     doc_hash, version, jsonl_path)
+
+        try:
+            blocks = parse_jsonl_file(str(jsonl_path))
+            if not blocks:
+                raise ValueError(f"Empty JSONL: {jsonl_path}")
+
+            chunks = chunk_blocks(blocks, doc_hash, version)
+            if not chunks:
+                raise ValueError("No chunks produced")
+        except IRParseError as e:
+            raise ValueError(f"JSONL parse error: {e}") from e
+
+        count = self._qdrant.upsert_chunks(chunks)
+        logger.info("Replayed %d chunks for doc=%s v=%d", count, doc_hash, version)
+        return count
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
     async def _send_callback(
         self,
