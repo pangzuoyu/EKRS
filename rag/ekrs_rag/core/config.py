@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     MAX_ATTEMPTS: int = 3
     TASK_DB_PATH: str = "/var/lib/ekrs/tasks.db"
 
+    # Phase 5: observability
+    AUDIT_LOG_PATH: str = "audit.log"
+    DEBUG_LOG_PATH: str = "logs/debug.log"
+
     # Server
     HOST: str = "0.0.0.0"
     PORT: int = 8000
