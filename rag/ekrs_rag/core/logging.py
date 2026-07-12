@@ -1,9 +1,11 @@
 """Structured JSON logging setup for EKRS RAG service."""
-
 from __future__ import annotations
 
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
 from pythonjsonlogger import json as json_logger
 
 
@@ -17,11 +19,24 @@ class CustomJsonFormatter(json_logger.JsonFormatter):
         log_record.setdefault("message", record.getMessage())
 
 
-def setup_logging(debug: bool = False) -> None:
-    """Configure root logger with JSON formatter.
+def _tag_handler(h):
+    h._ekrs_tag = True
 
-    Fields in every log line: timestamp, level, module, message.
-    Optional fields (added by context): trace_id, doc_hash, duration_ms.
+
+def _is_our_handler(h):
+    return getattr(h, "_ekrs_tag", False)
+
+
+def setup_logging(
+    debug: bool = False, debug_log_path: str = "logs/debug.log"
+) -> None:
+    """Configure root logger.
+
+    Always: StreamHandler to stdout with JSON formatter.
+    If debug=True: also RotatingFileHandler at debug_log_path (100MB x 5 backups).
+
+    Idempotent: removes only handlers previously installed by this function,
+    leaving framework handlers (pytest caplog, etc.) intact.
     """
     level = logging.DEBUG if debug else logging.INFO
 
@@ -30,13 +45,30 @@ def setup_logging(debug: bool = False) -> None:
         rename_fields={"timestamp": "timestamp", "levelname": "level"},
     )
 
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(formatter)
-
     root = logging.getLogger()
     root.setLevel(level)
-    root.handlers.clear()
-    root.addHandler(handler)
+    # Remove only OUR previous handlers — preserves framework handlers
+    root.handlers = [h for h in root.handlers if not _is_our_handler(h)]
+
+    # Always stdout
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(formatter)
+    _tag_handler(stdout_handler)
+    root.addHandler(stdout_handler)
+
+    # Optional debug file (RotatingFileHandler, 100MB x 5)
+    if debug:
+        log_path = Path(debug_log_path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            str(log_path),
+            maxBytes=100 * 1024 * 1024,  # 100MB
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        _tag_handler(file_handler)
+        root.addHandler(file_handler)
 
     # Quiet noisy libraries
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
