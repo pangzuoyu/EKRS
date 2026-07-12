@@ -51,15 +51,23 @@ rag/ekrs_rag/api/decorators.py                  # @audited / @metered
 ### 修改
 
 ```
-shared/ekrs_shared/audit.py          # 改用 python-json-logger + FileHandler (永久)
+shared/ekrs_shared/audit.py          # 保留为基类 (log_event API), 加 propagation=False + schema 校验
 rag/ekrs_rag/api/routes/metrics.py   # 替换占位 → prometheus_client.generate_latest()
 rag/ekrs_rag/api/routes/ingestion.py # 新增 POST /v1/ingestion/replay
 rag/ekrs_rag/api/routes/constraints.py # solve 流程接 audit + replay=true 路径
 rag/ekrs_rag/concurrency/compensation.py # 显式 audit("compensation_retry")
 rag/ekrs_rag/core/logging.py         # 增加 RotatingFileHandler (debug.log, 100MB x 5)
-rag/ekrs_rag/main.py                 # 注册 middleware + 启动 audit 健康检查
+rag/ekrs_rag/main.py                 # 注册 middleware + 启动 audit 健康检查 + 内存索引构建
 rag/ekrs_rag/storage/task_repo.py    # Phase 4.5 schema: source_path + payload_sha256
 ```
+
+**模块划分 (A1 决策):**
+- `shared/ekrs_shared/audit.py`: 仍是基类 `AuditLogger`, 提供 `log_event(event_type, **kwargs)` 接口
+  + `propagate=False` 防止冒泡到 root
+  + JSON schema 校验钩子 (按 event_type 查 required fields)
+- `rag/ekrs_rag/observability/audit.py`: RAG 专用实例 `AuditWriter`, 实例化基类 + 配置 FileHandler (永久 audit.log) + 路径管理
+- 基类不感知文件后端, 实例负责具体落盘方式
+- dev_ui 若需要, 可单独实例化不共享 RAG 的 audit.log
 
 ### 依赖
 
@@ -136,6 +144,11 @@ HTTP X-Trace-Id header
 
 预期总 series ≤ 80。
 
+**Endpoint label 规范化 (A3 决策):**
+- 必须使用 `request.scope["route"].path` (FastAPI 路由模板, 如 `/v1/docs/{doc_id}`), 不用 `request.url.path` (实际路径, 如 `/v1/docs/abc123`)
+- 保证 endpoint label 取值集合 = API 路由数 (≈ 当前 5 个), 不随请求数据增长
+- `safe_inc()` 在调用前应校验 label value 不含路径参数插值 (正则 `/\{[^}]+\}/` 必须匹配, 否则拒收)
+
 ## Audit log 文件
 
 ### audit.log
@@ -196,6 +209,17 @@ HTTP X-Trace-Id header
 8. 响应: {trace_id, replayed_trace_id, branches, deterministic_match, diff}
 ```
 
+### Audit 反查索引 (A2 决策)
+
+为避免 replay 时线性扫描全 audit.log:
+- **启动时一次性扫描** audit.log, 构建 `trace_id → file_offset` dict 缓存于进程内
+- 仅索引 `event ∈ {constraint_solve_started, constraint_solved}` 的行 (Replay 关心的两类)
+- Replay 时 O(1) 查 dict → seek 到 offset → 读两行
+- 大文件 (几 GB) 启动慢 (几秒到几十秒), 内存占用 ≈ 唯一 trace_id 数 × 80 bytes
+- 运行时新写入的 audit 行同步追加到 dict (dict 持续增长, 单进程内可控)
+- 多 Pod 部署: 每 Pod 独立索引 (各自 audit.log 独立, 不需要同步)
+- **健康检查暴露**: `GET /healthz` 返回 `audit_index_loaded: bool` + `audit_index_size: int` + `audit_index_load_seconds: float`
+
 ### B. Ingestion Replay (POST /v1/ingestion/replay)
 
 请求: `{request_id, replayed_by}`
@@ -213,6 +237,13 @@ HTTP X-Trace-Id header
 5. audit("ingestion_replay_completed", ...)
 6. 响应 200 {request_id, status: "completed", chunks_written, duration_ms}
 ```
+
+**Ingestion Replay 并发与状态机 (A4 决策):**
+- Replay 走**完全相同**的 ingestion handler (复用 notify 的核心函数, 不写并行路径)
+- 共享同一把 Redis 锁 (`lock:ingest:{doc_hash}`) → 与 notify 串行
+- Replay 完成后 **不触发** parser callback (避免 callback 循环; callback 由原始 notify 负责)
+- 如果 replay 启动时 notify 正在处理 (锁被占): replay 等待锁 → 串行执行, 不并发
+- 状态机不变: replay 复用 `PENDING → RUNNING → COMPLETED` 转移, `attempts` 不增加 (replay 不算重试)
 
 ### Phase 4.5 schema 迁移
 
@@ -259,11 +290,24 @@ Ingestion notify 入口同时写入 source_path + sha256 (parser 提供 source_p
 `rag/tests/unit/observability/test_trace.py` (4 tests)
 `rag/tests/unit/storage/test_task_repo_phase45.py` (4 tests)
 
-### 集成 (6 tests)
+### 集成 (10 tests)
 
 `rag/tests/integration/test_metrics_endpoint.py` (3 tests)
-`rag/tests/integration/test_query_replay.py` (3 tests)
+`rag/tests/integration/test_query_replay.py` (4 tests, +1 cross-process restart)
 `rag/tests/integration/test_ingestion_replay.py` (4 tests)
+`rag/tests/integration/test_audit_durability.py` (3 tests, NEW — T2)
+  - test_replay_works_after_process_restart      # T1: 进程 A 写 audit, 进程 B replay
+  - test_replay_skips_corrupted_audit_lines      # T2: 中间插入损坏 JSON
+  - test_replay_handles_truncated_audit_file     # T2: 文件末尾不完整行
+
+### Audit 索引单元测试
+
+`rag/tests/unit/observability/test_audit_index.py` (5 tests)
+  - test_index_builds_from_clean_audit_log
+  - test_index_skips_non_replay_events
+  - test_index_resilient_to_corrupted_lines
+  - test_index_grows_on_runtime_writes
+  - test_index_seek_returns_correct_offset
 
 ### 覆盖率目标
 
