@@ -20,16 +20,22 @@ CREATE TABLE IF NOT EXISTS tasks (
   last_error TEXT,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
-  unwired_skipped INTEGER NOT NULL DEFAULT 0
+  unwired_skipped INTEGER NOT NULL DEFAULT 0,
+  source_path TEXT,
+  payload_sha256 TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_status_updated ON tasks(status, updated_at);
 """
 
-# Idempotent migration: existing DBs (pre-Phase4.5) lack unwired_skipped.
-# ALTER TABLE ADD COLUMN with NOT NULL DEFAULT requires an explicit default
-# in older SQLite; safe to re-run (OperationalError swallowed).
+# Idempotent migrations: existing DBs (pre-Phase4.5) lack unwired_skipped,
+# source_path, and payload_sha256. ALTER TABLE ADD COLUMN with NOT NULL DEFAULT
+# requires an explicit default in older SQLite; safe to re-run (OperationalError
+# swallowed). source_path / payload_sha256 are nullable — pre-Phase4.5 rows
+# keep NULL, allowing replay code to detect legacy tasks.
 _MIGRATIONS = [
     "ALTER TABLE tasks ADD COLUMN unwired_skipped INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE tasks ADD COLUMN source_path TEXT",
+    "ALTER TABLE tasks ADD COLUMN payload_sha256 TEXT",
 ]
 
 
@@ -61,18 +67,40 @@ class TaskRepo:
         assert self._conn is not None
         return self._conn
 
-    def try_insert(self, request_id: str, doc_id: str) -> bool:
+    def try_insert(
+        self,
+        request_id: str,
+        doc_id: str,
+        source_path: str | None = None,
+        payload_sha256: str | None = None,
+    ) -> bool:
         now = time.time()
         try:
             self._c().execute(
-                "INSERT INTO tasks(request_id, doc_id, status, attempts, created_at, updated_at) "
-                "VALUES (?, ?, 'PENDING', 0, ?, ?)",
-                (request_id, doc_id, now, now),
+                "INSERT INTO tasks(request_id, doc_id, status, attempts, "
+                "created_at, updated_at, source_path, payload_sha256) "
+                "VALUES (?, ?, 'PENDING', 0, ?, ?, ?, ?)",
+                (request_id, doc_id, now, now, source_path, payload_sha256),
             )
             self._c().commit()
             return True
         except sqlite3.IntegrityError:
             return False
+
+    def try_insert_with_source(
+        self,
+        request_id: str,
+        doc_id: str,
+        source_path: str,
+        payload_sha256: str,
+    ) -> bool:
+        """Insert with source_path + payload_sha256 (Phase 4.5 replay fields).
+
+        Explicit variant for callers that already know the parser payload
+        location. UNIQUE(request_id) still enforced — duplicate inserts
+        return False.
+        """
+        return self.try_insert(request_id, doc_id, source_path, payload_sha256)
 
     def mark_status(self, request_id: str, status: str, error: str | None = None) -> None:
         self._c().execute(
