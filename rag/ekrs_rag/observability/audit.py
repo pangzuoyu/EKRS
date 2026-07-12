@@ -32,6 +32,11 @@ class AuditWriter(AuditLogger):
         # Pass-through formatter (base class already JSON-encodes message)
         handler.setFormatter(logging.Formatter("%(message)s"))
         self._logger.addHandler(handler)
+        # Track this writer's own FileHandler so _current_offset cannot be
+        # fooled by stale handlers left in the global logger from prior
+        # AuditWriter instances (matters under test pollution; benign in
+        # production where only one writer exists per process).
+        self._file_handler = handler
 
     def write(self, event_type: str, **kwargs) -> bool:
         """Log an event. Returns False if write fails (never raises)."""
@@ -42,8 +47,6 @@ class AuditWriter(AuditLogger):
             # Register new line in module-level AuditIndex (Issue 5)
             idx = get_index()
             if idx is not None:
-                trace_id = kwargs.get("trace_id") or self._logger.findCaller  # noqa: F841
-                # Simpler: pull trace_id from kwargs (audit contract always passes it)
                 idx.append(event_type, kwargs.get("trace_id", ""), offset)
             return True
         except Exception:
@@ -55,13 +58,13 @@ class AuditWriter(AuditLogger):
 
     def _current_offset(self) -> int:
         """Return current byte offset of the file handler (for index registration)."""
-        for h in self._logger.handlers:
-            if isinstance(h, logging.FileHandler) and not h.stream.closed:
-                try:
-                    return h.stream.tell()
-                except (OSError, AttributeError):
-                    pass
-        return 0
+        h = getattr(self, "_file_handler", None)
+        if h is None or h.stream.closed:
+            return 0
+        try:
+            return h.stream.tell()
+        except (OSError, AttributeError):
+            return 0
 
 
 def set_writer(writer: AuditLogger) -> None:
@@ -86,3 +89,9 @@ def attach_index(index) -> None:
 def get_index():
     """Return attached AuditIndex, or None if not yet initialized."""
     return _index
+
+
+def reset_index_for_test() -> None:
+    """Clear module-level attached index (test helper only)."""
+    global _index
+    _index = None
