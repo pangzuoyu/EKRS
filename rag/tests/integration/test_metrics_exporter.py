@@ -61,6 +61,18 @@ def test_exporter_serves_prometheus_format(sidecar_env):
         assert "# TYPE rag_ingestion_total counter" in body
 
 
+def test_exporter_includes_counter_incremented_before_startup(sidecar_env):
+    """A counter increment before startup is visible in the sidecar scrape."""
+    safe_inc(METRICS.ingestion_total, status="sidecar_test")
+
+    app = create_app()
+    with TestClient(app):
+        url = f"http://127.0.0.1:{sidecar_env['port']}/metrics"
+        body = httpx.get(url, timeout=2.0).text
+
+    assert 'rag_ingestion_total{status="sidecar_test"} 1.0' in body
+
+
 def test_exporter_listens_on_configured_port(sidecar_env):
     """Port comes from METRICS_PORT env, not hardcoded 9090."""
     app = create_app()
