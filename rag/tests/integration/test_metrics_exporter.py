@@ -15,8 +15,9 @@ import socket
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
-from ekrs_rag.main import _sync_lifespan, create_app
+from ekrs_rag.main import create_app
 from ekrs_rag.observability.metrics import METRICS, safe_inc
 
 
@@ -32,23 +33,24 @@ def free_port() -> int:
 
 @pytest.fixture
 def sidecar_env(tmp_path, monkeypatch):
-    """Configure env for sidecar exporter: free port + multiproc dir."""
+    """Configure env for the single-process sidecar exporter."""
     port = free_port()
-    multiproc = tmp_path / "prom"
-    multiproc.mkdir()
     monkeypatch.setenv("METRICS_HOST", "127.0.0.1")
     monkeypatch.setenv("METRICS_PORT", str(port))
-    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(multiproc))
+    # Multiprocess mode intentionally not unit-tested: counters are MmapedValue
+    # only when the env var is set before prometheus_client import. Deployment-side
+    # validation covers multiprocess mode.
+    monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
     monkeypatch.setattr(
         "ekrs_rag.main.settings.TASK_DB_PATH", str(tmp_path / "tasks.db")
     )
-    return {"port": port, "multiproc": multiproc}
+    return {"port": port}
 
 
 def test_exporter_serves_prometheus_format(sidecar_env):
     """GET 127.0.0.1:<port>/metrics returns 200 with valid Prometheus content."""
     app = create_app()
-    with _sync_lifespan(app):
+    with TestClient(app):
         # Lifespan has started; exporter on sidecar_env['port']
         url = f"http://127.0.0.1:{sidecar_env['port']}/metrics"
         resp = httpx.get(url, timeout=2.0)
@@ -62,7 +64,7 @@ def test_exporter_serves_prometheus_format(sidecar_env):
 def test_exporter_listens_on_configured_port(sidecar_env):
     """Port comes from METRICS_PORT env, not hardcoded 9090."""
     app = create_app()
-    with _sync_lifespan(app):
+    with TestClient(app):
         # Manually issue a request to the dynamically-allocated port.
         url = f"http://127.0.0.1:{sidecar_env['port']}/metrics"
         resp = httpx.get(url, timeout=2.0)
@@ -79,7 +81,7 @@ def test_exporter_listens_on_configured_port(sidecar_env):
 def test_exporter_stops_on_lifespan_exit(sidecar_env):
     """After lifespan teardown, the port is no longer reachable."""
     app = create_app()
-    with _sync_lifespan(app):
+    with TestClient(app):
         # Confirm exporter is alive
         url = f"http://127.0.0.1:{sidecar_env['port']}/metrics"
         resp = httpx.get(url, timeout=2.0)

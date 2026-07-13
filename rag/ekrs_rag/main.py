@@ -8,14 +8,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
-from prometheus_client import REGISTRY, multiprocess, start_http_server
+from prometheus_client import CollectorRegistry, multiprocess, start_http_server
 
 from .api.middleware.observability import ObservabilityMiddleware
 from .api.routes import constraints, ingestion
@@ -89,127 +88,143 @@ async def lifespan(app: FastAPI):
     global _audit_writer, _audit_index, _task_repo
 
     # ---- Phase 5.5 D: sidecar metrics exporter ----
-    # PROMETHEUS_MULTIPROC_DIR 可选。单 worker 模式(开发)留空即可。
-    # 多 worker 模式必须在 uvicorn fork 子进程前由部署层设置
-    # (docker-compose env / k8s Deployment env / shell export)。
-    # 注:Counters 在 rag/ekrs_rag/observability/metrics.py:18 的 import-time
-    # side-effects 中已注册,env var 检查仅为 fail-soft 提示,不在这里 setenv。
     multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
-    if multiproc_dir:
-        p = Path(multiproc_dir)
-        p.mkdir(parents=True, exist_ok=True)
-        multiprocess.MultiProcessCollector(REGISTRY)
-        logger.info("Multi-process metrics mode: %s", p)
-
-    metrics_host = os.environ.get("METRICS_HOST", "127.0.0.1")
+    # 0.0.0.0 allows cross-container scraping in docker-compose. For local
+    # development without Docker, set METRICS_HOST=127.0.0.1 to limit exposure.
+    metrics_host = os.environ.get("METRICS_HOST", "0.0.0.0")
     metrics_port = int(os.environ.get("METRICS_PORT", "9090"))
-    httpd, _ = start_http_server(metrics_port, addr=metrics_host)
-    logger.info("Metrics exporter listening on %s:%d", metrics_host, metrics_port)
-    app.state.metrics_httpd = httpd
 
     setup_logging(debug=settings.EKRS_DEBUG, debug_log_path=settings.DEBUG_LOG_PATH)
-    logger.info("Starting EKRS RAG service (debug=%s)", settings.EKRS_DEBUG)
 
-    _qdrant = QdrantManager(
-        host=settings.QDRANT_HOST,
-        port=settings.QDRANT_PORT,
-        collection_name=settings.COLLECTION_NAME,
-        vector_size=384,  # bge-small is 384d
-    )
+    exporter_registry = None
+    if multiproc_dir:
+        # PROMETHEUS_MULTIPROC_DIR must be created and emptied by deployment
+        # before Python starts: MmapedValue opens its files at import time, so a
+        # missing directory fails before this lifespan runs. It must also be
+        # wiped between restarts because stale files inflate merged metrics.
+        # In multi-worker deployments, only one process may bind METRICS_PORT;
+        # workers otherwise only write files for the shared collector.
+        p = Path(multiproc_dir)
+        if not p.is_dir():
+            raise RuntimeError(
+                f"PROMETHEUS_MULTIPROC_DIR={p} does not exist. "
+                "Create the directory before starting the process "
+                "(MmapedValue opens .db files at import-time)."
+            )
+        p.mkdir(parents=True, exist_ok=True)
+        exporter_registry = CollectorRegistry()
+        multiprocess.MultiProcessCollector(exporter_registry)
 
     try:
-        _qdrant.ensure_collection(vector_size=384)
-        logger.info("Qdrant collection ready: %s", settings.COLLECTION_NAME)
-    except Exception as e:
-        logger.error("Qdrant connection failed: %s", e)
-        # Don't crash — endpoints will return 503
-
-    # Phase 2b: init embedder + retriever
-    _embedder = BGESmallEmbedder()
-    _retriever = EKRSRetriever(qdrant=_qdrant, embedder=_embedder)
-
-    # Wire up constraints router
-    constraints.set_retriever(_retriever)
-
-    # Store on app.state for route access
-    app.state.embedder = _embedder
-    app.state.retriever = _retriever
-
-    _pipeline = IngestionPipeline(_qdrant, settings.SHARED_STORAGE_PATH)
-    ingestion.set_pipeline(_pipeline)
-
-    # Phase 4: redis, task_repo, lock, compensation
-    _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
-    _redis_lock = RedisLock(_redis)
-    _task_repo = TaskRepo(db_path=settings.TASK_DB_PATH)
-    _task_repo.init()
-    app.state.redis = _redis
-    app.state.redis_lock = _redis_lock
-    app.state.task_repo = _task_repo
-    ingestion.set_redis_lock(_redis_lock)
-    ingestion.set_task_repo(_task_repo)
-
-    # handler lookup is dynamic so tests can patch compensation_handler.
-    handler = _get_compensation_handler()
-    _scanner = CompensationScanner(
-        task_repo=_task_repo,
-        handler=handler,
-        max_attempts=settings.MAX_ATTEMPTS,
-        threshold_sec=60.0,
-        handler_is_wired=COMPENSATION_HANDLER_IMPLEMENTED,
-    )
-    app.state.compensation_scanner = _scanner
-    retried = await _scanner.scan()
-    logger.info("Compensation scan completed: retried=%d", retried)
-
-    # Phase 5: observability wiring
-    audit_path = settings.AUDIT_LOG_PATH
-    Path(audit_path).parent.mkdir(parents=True, exist_ok=True)
-    _audit_writer = AuditWriter(audit_path)
-    for event_type, required in _EVENT_SCHEMAS.items():
-        _audit_writer.register_event_schema(event_type, required)
-    set_writer(_audit_writer)
-    app.state.audit_writer = _audit_writer
-
-    # Build audit index async (don't block readiness on multi-GB scan)
-    _audit_index = AuditIndex(audit_path)
-    try:
-        await asyncio.to_thread(_audit_index.build)
-    except Exception as e:
-        logger.warning(
-            "AuditIndex build failed (replay will be unavailable): %s", e
+        if exporter_registry is not None:
+            httpd, _ = start_http_server(
+                metrics_port, addr=metrics_host, registry=exporter_registry
+            )
+        else:
+            httpd, _ = start_http_server(metrics_port, addr=metrics_host)
+        app.state.metrics_httpd = httpd
+        logger.info(
+            "Metrics exporter listening on %s:%d", metrics_host, metrics_port
         )
-        _audit_index = None
-    constraints.set_audit_index(_audit_index)
-    if _audit_index is not None:
-        attach_index(_audit_index)
-    app.state.audit_index = _audit_index
+    except OSError as e:
+        # Another worker or process may already own the exporter port. Only one
+        # process binds it; other workers continue writing multiprocess files.
+        logger.warning(
+            "Metrics exporter bind failed on %s:%d (%s) — assuming another "
+            "process owns the port; continuing without local exporter",
+            metrics_host,
+            metrics_port,
+            e,
+        )
+        app.state.metrics_httpd = None
 
-    yield
-
-    # ---- Phase 5.5 D: sidecar shutdown ----
-    httpd = getattr(app.state, "metrics_httpd", None)
-    if httpd is not None:
-        httpd.shutdown()       # Stop serve_forever().
-        httpd.server_close()   # Release the listening socket immediately.
-    logger.info("Metrics exporter stopped")
-
-    logger.info("Shutting down EKRS RAG service")
-
-
-@contextmanager
-def _sync_lifespan(app: FastAPI) -> Iterator[object]:
-    """Drive Starlette's async lifespan context from synchronous tests."""
-    cm = app.router.lifespan_context(app)
-    loop = asyncio.new_event_loop()
     try:
-        result = loop.run_until_complete(cm.__aenter__())
-        yield result
-    finally:
+        logger.info("Starting EKRS RAG service (debug=%s)", settings.EKRS_DEBUG)
+
+        _qdrant = QdrantManager(
+            host=settings.QDRANT_HOST,
+            port=settings.QDRANT_PORT,
+            collection_name=settings.COLLECTION_NAME,
+            vector_size=384,  # bge-small is 384d
+        )
+
         try:
-            loop.run_until_complete(cm.__aexit__(None, None, None))
-        finally:
-            loop.close()
+            _qdrant.ensure_collection(vector_size=384)
+            logger.info("Qdrant collection ready: %s", settings.COLLECTION_NAME)
+        except Exception as e:
+            logger.error("Qdrant connection failed: %s", e)
+            # Don't crash — endpoints will return 503
+
+        # Phase 2b: init embedder + retriever
+        _embedder = BGESmallEmbedder()
+        _retriever = EKRSRetriever(qdrant=_qdrant, embedder=_embedder)
+
+        # Wire up constraints router
+        constraints.set_retriever(_retriever)
+
+        # Store on app.state for route access
+        app.state.embedder = _embedder
+        app.state.retriever = _retriever
+
+        _pipeline = IngestionPipeline(_qdrant, settings.SHARED_STORAGE_PATH)
+        ingestion.set_pipeline(_pipeline)
+
+        # Phase 4: redis, task_repo, lock, compensation
+        _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        _redis_lock = RedisLock(_redis)
+        _task_repo = TaskRepo(db_path=settings.TASK_DB_PATH)
+        _task_repo.init()
+        app.state.redis = _redis
+        app.state.redis_lock = _redis_lock
+        app.state.task_repo = _task_repo
+        ingestion.set_redis_lock(_redis_lock)
+        ingestion.set_task_repo(_task_repo)
+
+        # handler lookup is dynamic so tests can patch compensation_handler.
+        handler = _get_compensation_handler()
+        _scanner = CompensationScanner(
+            task_repo=_task_repo,
+            handler=handler,
+            max_attempts=settings.MAX_ATTEMPTS,
+            threshold_sec=60.0,
+            handler_is_wired=COMPENSATION_HANDLER_IMPLEMENTED,
+        )
+        app.state.compensation_scanner = _scanner
+        retried = await _scanner.scan()
+        logger.info("Compensation scan completed: retried=%d", retried)
+
+        # Phase 5: observability wiring
+        audit_path = settings.AUDIT_LOG_PATH
+        Path(audit_path).parent.mkdir(parents=True, exist_ok=True)
+        _audit_writer = AuditWriter(audit_path)
+        for event_type, required in _EVENT_SCHEMAS.items():
+            _audit_writer.register_event_schema(event_type, required)
+        set_writer(_audit_writer)
+        app.state.audit_writer = _audit_writer
+
+        # Build audit index async (don't block readiness on multi-GB scan)
+        _audit_index = AuditIndex(audit_path)
+        try:
+            await asyncio.to_thread(_audit_index.build)
+        except Exception as e:
+            logger.warning(
+                "AuditIndex build failed (replay will be unavailable): %s", e
+            )
+            _audit_index = None
+        constraints.set_audit_index(_audit_index)
+        if _audit_index is not None:
+            attach_index(_audit_index)
+        app.state.audit_index = _audit_index
+
+        yield
+    finally:
+        # Always release the exporter, even when later startup work fails.
+        httpd = getattr(app.state, "metrics_httpd", None)
+        if httpd is not None:
+            httpd.shutdown()
+            httpd.server_close()
+        logger.info("Metrics exporter stopped")
+        logger.info("Shutting down EKRS RAG service")
 
 
 def create_app() -> FastAPI:
