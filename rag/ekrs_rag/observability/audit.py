@@ -1,7 +1,7 @@
-"""RAG-specific AuditWriter: shared/audit.py base + FileHandler (永久).
+"""RAG-specific AuditWriter: shared/audit.py base + RotatingFileHandler.
 
-audit.log never rotates. Write failures are caught (returns False),
-never propagate to callers.
+audit.log rotates at 100 MB × 5 gzipped backups. Write failures are caught
+(returns False), never propagate to callers.
 """
 from __future__ import annotations
 
@@ -10,6 +10,12 @@ import traceback
 from pathlib import Path
 
 from ekrs_shared.audit import AuditLogger
+
+from ekrs_rag.observability.audit_handler import (
+    RebuildingRotatingFileHandler,
+    gzip_namer,
+    gzip_rotator,
+)
 
 
 # Module-level writer, set by main.py at startup
@@ -20,15 +26,22 @@ _index = None
 
 
 class AuditWriter(AuditLogger):
-    """AuditLogger instance with permanent FileHandler."""
+    """AuditLogger instance with rotating file handler (100 MB × 5 gzip)."""
 
-    def __init__(self, audit_log_path: str):
+    def __init__(self, audit_log_path: str, on_rollover=None):
         super().__init__(name="ekrs.audit")
         path = Path(audit_log_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        # FileHandler, NOT RotatingFileHandler — permanent
-        handler = logging.FileHandler(str(path), encoding="utf-8")
+        handler = RebuildingRotatingFileHandler(
+            str(path),
+            maxBytes=100 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+            on_rollover=on_rollover,
+        )
+        handler.namer = gzip_namer
+        handler.rotator = gzip_rotator
         # Pass-through formatter (base class already JSON-encodes message)
         handler.setFormatter(logging.Formatter("%(message)s"))
         self._logger.addHandler(handler)
