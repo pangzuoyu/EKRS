@@ -34,13 +34,40 @@ class MockPipeline:
         return self._chunks
 
 
+def test_ingestion_replay_route_uses_dependency_overrides():
+    """Ingestion /replay route gets repo + pipeline via Depends."""
+    from unittest.mock import MagicMock
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from ekrs_rag.api.routes.ingestion import router, get_task_repo, get_pipeline
+
+    sentinel_repo = MagicMock()
+    sentinel_repo.get.return_value = None  # task unknown → 404
+    sentinel_pipeline = MagicMock()
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_task_repo] = lambda: sentinel_repo
+    app.dependency_overrides[get_pipeline] = lambda: sentinel_pipeline
+
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/ingestion/replay",
+        json={"request_id": "x", "replayed_by": "test"},
+        headers={"X-Parser-Token": "test-token"},
+    )
+    assert resp.status_code == 404
+    sentinel_repo.get.assert_called_with("x")
+
+
 @pytest.fixture(autouse=True)
 def _isolate_pipeline():
-    """Reset module-level pipeline between tests."""
-    from ekrs_rag.api.routes import ingestion as imod
-    imod.set_pipeline(None)
+    """No-op (pipeline no longer module-global — phase 5.5 E).
+
+    Kept as autouse to avoid surprising fixture ordering changes; the
+    original implementation called imod.set_pipeline(None) which is
+    deleted in T3.
+    """
     yield
-    imod.set_pipeline(None)
 
 
 def _build_app(repo: TaskRepo) -> FastAPI:

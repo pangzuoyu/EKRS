@@ -7,12 +7,11 @@ GET /v1/ingestion/status/{doc_hash} — query ingestion status
 from __future__ import annotations
 
 import hashlib
-import hmac
 import logging
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from ekrs_shared.idempotency import request_id_from_trace
@@ -29,29 +28,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/ingestion", tags=["ingestion"])
 
-# Set by main.py lifespan
-_pipeline: IngestionPipeline | None = None
-_lock: RedisLock | None = None
-_repo: TaskRepo | None = None
-
-
-def set_pipeline(pipeline: IngestionPipeline) -> None:
-    """Inject the ingestion pipeline instance (called at startup)."""
-    global _pipeline
-    _pipeline = pipeline
-
-
-def set_redis_lock(lock: RedisLock) -> None:
-    """Inject the distributed lock instance (called at startup)."""
-    global _lock
-    _lock = lock
-
-
-def set_task_repo(repo: TaskRepo) -> None:
-    """Inject the task repository instance (called at startup)."""
-    global _repo
-    _repo = repo
-
 
 # ---------------------------------------------------------------------------
 # Dependency functions
@@ -59,6 +35,7 @@ def set_task_repo(repo: TaskRepo) -> None:
 
 
 def get_pipeline(request: Request) -> IngestionPipeline:
+    """Strict dep: read pipeline from app.state. 503 if uninitialized."""
     p = getattr(request.app.state, "pipeline", None)
     if p is None:
         raise HTTPException(status_code=503, detail="ingestion pipeline not initialized")
@@ -66,6 +43,7 @@ def get_pipeline(request: Request) -> IngestionPipeline:
 
 
 def get_redis_lock(request: Request) -> RedisLock:
+    """Strict dep: read redis lock from app.state. 503 if uninitialized."""
     lock = getattr(request.app.state, "redis_lock", None)
     if lock is None:
         raise HTTPException(status_code=503, detail="redis lock not initialized")
@@ -73,36 +51,27 @@ def get_redis_lock(request: Request) -> RedisLock:
 
 
 def get_task_repo(request: Request) -> TaskRepo:
+    """Strict dep: read task repo from app.state. 503 if uninitialized."""
     repo = getattr(request.app.state, "task_repo", None)
     if repo is None:
         raise HTTPException(status_code=503, detail="task repo not initialized")
     return repo
 
 
-def _validate_token(token: str | None) -> None:
-    """Timing-safe token validation."""
-    if not token:
-        raise HTTPException(status_code=403, detail="Missing X-Parser-Token")
-    if not hmac.compare_digest(token, settings.PARSER_TOKEN):
-        raise HTTPException(status_code=403, detail="Invalid token")
-
-
 @router.post("/notify", status_code=202)
 async def notify(
     notification: IngestionNotification,
     background_tasks: BackgroundTasks,
-    x_parser_token: str | None = Header(None),
+    pipeline: IngestionPipeline = Depends(get_pipeline),
+    lock: RedisLock = Depends(get_redis_lock),
+    repo: TaskRepo = Depends(get_task_repo),
+    _auth: None = Depends(require_parser_token),
 ):
     """Accept parser notification and queue async ingestion.
 
     Idempotency: same (trace_id, doc_hash, version) → 202 duplicate.
     Distributed lock: same doc_hash in-flight elsewhere → 202 in_flight.
     """
-    _validate_token(x_parser_token)
-
-    if _pipeline is None or _lock is None or _repo is None:
-        raise HTTPException(status_code=503, detail="Service not ready")
-
     doc_hash = notification.doc_hash
     version = notification.version
     request_id = request_id_from_trace(
@@ -113,7 +82,7 @@ async def notify(
     # return "in_flight" without touching the tasks table (no PENDING row
     # left stranded for the local compensation scanner to clean up).
     lock_key = f"lock:ingest:{doc_hash}"
-    token = await _lock.acquire(lock_key, ttl_sec=settings.LOCK_TTL_SEC)
+    token = await lock.acquire(lock_key, ttl_sec=settings.LOCK_TTL_SEC)
     if token is None:
         logger.info("Lock held for %s; another pod is processing", doc_hash)
         return {"status": "in_flight", "doc_hash": doc_hash, "version": version}
@@ -121,35 +90,35 @@ async def notify(
     try:
         # Idempotency: UNIQUE constraint → already processed. Released lock
         # because we hold the lock but won't be doing background work.
-        if not _repo.try_insert(request_id, doc_hash):
+        if not repo.try_insert(request_id, doc_hash):
             logger.info("Duplicate notify (idempotent): %s", request_id)
-            await _lock.release(lock_key, token)
+            await lock.release(lock_key, token)
             return {"status": "duplicate", "doc_hash": doc_hash, "version": version}
     except Exception:
-        await _lock.release(lock_key, token)
+        await lock.release(lock_key, token)
         raise
 
     async def _locked_ingest() -> None:
         try:
-            await _pipeline.ingest(notification)
-            _repo.mark_status(request_id, "COMPLETED")
+            await pipeline.ingest(notification)
+            repo.mark_status(request_id, "COMPLETED")
         except Exception as e:
-            _repo.mark_status(request_id, "FAILED", error=str(e))
+            repo.mark_status(request_id, "FAILED", error=str(e))
             raise
         finally:
-            await _lock.release(lock_key, token)
+            await lock.release(lock_key, token)
 
     background_tasks.add_task(_locked_ingest)
     return {"status": "queued", "doc_hash": doc_hash, "version": version}
 
 
 @router.get("/status/{doc_hash}", response_model=IngestionStatus)
-async def get_status(doc_hash: str):
+async def get_status(
+    doc_hash: str,
+    pipeline: IngestionPipeline = Depends(get_pipeline),
+):
     """Query ingestion status for a document."""
-    if _pipeline is None:
-        raise HTTPException(status_code=503, detail="Service not ready")
-
-    status = _pipeline._qdrant.get_ingestion_status(doc_hash)
+    status = pipeline._qdrant.get_ingestion_status(doc_hash)
     if status is None:
         raise HTTPException(status_code=404, detail=f"No ingestion record for {doc_hash}")
 
@@ -165,7 +134,8 @@ class IngestionReplayRequest(BaseModel):
 @router.post("/replay")
 async def replay_ingestion(
     req: IngestionReplayRequest,
-    request: Request,
+    repo: TaskRepo = Depends(get_task_repo),
+    pipeline: IngestionPipeline = Depends(get_pipeline),
     _auth: None = Depends(require_parser_token),
 ):
     """Replay a completed ingestion by request_id.
@@ -177,14 +147,7 @@ async def replay_ingestion(
     # Lazy imports for audit (writers may not be initialized in tests).
     from ekrs_rag.observability.audit import get_writer
 
-    task_repo = getattr(request.app.state, "task_repo", None) or _repo
-    pipeline = _pipeline
-    if task_repo is None:
-        raise HTTPException(status_code=503, detail="task_repo not initialized")
-    if pipeline is None:
-        raise HTTPException(status_code=503, detail="pipeline not initialized")
-
-    row = task_repo.get(req.request_id)
+    row = repo.get(req.request_id)
     if row is None:
         raise HTTPException(status_code=404, detail="request_id not found")
     if row["status"] in ("PENDING", "RUNNING"):
