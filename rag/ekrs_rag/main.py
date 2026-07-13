@@ -8,15 +8,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager
+from collections.abc import Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
+from prometheus_client import REGISTRY, multiprocess, start_http_server
 
 from .api.middleware.observability import ObservabilityMiddleware
-from .api.routes import constraints, ingestion, metrics
+from .api.routes import constraints, ingestion
 from .concurrency.compensation import CompensationScanner
 from .concurrency.redis_lock import RedisLock
 from .core.config import settings
@@ -85,6 +87,25 @@ async def lifespan(app: FastAPI):
     redis, task_repo, compensation scanner, AuditWriter, AuditIndex."""
     global _qdrant, _pipeline, _embedder, _retriever
     global _audit_writer, _audit_index, _task_repo
+
+    # ---- Phase 5.5 D: sidecar metrics exporter ----
+    # PROMETHEUS_MULTIPROC_DIR 可选。单 worker 模式(开发)留空即可。
+    # 多 worker 模式必须在 uvicorn fork 子进程前由部署层设置
+    # (docker-compose env / k8s Deployment env / shell export)。
+    # 注:Counters 在 rag/ekrs_rag/observability/metrics.py:18 的 import-time
+    # side-effects 中已注册,env var 检查仅为 fail-soft 提示,不在这里 setenv。
+    multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    if multiproc_dir:
+        p = Path(multiproc_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        multiprocess.MultiProcessCollector(REGISTRY)
+        logger.info("Multi-process metrics mode: %s", p)
+
+    metrics_host = os.environ.get("METRICS_HOST", "127.0.0.1")
+    metrics_port = int(os.environ.get("METRICS_PORT", "9090"))
+    httpd, _ = start_http_server(metrics_port, addr=metrics_host)
+    logger.info("Metrics exporter listening on %s:%d", metrics_host, metrics_port)
+    app.state.metrics_httpd = httpd
 
     setup_logging(debug=settings.EKRS_DEBUG, debug_log_path=settings.DEBUG_LOG_PATH)
     logger.info("Starting EKRS RAG service (debug=%s)", settings.EKRS_DEBUG)
@@ -166,7 +187,29 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # ---- Phase 5.5 D: sidecar shutdown ----
+    httpd = getattr(app.state, "metrics_httpd", None)
+    if httpd is not None:
+        httpd.shutdown()       # Stop serve_forever().
+        httpd.server_close()   # Release the listening socket immediately.
+    logger.info("Metrics exporter stopped")
+
     logger.info("Shutting down EKRS RAG service")
+
+
+@contextmanager
+def _sync_lifespan(app: FastAPI) -> Iterator[object]:
+    """Drive Starlette's async lifespan context from synchronous tests."""
+    cm = app.router.lifespan_context(app)
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(cm.__aenter__())
+        yield result
+    finally:
+        try:
+            loop.run_until_complete(cm.__aexit__(None, None, None))
+        finally:
+            loop.close()
 
 
 def create_app() -> FastAPI:
@@ -179,7 +222,6 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(ObservabilityMiddleware)
     app.include_router(ingestion.router)
-    app.include_router(metrics.router)
     app.include_router(constraints.router)
 
     @app.get("/health", response_class=PlainTextResponse)
