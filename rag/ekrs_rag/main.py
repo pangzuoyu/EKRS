@@ -159,15 +159,12 @@ async def lifespan(app: FastAPI):
         _embedder = BGESmallEmbedder()
         _retriever = EKRSRetriever(qdrant=_qdrant, embedder=_embedder)
 
-        # Wire up constraints router
-        constraints.set_retriever(_retriever)
-
-        # Store on app.state for route access
+        # retriever wired to app.state below; get_retriever dep reads it
         app.state.embedder = _embedder
         app.state.retriever = _retriever
 
         _pipeline = IngestionPipeline(_qdrant, settings.SHARED_STORAGE_PATH)
-        ingestion.set_pipeline(_pipeline)
+        app.state.pipeline = _pipeline
 
         # Phase 4: redis, task_repo, lock, compensation
         _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
@@ -177,8 +174,6 @@ async def lifespan(app: FastAPI):
         app.state.redis = _redis
         app.state.redis_lock = _redis_lock
         app.state.task_repo = _task_repo
-        ingestion.set_redis_lock(_redis_lock)
-        ingestion.set_task_repo(_task_repo)
 
         # handler lookup is dynamic so tests can patch compensation_handler.
         handler = _get_compensation_handler()
@@ -211,7 +206,6 @@ async def lifespan(app: FastAPI):
                 "AuditIndex build failed (replay will be unavailable): %s", e
             )
             _audit_index = None
-        constraints.set_audit_index(_audit_index)
         if _audit_index is not None:
             attach_index(_audit_index)
         app.state.audit_index = _audit_index
