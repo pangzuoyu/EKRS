@@ -1,6 +1,6 @@
 """Unit tests for the Prometheus metrics registry.
 
-Covers: METRICS namespace presence for all 13 counters/gauges/histograms,
+Covers: METRICS namespace presence for all 14 counters/gauges/histograms,
 is_route_template guard, safe_inc/safe_observe label-cardinality protection.
 """
 import logging
@@ -11,7 +11,7 @@ from ekrs_rag.observability.metrics import (
 
 
 def test_all_metrics_registered():
-    """All 13 documented metrics exist on METRICS namespace."""
+    """All 14 documented metrics exist on METRICS namespace."""
     assert hasattr(METRICS, "http_requests_total")
     assert hasattr(METRICS, "http_request_duration_seconds")
     assert hasattr(METRICS, "http_requests_inprogress")
@@ -25,6 +25,8 @@ def test_all_metrics_registered():
     assert hasattr(METRICS, "compensation_pending_tasks")
     assert hasattr(METRICS, "compensation_retries_total")
     assert hasattr(METRICS, "qdrant_write_failures_total")
+    assert hasattr(METRICS, "route_failures_total")
+    assert hasattr(METRICS, "audit_write_failures_total")
 
 
 def test_is_route_template_accepts_only_templates():

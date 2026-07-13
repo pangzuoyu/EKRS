@@ -3,10 +3,12 @@
 Exercises a FastAPI app wired with the middleware against a real AuditWriter.
 Verifies that trace_id appears in the audit log lines, that the response
 echoes the trace_id, and that inbound X-Trace-Id headers are honored.
+Also verifies that the real response.status_code (not a hardcoded 200) is
+written into the endpoint_completed audit event.
 """
 import json
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.testclient import TestClient
 
 from ekrs_rag.api.middleware.observability import ObservabilityMiddleware
@@ -24,6 +26,15 @@ def _make_app():
     async def probe():
         # Confirm the contextvar is visible inside the request
         return {"trace_id": get_trace_id()}
+
+    @app.get("/not-found")
+    async def not_found():
+        # FastAPI converts to 404 only via HTTPException — explicit Response
+        return Response(status_code=404, content="nope")
+
+    @app.get("/boom")
+    async def boom():
+        return Response(status_code=500, content="kaboom")
 
     return app
 
@@ -78,5 +89,35 @@ def test_middleware_emits_audit_events_and_propagates_trace_id(tmp_path):
         assert {e["event"] for e in provided_events} == {
             "endpoint_started", "endpoint_completed"
         }
+    finally:
+        audit.set_writer(None)
+
+
+def test_endpoint_completed_uses_real_response_status_code(tmp_path):
+    """M1 fix: audit's status_code must reflect the real Response, not 200.
+
+    Visits /not-found (404) and /boom (500) and asserts the audit log
+    endpoint_completed events carry those status codes.
+    """
+    log = tmp_path / "audit.log"
+    writer = AuditWriter(str(log))
+    writer.register_event_schema("endpoint_started", set())
+    writer.register_event_schema("endpoint_completed", {"status_code"})
+    audit.set_writer(writer)
+
+    try:
+        app = _make_app()
+        with TestClient(app) as client:
+            r404 = client.get("/not-found")
+            assert r404.status_code == 404
+            r500 = client.get("/boom")
+            assert r500.status_code == 500
+
+        lines = [json.loads(l) for l in log.read_text().strip().split("\n")]
+        completed = [e for e in lines if e["event"] == "endpoint_completed"]
+        # One completed event per request
+        assert len(completed) == 2
+        codes = sorted(e["status_code"] for e in completed)
+        assert codes == [404, 500]
     finally:
         audit.set_writer(None)

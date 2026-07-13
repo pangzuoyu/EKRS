@@ -92,6 +92,8 @@ HTTP X-Trace-Id header
 
 ### Audit 事件清单
 
+共 15 个事件, 在 main.py lifespan 启动时一次性调用 `_audit_writer.register_event_schema(event_type, required_fields)` 注册到 base class 的 schema registry, 后续 `log_event()` 写入前自动校验必填字段缺失即抛 ValueError。
+
 | event | 触发点 | 关键字段 |
 |-------|--------|----------|
 | `endpoint_started` | middleware | endpoint, method |
@@ -110,7 +112,7 @@ HTTP X-Trace-Id header
 | `qdrant_write_failed` | Qdrant 写异常 | collection, batch_size, error_type |
 | `lock_acquire_failed` | RedisLock 返回 None | lock_key, ttl_sec |
 
-## Prometheus 指标集 (12 个)
+## Prometheus 指标集 (12 个 spec + 2 内部)
 
 ### HTTP (middleware 自动)
 
@@ -139,6 +141,11 @@ HTTP X-Trace-Id header
 ### 依赖健康
 
 - `rag_qdrant_write_failures_total{operation}` counter (upsert|delete)
+
+### 内部 (out of spec, 仅用于自身健康监控)
+
+- `rag_audit_write_failures_total` counter — audit log 写入失败计数
+- `rag_route_failures_total{operation}` counter — @metered 装饰的路由抛异常计数
 
 默认 buckets: HTTP=(0.005..10s), Solve=(0.01..5s), Ingest=(0.1..300s)
 

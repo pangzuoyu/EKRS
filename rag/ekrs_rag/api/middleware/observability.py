@@ -55,14 +55,14 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
         try:
             response = await call_next(request)
             response.headers["X-Trace-Id"] = trace_id
-            return response
-        finally:
             duration_ms = int((time.monotonic() - start) * 1000)
             if writer:
                 writer.write(
                     "endpoint_completed",
                     trace_id=trace_id,
-                    status_code=200,  # middleware doesn't observe response; default 200
+                    status_code=getattr(response, "status_code", 200),
                     duration_ms=duration_ms,
                 )
+            return response
+        finally:
             reset_trace_id(token)

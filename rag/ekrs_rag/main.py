@@ -152,9 +152,16 @@ async def lifespan(app: FastAPI):
 
     # Build audit index async (don't block readiness on multi-GB scan)
     _audit_index = AuditIndex(audit_path)
-    await asyncio.to_thread(_audit_index.build)
+    try:
+        await asyncio.to_thread(_audit_index.build)
+    except Exception as e:
+        logger.warning(
+            "AuditIndex build failed (replay will be unavailable): %s", e
+        )
+        _audit_index = None
     constraints.set_audit_index(_audit_index)
-    attach_index(_audit_index)
+    if _audit_index is not None:
+        attach_index(_audit_index)
     app.state.audit_index = _audit_index
 
     yield

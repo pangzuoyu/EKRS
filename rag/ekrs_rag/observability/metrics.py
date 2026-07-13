@@ -1,14 +1,12 @@
 """Prometheus metrics registry for EKRS RAG.
 
-12 metrics across HTTP/ingestion/solve/concurrency/qdrant, plus one
-internal audit-durability counter. Cardinality guard: any label named
-``endpoint`` must be a route template (literal segments or ``{param}``
-placeholders) — interpolated path values are rejected before reaching
-the registry.
+14 metrics across HTTP/ingestion/solve/concurrency/qdrant/audit/route-failures.
+Cardinality guard: any label named ``endpoint`` must be a route template
+(literal segments or ``{param}`` placeholders) — interpolated path values
+are rejected before reaching the registry.
 
-Helpers ``safe_inc`` / ``safe_observe`` / ``safe_set`` wrap the
-prometheus_client methods with try/except so that a metric failure
-never propagates into the caller.
+Helpers ``safe_inc`` / ``safe_observe`` wrap the prometheus_client methods
+with try/except so that a metric failure never propagates into the caller.
 """
 from __future__ import annotations
 
@@ -140,6 +138,13 @@ audit_write_failures_total = Counter(
     "Audit log write failures",
 )
 
+# @metered increments this on exception (Phase 5 observability — minor fix)
+route_failures_total = Counter(
+    "rag_route_failures_total",
+    "Route handler exceptions raised after @metered decoration",
+    ["operation"],
+)
+
 
 METRICS = SimpleNamespace(
     http_requests_total=http_requests_total,
@@ -156,6 +161,7 @@ METRICS = SimpleNamespace(
     compensation_retries_total=compensation_retries_total,
     qdrant_write_failures_total=qdrant_write_failures_total,
     audit_write_failures_total=audit_write_failures_total,
+    route_failures_total=route_failures_total,
 )
 
 
@@ -194,16 +200,3 @@ def safe_observe(histogram: Histogram, value: float, **labels: Any) -> None:
             histogram.observe(value)
     except Exception as e:
         logger.warning("metric observe failed: %s", e)
-
-
-def safe_set(gauge: Gauge, value: float, **labels: Any) -> None:
-    """Set gauge value; reject labels with interpolated path values."""
-    if not _validate_endpoint_label(labels):
-        return
-    try:
-        if labels:
-            gauge.labels(**labels).set(value)
-        else:
-            gauge.set(value)
-    except Exception as e:
-        logger.warning("metric set failed: %s", e)

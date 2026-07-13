@@ -4,9 +4,6 @@ Adds source_path + payload_sha256 columns to support Task 12
 (Ingestion Replay endpoint). The new columns allow replay handlers to
 locate the original parser payload without scanning shared storage.
 """
-import tempfile
-from pathlib import Path
-
 import pytest
 
 from ekrs_rag.storage.task_repo import TaskRepo

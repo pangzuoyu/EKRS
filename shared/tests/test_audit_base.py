@@ -29,5 +29,14 @@ def test_logger_does_not_propagate_to_root():
 
 def test_log_event_writes_json_with_event_field():
     audit = AuditLogger("test.audit.json")
+    # Register the schema so validate_event runs and we can prove registration
+    # took effect — not just "no exception".
+    audit.register_event_schema("sample", {"trace_id", "extra_field"})
     audit.log_event("sample", trace_id="abc", extra_field=42)
-    # Just verify no exception; content verified by RAG-specific tests
+    # Schema is recorded on the writer
+    assert "sample" in audit._schemas
+    assert audit._schemas["sample"] == {"trace_id", "extra_field"}
+    # Missing required field raises (proves validation is active, not silent)
+    import pytest
+    with pytest.raises(ValueError, match="extra_field"):
+        audit.validate_event("sample", trace_id="abc")

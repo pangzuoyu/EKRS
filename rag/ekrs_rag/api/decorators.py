@@ -10,8 +10,10 @@ import logging
 import time
 from typing import Any, Callable
 
+from fastapi import Response
+
 from ekrs_rag.observability.audit import get_writer
-from ekrs_rag.observability.metrics import safe_observe
+from ekrs_rag.observability.metrics import METRICS, safe_inc, safe_observe
 from ekrs_rag.observability.trace import get_trace_id
 
 logger = logging.getLogger("ekrs.observability.decorators")
@@ -29,7 +31,10 @@ def audited(event_name: str) -> Callable:
             status_code = 500
             try:
                 result = await func(*args, **kwargs)
-                status_code = 200
+                # Real status code if the route returned a Response; else 200.
+                status_code = (
+                    result.status_code if isinstance(result, Response) else 200
+                )
                 return result
             except Exception as e:
                 logger.warning("route %s raised: %s", event_name, e)
@@ -49,12 +54,16 @@ def audited(event_name: str) -> Callable:
     return decorator
 
 
-def metered(histogram) -> Callable:
+def metered(histogram, operation: str | None = None) -> Callable:
     """Decorator: observe duration into the given Histogram instance.
 
     Type-safe: caller passes the actual Histogram object (e.g.,
     METRICS.constraint_solve_duration_seconds) instead of a magic string.
     Typo at call site → ImportError at decoration time, never silent.
+
+    If ``operation`` is provided, exceptions are counted in
+    ``METRICS.route_failures_total{operation=<name>}`` so failures are
+    observable even when no audit writer is attached.
     """
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
@@ -62,6 +71,10 @@ def metered(histogram) -> Callable:
             start = time.monotonic()
             try:
                 return await func(*args, **kwargs)
+            except Exception:
+                if operation is not None:
+                    safe_inc(METRICS.route_failures_total, operation=operation)
+                raise
             finally:
                 duration = time.monotonic() - start
                 safe_observe(histogram, duration)

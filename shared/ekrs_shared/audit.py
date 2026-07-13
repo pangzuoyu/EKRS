@@ -36,7 +36,7 @@ class AuditLogger:
     def register_event_schema(
         self, event_type: str, required_fields: set[str]
     ) -> None:
-        """Register required fields for an event type (idempotent)."""
+        """Register required fields for an event type (sets; overwrites if already registered)."""
         self._schemas[event_type] = required_fields
 
     def validate_event(self, event_type: str, **kwargs: Any) -> None:

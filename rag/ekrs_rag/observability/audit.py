@@ -32,10 +32,7 @@ class AuditWriter(AuditLogger):
         # Pass-through formatter (base class already JSON-encodes message)
         handler.setFormatter(logging.Formatter("%(message)s"))
         self._logger.addHandler(handler)
-        # Track this writer's own FileHandler so _current_offset cannot be
-        # fooled by stale handlers left in the global logger from prior
-        # AuditWriter instances (matters under test pollution; benign in
-        # production where only one writer exists per process).
+        # Track our own handler so _current_offset is stable across instances.
         self._file_handler = handler
 
     def write(self, event_type: str, **kwargs) -> bool:
