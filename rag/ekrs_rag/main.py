@@ -191,7 +191,23 @@ async def lifespan(app: FastAPI):
         # Phase 5: observability wiring
         audit_path = settings.AUDIT_LOG_PATH
         Path(audit_path).parent.mkdir(parents=True, exist_ok=True)
-        _audit_writer = AuditWriter(audit_path)
+
+        def _on_audit_rollover() -> None:
+            """Rebuild AuditIndex byte offsets after audit.log rotates.
+
+            Reads the module-level `_audit_index` lazily — the index is
+            initialized further down, but rotation only fires after the
+            file exceeds 100 MB, well after startup completes.
+            """
+            global _audit_index
+            if _audit_index is not None:
+                try:
+                    _audit_index.build()
+                    logger.info("audit_index rebuilt after rollover")
+                except Exception:
+                    logger.exception("audit_index rebuild failed after rollover")
+
+        _audit_writer = AuditWriter(audit_path, on_rollover=_on_audit_rollover)
         for event_type, required in _EVENT_SCHEMAS.items():
             _audit_writer.register_event_schema(event_type, required)
         set_writer(_audit_writer)
