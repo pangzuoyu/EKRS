@@ -50,6 +50,9 @@ class AuditWriter(AuditLogger):
 
     def write(self, event_type: str, **kwargs) -> bool:
         """Log an event. Returns False if write fails (never raises)."""
+        from ekrs_rag.observability.trace import get_skip_audit
+        if get_skip_audit():
+            return False
         try:
             # Capture file offset BEFORE write so AuditIndex can locate the line
             offset = self._current_offset()
