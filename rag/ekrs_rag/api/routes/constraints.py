@@ -50,6 +50,24 @@ def set_audit_index(index: AuditIndex) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Dependency functions
+# ---------------------------------------------------------------------------
+
+
+def get_retriever(request: Request) -> EKRSRetriever:
+    """Strict dep: read retriever from app.state. 503 if uninitialized."""
+    r = getattr(request.app.state, "retriever", None)
+    if r is None:
+        raise HTTPException(status_code=503, detail="retriever not initialized")
+    return r
+
+
+def get_audit_index(request: Request) -> AuditIndex | None:
+    """Optional dep: returns AuditIndex or None. Replay branch checks None."""
+    return getattr(request.app.state, "audit_index", None)
+
+
+# ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
 

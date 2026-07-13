@@ -53,6 +53,32 @@ def set_task_repo(repo: TaskRepo) -> None:
     _repo = repo
 
 
+# ---------------------------------------------------------------------------
+# Dependency functions
+# ---------------------------------------------------------------------------
+
+
+def get_pipeline(request: Request) -> IngestionPipeline:
+    p = getattr(request.app.state, "pipeline", None)
+    if p is None:
+        raise HTTPException(status_code=503, detail="ingestion pipeline not initialized")
+    return p
+
+
+def get_redis_lock(request: Request) -> RedisLock:
+    lock = getattr(request.app.state, "redis_lock", None)
+    if lock is None:
+        raise HTTPException(status_code=503, detail="redis lock not initialized")
+    return lock
+
+
+def get_task_repo(request: Request) -> TaskRepo:
+    repo = getattr(request.app.state, "task_repo", None)
+    if repo is None:
+        raise HTTPException(status_code=503, detail="task repo not initialized")
+    return repo
+
+
 def _validate_token(token: str | None) -> None:
     """Timing-safe token validation."""
     if not token:
