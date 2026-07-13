@@ -36,10 +36,16 @@ class MockPipeline:
 
 def test_ingestion_replay_route_uses_dependency_overrides():
     """Ingestion /replay route gets repo + pipeline via Depends."""
+    import os
     from unittest.mock import MagicMock
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from ekrs_rag.api.routes.ingestion import router, get_task_repo, get_pipeline
+
+    # Disable auth — this test exercises dependency_overrides, not auth.
+    # Other tests in the suite set PARSER_TOKEN; without clearing here,
+    # the auth dep would 403 on the wrong token before our overrides resolve.
+    os.environ["PARSER_TOKEN"] = ""
 
     sentinel_repo = MagicMock()
     sentinel_repo.get.return_value = None  # task unknown → 404
@@ -53,7 +59,6 @@ def test_ingestion_replay_route_uses_dependency_overrides():
     resp = client.post(
         "/v1/ingestion/replay",
         json={"request_id": "x", "replayed_by": "test"},
-        headers={"X-Parser-Token": "test-token"},
     )
     assert resp.status_code == 404
     sentinel_repo.get.assert_called_with("x")
