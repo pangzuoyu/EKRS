@@ -90,3 +90,36 @@ def test_exporter_stops_on_lifespan_exit(sidecar_env):
     # Lifespan has exited; server_close() should have released the socket
     with pytest.raises((ConnectionRefusedError, httpx.ConnectError, OSError)):
         httpx.get(url, timeout=1.0)
+
+
+def test_multiproc_dir_missing_raises_runtime_error(
+    sidecar_env, tmp_path, monkeypatch
+):
+    """Startup rejects a configured multiprocess directory that does not exist."""
+    missing_dir = tmp_path / "missing-prometheus-multiproc"
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(missing_dir))
+
+    app = create_app()
+    with pytest.raises(RuntimeError) as exc_info:
+        with TestClient(app):
+            pass
+
+    assert str(exc_info.value) == (
+        f"PROMETHEUS_MULTIPROC_DIR={missing_dir} does not exist. "
+        "Create the directory before starting the process "
+        "(MmapedValue opens .db files at import-time)."
+    )
+
+
+def test_bind_conflict_is_nonfatal(sidecar_env):
+    """Startup continues when another process already owns the exporter port."""
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.bind(("127.0.0.1", sidecar_env["port"]))
+    blocker.listen(1)
+
+    try:
+        app = create_app()
+        with TestClient(app):
+            assert app.state.metrics_httpd is None
+    finally:
+        blocker.close()
