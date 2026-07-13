@@ -30,6 +30,10 @@ def mock_qdrant():
 @pytest.fixture
 def client(mock_qdrant):
     """Create TestClient with mocked Qdrant + Phase 4 components."""
+    # Match pre-T3 behavior: settings.PARSER_TOKEN default is the test secret.
+    # T3 moved auth to Depends(require_parser_token) which reads the env var;
+    # without this, missing/invalid-token tests return 202 instead of 403.
+    os.environ["PARSER_TOKEN"] = "change-me-to-a-secure-random-string-32chars"
     mock_task_repo = MagicMock()
     mock_task_repo.init.return_value = None
     mock_task_repo.try_insert.return_value = True
