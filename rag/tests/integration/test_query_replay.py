@@ -15,26 +15,45 @@ from ekrs_rag.observability.audit import AuditWriter, set_writer
 from ekrs_rag.observability.audit_index import AuditIndex
 
 
-@pytest.fixture(autouse=True)
-def _reset_module_globals():
-    """Reset module-level singletons before AND after each test.
+def test_constraints_route_uses_dependency_overrides():
+    """Constraints route gets retriever via Depends; overrides take precedence."""
+    from ekrs_rag.api.routes.constraints import router, get_retriever
 
-    `constraints._retriever`, `constraints._audit_index`, and the
-    `audit.set_writer` global are all module-scoped. Other test files
-    (e.g. test_healthz) trigger the production lifespan which calls
-    `constraints.set_retriever(real_retriever)`. That real retriever
-    would then leak into test 1 here and crash on `retrieve()` because
-    the test environment has no Qdrant. Reset at fixture start clears
-    the pollution; reset at end keeps the next test file clean.
+    app = FastAPI()
+    app.include_router(router)
+
+    captured = {}
+
+    class MockRetriever:
+        def retrieve(self, query, top_k, active_scope=None):
+            captured["query"] = query
+            from ekrs_rag.retrieval.retriever import RetrievalResult
+            return RetrievalResult(
+                chunks=[], vector_scores=[], scope_scores=[], final_scores=[],
+            )
+
+    app.dependency_overrides[get_retriever] = lambda: MockRetriever()
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/constraints",
+        json={"query": "x"},
+        headers={"X-Parser-Token": "test-token"},
+    )
+    # Gate 1: empty chunks → 404 (Insufficient recall)
+    assert resp.status_code == 404, f"expected 404, got {resp.status_code}"
+    assert captured["query"] == "x"
+
+
+@pytest.fixture(autouse=True)
+def _reset_audit_writer():
+    """Reset audit module's global writer between tests (out of Phase 5.5 E scope).
+
+    `audit.set_writer` is module-scoped; without reset, the writer leaks across
+    tests. The constraints-route globals/setters this used to reset are
+    deleted in Phase 5.5 E — replaced by `app.dependency_overrides` per-test.
     """
-    from ekrs_rag.api.routes import constraints as cmod
-    cmod.set_retriever(None)
-    cmod.set_audit_index(None)
     set_writer(None)
     yield
-    from ekrs_rag.api.routes import constraints as cmod
-    cmod.set_retriever(None)
-    cmod.set_audit_index(None)
     set_writer(None)
 
 

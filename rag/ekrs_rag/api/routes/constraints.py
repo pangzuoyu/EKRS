@@ -9,7 +9,6 @@ POST /v1/constraints — query engineering constraints via the three-gate pipeli
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, model_validator
@@ -28,25 +27,6 @@ router = APIRouter(prefix="/v1", tags=["constraints"])
 
 # Gate threshold
 MIN_RECALL_CHUNKS = 1
-
-# Module-level retriever, set by main.py at startup
-_retriever: Optional[EKRSRetriever] = None
-
-
-def set_retriever(retriever: EKRSRetriever) -> None:
-    """Inject the retriever instance (called at startup)."""
-    global _retriever
-    _retriever = retriever
-
-
-# Module-level audit index, set by main.py at startup (Phase 5 Query Replay)
-_audit_index: Optional[AuditIndex] = None
-
-
-def set_audit_index(index: AuditIndex) -> None:
-    """Inject audit index (called at startup)."""
-    global _audit_index
-    _audit_index = index
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +91,8 @@ class ConstraintQueryResponse(BaseModel):
 @router.post("/constraints", response_model=ConstraintQueryResponse)
 async def query_constraints(
     query: ConstraintQuery,
-    request: Request,
+    retriever: EKRSRetriever = Depends(get_retriever),
+    audit_index: AuditIndex | None = Depends(get_audit_index),
     _auth: None = Depends(require_parser_token),
 ) -> ConstraintQueryResponse:
     """Query engineering constraints using the three-gate pipeline.
@@ -140,10 +121,10 @@ async def query_constraints(
     if query.replay:
         if not query.replay_trace_id:
             raise HTTPException(status_code=400, detail="replay_trace_id required")
-        if _audit_index is None:
+        if audit_index is None:
             raise HTTPException(status_code=503, detail="audit index not initialized")
 
-        prior_lines = _audit_index.seek(query.replay_trace_id)
+        prior_lines = audit_index.seek(query.replay_trace_id)
         if prior_lines is None:
             raise HTTPException(status_code=400, detail="no_prior_solve")
 
@@ -153,12 +134,8 @@ async def query_constraints(
         if not prior_started or not prior_solved:
             raise HTTPException(status_code=400, detail="incomplete_prior_solve")
 
-        # From here on the retriever is needed to re-fetch the prior query.
-        retriever: EKRSRetriever = getattr(request.app.state, "retriever", None) or _retriever
-        if retriever is None:
-            # Replay mode but retrieval isn't available yet — same gate-1
-            # behavior as the normal flow (insufficient recall → 404).
-            raise HTTPException(status_code=404, detail="Insufficient recall")
+        # retriever is already injected via Depends(get_retriever)
+        # (None case raises 503 in the dep above)
 
         # Override inputs with prior values
         replay_query = prior_started.raw.get("query", query.query)
@@ -200,10 +177,8 @@ async def query_constraints(
 
     # --- Normal flow continues below (existing code) ---
 
-    # Get retriever from app.state (set by main.py startup) or module-level fallback
-    retriever: EKRSRetriever = getattr(request.app.state, "retriever", None) or _retriever
-    if retriever is None:
-        raise RuntimeError("Retriever not initialized")
+    # retriever is already injected via Depends(get_retriever)
+    # (None case raises 503 in the dep)
 
     active_scope = query.context.get("scope_path")
 
