@@ -64,7 +64,7 @@ Minimal set in `.env.example`:
 ## Code Conventions
 
 - All logs: structured JSON via `python-json-logger` (spec §12)
-- Audit log (`audit.log`): permanent, never disabled, records every solve with evidence
+- Audit log (`audit.log`): permanent, size-bounded by rotation (100MB × 5 gzip), records every solve with evidence
 - Debug log: only when `EKRS_DEBUG=true`, rotatable, max 100MB x 5 backups
 - `shared/` installed as editable dep from both `rag/` and `dev_ui/`
 
