@@ -71,11 +71,13 @@ def client():
             mock_scanner_cls.return_value = mock_scanner
 
             from ekrs_rag.main import app
-            # Wire the route's module-level state so /notify is ready
-            from ekrs_rag.api.routes import ingestion
-            ingestion.set_pipeline(mock_pipeline)
-            ingestion.set_redis_lock(lock)
-            ingestion.set_task_repo(repo)
+            # Wire route deps via dependency_overrides (set_X deleted in T3)
+            from ekrs_rag.api.routes.ingestion import (
+                get_pipeline, get_redis_lock, get_task_repo,
+            )
+            app.dependency_overrides[get_pipeline] = lambda: mock_pipeline
+            app.dependency_overrides[get_redis_lock] = lambda: lock
+            app.dependency_overrides[get_task_repo] = lambda: repo
 
             with TestClient(app) as c:
                 yield c, repo, lock, mock_pipeline
