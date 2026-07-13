@@ -33,3 +33,10 @@ Out of scope (unchanged):
 - /healthz 暴露 exporter alive: Phase 6 follow-up
 - Alertmanager / PromQL 报警规则
 - Iron Rules / audit schema / Phase 5 replay 行为
+
+## Known issues / follow-ups
+
+- `.superpowers/sdd/.gitignore` 的 blanket `*` 规则需改为显式 allowlist；`PHASE-*-COMPLETE.md` 和 `*.diff` review packages 是有意保留的产物，brief/report drafts 属于 scratch。
+- F3: `/healthz` 暴露 exporter alive — Phase 6。
+- F4: entrypoint wipe `PROMETHEUS_MULTIPROC_DIR` — Phase 6 multi-worker。
+- F8: multiproc subprocess integration test — Phase 6。
