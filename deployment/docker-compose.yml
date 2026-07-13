@@ -41,6 +41,7 @@ services:
       - COLLECTION_NAME=rag_documents
       - MAX_CHUNK_TOKENS=500
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-bge-small-en-v1.5}
+      - METRICS_HOST=0.0.0.0    # 跨容器 scrape 必需;.env.example 默认 127.0.0.1 仅供本地开发
     volumes:
       - parsed_lib:/parsed_lib
     mem_limit: 6g
