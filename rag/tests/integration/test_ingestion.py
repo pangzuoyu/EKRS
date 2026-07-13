@@ -50,10 +50,12 @@ def client(mock_qdrant):
                             from ekrs_rag.ingestion.pipeline import IngestionPipeline
                             from ekrs_rag.core.config import settings
                             pipeline = IngestionPipeline(mock_qdrant, settings.SHARED_STORAGE_PATH)
-                            from ekrs_rag.api.routes import ingestion
-                            ingestion.set_pipeline(pipeline)
-                            ingestion.set_redis_lock(mock_redis_lock)
-                            ingestion.set_task_repo(mock_task_repo)
+                            from ekrs_rag.api.routes.ingestion import (
+                                get_pipeline, get_redis_lock, get_task_repo,
+                            )
+                            app.dependency_overrides[get_pipeline] = lambda: pipeline
+                            app.dependency_overrides[get_redis_lock] = lambda: mock_redis_lock
+                            app.dependency_overrides[get_task_repo] = lambda: mock_task_repo
 
                             with TestClient(app) as c:
                                 yield c

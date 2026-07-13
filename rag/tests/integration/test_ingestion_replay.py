@@ -59,22 +59,14 @@ def test_ingestion_replay_route_uses_dependency_overrides():
     sentinel_repo.get.assert_called_with("x")
 
 
-@pytest.fixture(autouse=True)
-def _isolate_pipeline():
-    """No-op (pipeline no longer module-global — phase 5.5 E).
-
-    Kept as autouse to avoid surprising fixture ordering changes; the
-    original implementation called imod.set_pipeline(None) which is
-    deleted in T3.
-    """
-    yield
-
-
-def _build_app(repo: TaskRepo) -> FastAPI:
+def _build_app(repo: TaskRepo, pipeline=None) -> FastAPI:
     app = FastAPI()
     app.add_middleware(ObservabilityMiddleware)
     app.include_router(ingestion_router)
     app.state.task_repo = repo
+    if pipeline is not None:
+        from ekrs_rag.api.routes.ingestion import get_pipeline
+        app.dependency_overrides[get_pipeline] = lambda: pipeline
     return app
 
 
@@ -94,12 +86,8 @@ def test_replay_completed_task_succeeds(tmp_path):
     repo.try_insert_with_source(rid, "d1", str(jsonl), expected_sha)
     repo.mark_status(rid, "COMPLETED")
 
-    # Inject mock pipeline
-    from ekrs_rag.api.routes import ingestion as imod
     mock = MockPipeline(chunks=5)
-    imod.set_pipeline(mock)
-
-    app = _build_app(repo)
+    app = _build_app(repo, pipeline=mock)
     client = TestClient(app)
     resp = client.post("/v1/ingestion/replay", json={
         "request_id": rid,
@@ -127,10 +115,7 @@ def test_replay_pre_phase5_task_returns_409(tmp_path):
     repo.try_insert(rid, "d-old")  # no source_path/payload_sha256
     repo.mark_status(rid, "COMPLETED")
 
-    from ekrs_rag.api.routes import ingestion as imod
-    imod.set_pipeline(MockPipeline())
-
-    app = _build_app(repo)
+    app = _build_app(repo, pipeline=MockPipeline())
     client = TestClient(app)
     resp = client.post("/v1/ingestion/replay", json={
         "request_id": rid,
@@ -151,10 +136,7 @@ def test_replay_in_flight_task_returns_409(tmp_path):
     repo.try_insert_with_source(rid, "d", "/some/path.jsonl", "h")
     # Leave status as PENDING (default from try_insert)
 
-    from ekrs_rag.api.routes import ingestion as imod
-    imod.set_pipeline(MockPipeline())
-
-    app = _build_app(repo)
+    app = _build_app(repo, pipeline=MockPipeline())
     client = TestClient(app)
     resp = client.post("/v1/ingestion/replay", json={
         "request_id": rid,
@@ -172,10 +154,7 @@ def test_replay_unknown_request_id_returns_404(tmp_path):
     repo = TaskRepo(str(db_path))
     repo.init()
 
-    from ekrs_rag.api.routes import ingestion as imod
-    imod.set_pipeline(MockPipeline())
-
-    app = _build_app(repo)
+    app = _build_app(repo, pipeline=MockPipeline())
     client = TestClient(app)
     resp = client.post("/v1/ingestion/replay", json={
         "request_id": "nonexistent-request-id",
@@ -199,10 +178,7 @@ def test_replay_sha256_mismatch_returns_409(tmp_path):
     repo.try_insert_with_source(rid, "d1", str(jsonl), "wrong-hash-expected-at-notify")
     repo.mark_status(rid, "COMPLETED")
 
-    from ekrs_rag.api.routes import ingestion as imod
-    imod.set_pipeline(MockPipeline())
-
-    app = _build_app(repo)
+    app = _build_app(repo, pipeline=MockPipeline())
     client = TestClient(app)
     resp = client.post("/v1/ingestion/replay", json={
         "request_id": rid,
