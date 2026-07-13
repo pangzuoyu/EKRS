@@ -40,11 +40,16 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
         from ekrs_rag.observability.audit import get_writer
         writer = get_writer()
         if writer:
-            # route may not be resolved yet at dispatch start; use raw path
+            # Use the resolved route template (e.g. "/v1/constraints/{id}")
+            # rather than the raw URL to prevent cardinality explosion
+            # from path-param values. Fall back to url.path for unmatched
+            # routes (404s).
+            route = request.scope.get("route")
+            endpoint_label = route.path if route is not None else request.url.path
             writer.write(
                 "endpoint_started",
                 trace_id=trace_id,
-                endpoint=request.url.path,
+                endpoint=endpoint_label,
                 method=request.method,
             )
         try:

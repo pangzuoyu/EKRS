@@ -74,6 +74,7 @@ class ConstraintQueryResponse(BaseModel):
     conflicts: list[dict] = []
     trace: list[dict] = []
     mode: str  # "single" or "multi_branch"
+    deterministic_match: bool | None = None  # only set on replay responses
 
     @model_validator(mode="after")
     def _validate_primary_branch(self) -> "ConstraintQueryResponse":
@@ -176,6 +177,7 @@ async def query_constraints(
             conflicts=result.get("conflicts", []),
             trace=result.get("trace", []),
             mode="multi_branch" if replay_scope else "single",
+            deterministic_match=deterministic_match,
         )
 
     # --- Normal flow continues below (existing code) ---

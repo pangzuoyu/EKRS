@@ -15,6 +15,29 @@ from ekrs_rag.observability.audit import AuditWriter, set_writer
 from ekrs_rag.observability.audit_index import AuditIndex
 
 
+@pytest.fixture(autouse=True)
+def _reset_module_globals():
+    """Reset module-level singletons before AND after each test.
+
+    `constraints._retriever`, `constraints._audit_index`, and the
+    `audit.set_writer` global are all module-scoped. Other test files
+    (e.g. test_healthz) trigger the production lifespan which calls
+    `constraints.set_retriever(real_retriever)`. That real retriever
+    would then leak into test 1 here and crash on `retrieve()` because
+    the test environment has no Qdrant. Reset at fixture start clears
+    the pollution; reset at end keeps the next test file clean.
+    """
+    from ekrs_rag.api.routes import constraints as cmod
+    cmod.set_retriever(None)
+    cmod.set_audit_index(None)
+    set_writer(None)
+    yield
+    from ekrs_rag.api.routes import constraints as cmod
+    cmod.set_retriever(None)
+    cmod.set_audit_index(None)
+    set_writer(None)
+
+
 @pytest.fixture
 def audit_setup(tmp_path):
     log_path = tmp_path / "audit.log"
@@ -51,11 +74,16 @@ def test_replay_returns_deterministic_match(audit_setup):
         "replay": True,
         "replay_trace_id": audit_setup["prior_trace"],
     })
-    assert resp.status_code in (200, 404)  # 404 if retriever not initialized
-    # If 200, response should include deterministic_match
+    # 404 if retriever not initialized (gate-1 fallback); 200 means replay ran.
+    assert resp.status_code in (200, 404)
+    # If 200, the response MUST include deterministic_match=True. The seeded
+    # prior has branches_count=2; if retriever returns 0 chunks here the
+    # route would 404, so a 200 means re-solve succeeded and matched the
+    # stored count.
     if resp.status_code == 200:
         body = resp.json()
-        assert "deterministic_match" in body or "branches" in body
+        assert "deterministic_match" in body
+        assert body["deterministic_match"] is True
 
 
 def test_replay_unknown_trace_id_returns_400(audit_setup):
