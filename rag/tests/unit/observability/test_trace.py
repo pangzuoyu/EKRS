@@ -6,6 +6,7 @@ import asyncio
 
 from ekrs_rag.observability.trace import (
     get_trace_id, set_trace_id, reset_trace_id,
+    get_skip_audit, set_skip_audit, reset_skip_audit,
 )
 
 
@@ -21,6 +22,39 @@ def test_set_and_reset_trace_id():
     finally:
         reset_trace_id(token)
     assert get_trace_id() == "unknown"
+
+
+def test_skip_audit_default_false():
+    assert get_skip_audit() is False
+
+
+def test_skip_audit_set_and_reset():
+    token = set_skip_audit(True)
+    try:
+        assert get_skip_audit() is True
+    finally:
+        reset_skip_audit(token)
+    assert get_skip_audit() is False
+
+
+def test_skip_audit_isolated_across_async_tasks():
+    """Two concurrent tasks must not see each other's skip_audit flag."""
+    async def task(skip, barrier):
+        set_skip_audit(skip)
+        await barrier.wait()
+        seen = get_skip_audit()
+        return seen
+
+    async def main():
+        barrier = asyncio.Barrier(2)
+        results = await asyncio.gather(
+            task(True, barrier),
+            task(False, barrier),
+        )
+        assert True in results
+        assert False in results
+
+    asyncio.run(main())
 
 
 def test_trace_id_isolated_across_async_tasks():
