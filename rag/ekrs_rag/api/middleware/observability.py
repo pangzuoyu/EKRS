@@ -16,6 +16,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from ekrs_rag.observability.trace import (
     get_trace_id, reset_trace_id, set_trace_id,
+    set_skip_audit, reset_skip_audit,
 )
 
 HEADER_NAME = "x-trace-id"
@@ -35,6 +36,9 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         trace_id = extract_or_generate_trace_id(dict(request.headers))
         token = set_trace_id(trace_id)
+        # Suppress ALL audit writes for /healthz (k8s probe fires every few
+        # seconds; lifecycle events would dominate audit volume otherwise).
+        skip_token = set_skip_audit(request.url.path == "/healthz")
         start = time.monotonic()
         # Lazy import to avoid loading audit module when middleware is unused.
         from ekrs_rag.observability.audit import get_writer
@@ -65,4 +69,5 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
                 )
             return response
         finally:
+            reset_skip_audit(skip_token)
             reset_trace_id(token)
