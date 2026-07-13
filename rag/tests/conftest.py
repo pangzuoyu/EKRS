@@ -34,3 +34,18 @@ def _isolate_prometheus_registry():
             REGISTRY.unregister(c)
         except KeyError:
             pass
+
+    # Phase 5.5 D: also clean up multiproc-mode collectors. MultiProcessCollector
+    # (registered via lifespan when PROMETHEUS_MULTIPROC_DIR is set) prefixes
+    # its child collectors with 'prometheus_multiproc_'. Without this, repeated
+    # sessions accumulate duplicates.
+    multiproc_to_remove = []
+    for collector in list(REGISTRY._collector_to_names.keys()):
+        names = REGISTRY._collector_to_names.get(collector, set())
+        if any(n.startswith("prometheus_multiproc_") for n in names):
+            multiproc_to_remove.append(collector)
+    for c in multiproc_to_remove:
+        try:
+            REGISTRY.unregister(c)
+        except KeyError:
+            pass
