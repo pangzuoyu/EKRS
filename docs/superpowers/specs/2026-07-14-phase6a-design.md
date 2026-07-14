@@ -108,13 +108,25 @@
 - 新事件类型不新增(15 事件不变)
 
 ### D6: 覆盖率目标 85%
-- 路径:每实现一项跑 pytest --cov 验证;末态再调个别薄覆盖文件做兜底
-- 不为凑数写无意义测试,只补"已有功能但漏测"的真实路径
+- 每实现一项跑 `pytest --cov=ekrs_rag --cov-report=term-missing` 验证
+- 末态识别 <85% 文件,只补**真实缺测路径**(已有功能但漏测的 if/except 分支),不写无意义测试凑数
+- "兜底" = 找真实缺测路径补测,不是凑覆盖率数字
 
 ### D7: 文档表 / 审计字段落地方式
 - 文档三表:新增 aiosqlite 表(与 TaskRepo 同库,`ekrs.db`),DDL `0006_documents.sql`
 - lineage_snapshot / conflict_details:以 JSON 字符串(或 list)存 audit event kwargs(无需新表,审计是 append-only log)
 - 文档表只存元数据(doc_id, type, created_at, scope_path, status),向量仍在 Qdrant
+
+### D8: /v1/constraints/trace 的 scope_filter 语义
+**prefix match**:`event.scope_path.startswith(filter)` 才返回
+- 示例:`scope_filter="industry/"` → 匹配 `industry/petrochem/`、`industry/power/` 等所有 industry 前缀
+- 空或缺省 → 返回所有 scope 事件
+- 与 §7 issue 5 关联:`实施时验证前缀匹配是否够用,如需精确匹配后续调整`
+
+### D9: CI 覆盖率 gate
+- `pytest --cov=ekrs_rag --cov-fail-under=85` 加入 CI / pre-commit
+- 85% 目标有强制手段,不只是声明
+- 末态提交前必须绿
 
 ---
 
