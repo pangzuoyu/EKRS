@@ -249,6 +249,9 @@ Phase 2	约束求解核心：Hint 提取、引擎 v1、黄金集	引擎服务、
 Phase 3	作用域感知与多分支	作用域重排序、多分支输出	高温/一般工况分支正确
 Phase 4	系统集成：回调幂等、补偿任务、分布式锁	完整闭环	并发安全，状态最终一致
 Phase 5	可观测性：Prometheus、审计日志、CI 门禁	监控面板、Replay	指标可抓取，CI 阻断
+	- 5.5 D: Prometheus sidecar exporter (:9090, prometheus_client multiprocess)
+	- 5.5 E: 路由依赖注入（FastAPI Depends），删除模块级 set_X 单例
+	- 5.5 F: 审计日志 rotation (100MB × 5 gzip) + /healthz 不写审计
 7. 技术栈明细与接口细化
 组件	技术选型	用途
 业务层	Python 3.11 + FastAPI	API、文档管理、RAG
@@ -345,6 +348,7 @@ ekrs/
 ├── dev_ui/                   # Streamlit 调试界面
 ├── deployment/               # docker-compose, k8s
 ├── tests/                    # 单元、黄金集、集成
+├── docs/superpowers/         # 设计 spec + 实施 plan
 └── scripts/                  # 运维脚本
 14. 依赖清单
 text
@@ -354,6 +358,10 @@ FlagEmbedding, streamlit
 15. 部署拓扑与网络架构
 Docker Compose 编排 Qdrant、Redis、Engine、Business。生产环境通过 Ingress 暴露业务层 API。
 
+RAG 服务暴露两个端口：
+- 应用端口（默认 8000）：业务 API + `/healthz`
+- 指标端口（默认 9090）：Prometheus sidecar exporter，通过 `METRICS_HOST` / `METRICS_PORT` 配置。`PROMETHEUS_MULTIPROC_DIR` 设置后启用多进程 collector（每个 worker 写 `.db` 文件，单一进程 bind 9090 端口）。
+
 16. 安全规范
 服务间 X-Parser-Token 认证
 
@@ -362,6 +370,8 @@ Docker Compose 编排 Qdrant、Redis、Engine、Business。生产环境通过 In
 敏感信息通过 Secrets 注入
 
 审计日志不记录令牌
+
+审计日志 `audit.log` 永久保存，按 100 MB × 5 轮转（gzip 压缩，标准库 RotatingFileHandler）。`/healthz` 请求不写入审计（k8s 探活高频调用）。轮转后 AuditIndex 自动重建（仅扫描当前文件，跳过 `.gz` 历史）。15 个事件名/schema 不可变更。
 
 17. 错误码参考
 HTTP	业务错误码	说明
