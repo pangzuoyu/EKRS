@@ -83,8 +83,13 @@ def client():
             app.dependency_overrides[get_redis_lock] = lambda: lock
             app.dependency_overrides[get_task_repo] = lambda: repo
 
-            with TestClient(app) as c:
-                yield c, repo, lock, mock_pipeline
+            try:
+                with TestClient(app) as c:
+                    yield c, repo, lock, mock_pipeline
+            finally:
+                # Clear overrides so subsequent tests don't inherit leaked repos
+                # whose db_path is in a TemporaryDirectory that pytest has cleaned.
+                app.dependency_overrides.clear()
 
 
 def _notify_payload(doc_hash: str, trace_id: str = "t", version: int = 1) -> dict:

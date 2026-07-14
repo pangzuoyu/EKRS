@@ -49,10 +49,14 @@ def e2e_client(
         MagicMock(return_value=fake_redis),
     )
     monkeypatch.setattr(main_module, "setup_logging", MagicMock())
+    # Defensive: clear any leaked dependency_overrides from prior tests
+    # (e.g., test_ingestion_phase4 sets get_task_repo override without teardown)
+    app.dependency_overrides.clear()
 
     with TestClient(app) as client:
         yield client
 
+    app.dependency_overrides.clear()
     app.state.document_repo.close()
     app.state.task_repo.close()
 
