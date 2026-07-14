@@ -252,6 +252,7 @@ Phase 5	可观测性：Prometheus、审计日志、CI 门禁	监控面板、Repl
 	- 5.5 D: Prometheus sidecar exporter (:9090, prometheus_client multiprocess)
 	- 5.5 E: 路由依赖注入（FastAPI Depends），删除模块级 set_X 单例
 	- 5.5 F: 审计日志 rotation (100MB × 5 gzip) + /healthz 不写审计
+Phase 6A	spec closure: 9 垂直切片补齐 (X-Admin-Key, DocumentRepo/A1, /trace, /calculate, soft fallback, golden 13→42, audit 2 fields, ENGINE_URL, 85% CI gate)	/api 路由 + audit 字段 + 测试 + CI	531 tests pass, 86.63% coverage, CI gate green
 7. 技术栈明细与接口细化
 组件	技术选型	用途
 业务层	Python 3.11 + FastAPI	API、文档管理、RAG
@@ -306,7 +307,7 @@ if strict:
 9. 测试策略
 单元测试：覆盖率 > 85%
 
-黄金集测试：≥20 用例，必须包含：
+黄金集测试：≥20 用例（Phase 6A 实测 42 cases: 13 legacy + 29 Phase 6A from `golden.md`），必须包含：
 
 草案 vs 正式 (is_binding 过滤)
 
@@ -378,7 +379,7 @@ RAG 服务暴露两个端口：
 
 审计日志不记录令牌
 
-审计日志 `audit.log` 永久保存，按 100 MB × 5 轮转（gzip 压缩，标准库 RotatingFileHandler）。`/healthz` 请求不写入审计（k8s 探活高频调用）。轮转后 AuditIndex 自动重建（仅扫描当前文件，跳过 `.gz` 历史）。15 个事件名/schema 不可变更。
+审计日志 `audit.log` 永久保存，按 100 MB × 5 轮转（gzip 压缩，标准库 RotatingFileHandler）。`/healthz` 请求不写入审计（k8s 探活高频调用）。轮转后 AuditIndex 自动重建（仅扫描当前文件，跳过 `.gz` 历史）。**16 个事件名/schema 不可变更**（Phase 5: 15 个基线 + Phase 6A Task 2 注册 `document_metadata_failed` 孤儿事件）：constraint_solve_started/solved/failed, endpoint_started/completed, query_replay_executed, ingestion_received/completed/failed/replay_started/replay_completed/replay_sha256_mismatch, compensation_retry, qdrant_write_failed, lock_acquire_failed, document_metadata_failed。Phase 6A Task 4 新增 2 个可选字段 `lineage_snapshot` + `conflict_details`（不进入 required schema，通过 `_PHASE6A_OPTIONAL` 白名单透传）。
 
 17. 错误码参考
 HTTP	业务错误码	说明
@@ -393,7 +394,7 @@ HTTP	业务错误码	说明
 422	invalid_ir / invalid_interval	IR 格式或区间非法（由 Pydantic validation 自动返回）
 503	service_uninitialized	依赖（retriever/audit_index/pipeline/redis_lock/task_repo）未初始化
 18. 配置模板
-.env 包含 PARSER_TOKEN、ENGINE_URL、QDRANT_HOST、REDIS_URL 等。
+.env 包含 PARSER_TOKEN、ENGINE_URL（parser 回调地址，Phase 6A 补齐，Task 1）、QDRANT_HOST、QDRANT_GRPC_PORT、REDIS_URL、ADMIN_KEY（≥32 字符，管理接口 X-Admin-Key 认证）、AUDIT_LOG_PATH、TASKS_DB_PATH、DOCUMENTS_DB_PATH、METRICS_HOST、METRICS_PORT、PROMETHEUS_MULTIPROC_DIR（可选，启用多进程 Prometheus collector）等。CI 门禁：`pytest tests/ --cov=ekrs_rag --cov-fail-under=85`（Phase 6A 实测 86.63%）。
 
 19. 核心流程时序图
 文档入库：解析器 → 通知 → 业务层分块入库
