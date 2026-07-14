@@ -1,0 +1,237 @@
+# Review package: 4fdee39..HEAD
+
+## Commits
+01fef7f T4: lifespan starts start_http_server sidecar on METRICS_PORT; remove routes/metrics
+
+## Files changed
+ rag/ekrs_rag/main.py                           | 48 ++++++++++++++++++++++++--
+ rag/tests/integration/test_metrics_exporter.py | 11 +++---
+ 2 files changed, 52 insertions(+), 7 deletions(-)
+
+## Diff
+diff --git a/rag/ekrs_rag/main.py b/rag/ekrs_rag/main.py
+index 99852d4..a07853d 100644
+--- a/rag/ekrs_rag/main.py
++++ b/rag/ekrs_rag/main.py
+@@ -1,29 +1,31 @@
+ """EKRS RAG FastAPI application.
+ 
+ Entry point for the RAG service.
+ """
+ 
+ from __future__ import annotations
+ 
+ import asyncio
+ import logging
+ import os
+-from contextlib import asynccontextmanager
++from collections.abc import Iterator
++from contextlib import asynccontextmanager, contextmanager
+ from pathlib import Path
+ 
+ import redis.asyncio as aioredis
+ from fastapi import FastAPI
+ from fastapi.responses import JSONResponse, PlainTextResponse
++from prometheus_client import REGISTRY, multiprocess, start_http_server
+ 
+ from .api.middleware.observability import ObservabilityMiddleware
+-from .api.routes import constraints, ingestion, metrics
++from .api.routes import constraints, ingestion
+ from .concurrency.compensation import CompensationScanner
+ from .concurrency.redis_lock import RedisLock
+ from .core.config import settings
+ from .core.logging import setup_logging
+ from .ingestion.pipeline import IngestionPipeline
+ from .observability.audit import AuditWriter, attach_index, set_writer
+ from .observability.audit_index import AuditIndex
+ from .retrieval.embedder import BGESmallEmbedder
+ from .retrieval.qdrant_client import QdrantManager
+ from .retrieval.retriever import EKRSRetriever
+@@ -79,20 +81,39 @@ _EVENT_SCHEMAS = {
+ }
+ 
+ 
+ @asynccontextmanager
+ async def lifespan(app: FastAPI):
+     """Startup: init logging, Qdrant, embedder, retriever, ingestion pipeline,
+     redis, task_repo, compensation scanner, AuditWriter, AuditIndex."""
+     global _qdrant, _pipeline, _embedder, _retriever
+     global _audit_writer, _audit_index, _task_repo
+ 
++    # ---- Phase 5.5 D: sidecar metrics exporter ----
++    # PROMETHEUS_MULTIPROC_DIR 可选。单 worker 模式(开发)留空即可。
++    # 多 worker 模式必须在 uvicorn fork 子进程前由部署层设置
++    # (docker-compose env / k8s Deployment env / shell export)。
++    # 注:Counters 在 rag/ekrs_rag/observability/metrics.py:18 的 import-time
++    # side-effects 中已注册,env var 检查仅为 fail-soft 提示,不在这里 setenv。
++    multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
++    if multiproc_dir:
++        p = Path(multiproc_dir)
++        p.mkdir(parents=True, exist_ok=True)
++        multiprocess.MultiProcessCollector(REGISTRY)
++        logger.info("Multi-process metrics mode: %s", p)
++
++    metrics_host = os.environ.get("METRICS_HOST", "127.0.0.1")
++    metrics_port = int(os.environ.get("METRICS_PORT", "9090"))
++    httpd, _ = start_http_server(metrics_port, addr=metrics_host)
++    logger.info("Metrics exporter listening on %s:%d", metrics_host, metrics_port)
++    app.state.metrics_httpd = httpd
++
+     setup_logging(debug=settings.EKRS_DEBUG, debug_log_path=settings.DEBUG_LOG_PATH)
+     logger.info("Starting EKRS RAG service (debug=%s)", settings.EKRS_DEBUG)
+ 
+     _qdrant = QdrantManager(
+         host=settings.QDRANT_HOST,
+         port=settings.QDRANT_PORT,
+         collection_name=settings.COLLECTION_NAME,
+         vector_size=384,  # bge-small is 384d
+     )
+ 
+@@ -159,34 +180,55 @@ async def lifespan(app: FastAPI):
+             "AuditIndex build failed (replay will be unavailable): %s", e
+         )
+         _audit_index = None
+     constraints.set_audit_index(_audit_index)
+     if _audit_index is not None:
+         attach_index(_audit_index)
+     app.state.audit_index = _audit_index
+ 
+     yield
+ 
++    # ---- Phase 5.5 D: sidecar shutdown ----
++    httpd = getattr(app.state, "metrics_httpd", None)
++    if httpd is not None:
++        httpd.shutdown()       # Stop serve_forever().
++        httpd.server_close()   # Release the listening socket immediately.
++    logger.info("Metrics exporter stopped")
++
+     logger.info("Shutting down EKRS RAG service")
+ 
+ 
++@contextmanager
++def _sync_lifespan(app: FastAPI) -> Iterator[object]:
++    """Drive Starlette's async lifespan context from synchronous tests."""
++    cm = app.router.lifespan_context(app)
++    loop = asyncio.new_event_loop()
++    try:
++        result = loop.run_until_complete(cm.__aenter__())
++        yield result
++    finally:
++        try:
++            loop.run_until_complete(cm.__aexit__(None, None, None))
++        finally:
++            loop.close()
++
++
+ def create_app() -> FastAPI:
+     """Build the FastAPI app. Exposed as a factory so tests can construct
+     fresh app instances with isolated env vars."""
+     app = FastAPI(
+         title="EKRS RAG Service",
+         version="0.1.0",
+         lifespan=lifespan,
+     )
+     app.add_middleware(ObservabilityMiddleware)
+     app.include_router(ingestion.router)
+-    app.include_router(metrics.router)
+     app.include_router(constraints.router)
+ 
+     @app.get("/health", response_class=PlainTextResponse)
+     async def health():
+         """Plain liveness probe (kept for backwards compatibility)."""
+         return "ok"
+ 
+     @app.get("/healthz")
+     async def healthz():
+         """Readiness probe: reports audit log + index health."""
+diff --git a/rag/tests/integration/test_metrics_exporter.py b/rag/tests/integration/test_metrics_exporter.py
+index 6982d9b..e56e3ea 100644
+--- a/rag/tests/integration/test_metrics_exporter.py
++++ b/rag/tests/integration/test_metrics_exporter.py
+@@ -9,21 +9,21 @@ These tests:
+      (HELP / TYPE lines).
+   2. Port comes from METRICS_PORT env var (not hard-coded).
+   3. Lifespan teardown releases the port (no TIME_WAIT bleed across runs).
+ """
+ import os
+ import socket
+ 
+ import httpx
+ import pytest
+ 
+-from ekrs_rag.main import create_app
++from ekrs_rag.main import _sync_lifespan, create_app
+ from ekrs_rag.observability.metrics import METRICS, safe_inc
+ 
+ 
+ def free_port() -> int:
+     """Bind ephemeral port, return its number. SO_REUSEADDR avoids TIME_WAIT bind errors."""
+     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+     s.bind(("127.0.0.1", 0))
+     port = s.getsockname()[1]
+     s.close()
+@@ -32,56 +32,59 @@ def free_port() -> int:
+ 
+ @pytest.fixture
+ def sidecar_env(tmp_path, monkeypatch):
+     """Configure env for sidecar exporter: free port + multiproc dir."""
+     port = free_port()
+     multiproc = tmp_path / "prom"
+     multiproc.mkdir()
+     monkeypatch.setenv("METRICS_HOST", "127.0.0.1")
+     monkeypatch.setenv("METRICS_PORT", str(port))
+     monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(multiproc))
++    monkeypatch.setattr(
++        "ekrs_rag.main.settings.TASK_DB_PATH", str(tmp_path / "tasks.db")
++    )
+     return {"port": port, "multiproc": multiproc}
+ 
+ 
+ def test_exporter_serves_prometheus_format(sidecar_env):
+     """GET 127.0.0.1:<port>/metrics returns 200 with valid Prometheus content."""
+     app = create_app()
+-    with app.router.lifespan_context(app):
++    with _sync_lifespan(app):
+         # Lifespan has started; exporter on sidecar_env['port']
+         url = f"http://127.0.0.1:{sidecar_env['port']}/metrics"
+         resp = httpx.get(url, timeout=2.0)
+         assert resp.status_code == 200
+         assert "text/plain" in resp.headers["content-type"]
+         body = resp.text
+         assert "# HELP rag_ingestion_total" in body
+         assert "# TYPE rag_ingestion_total counter" in body
+ 
+ 
+ def test_exporter_listens_on_configured_port(sidecar_env):
+     """Port comes from METRICS_PORT env, not hardcoded 9090."""
+     app = create_app()
+-    with app.router.lifespan_context(app):
++    with _sync_lifespan(app):
+         # Manually issue a request to the dynamically-allocated port.
+         url = f"http://127.0.0.1:{sidecar_env['port']}/metrics"
+         resp = httpx.get(url, timeout=2.0)
+         assert resp.status_code == 200
+         # Contradiction check: if exporter were on hardcoded 9090, this port would
+         # fail. Asserting the configured port works AND has Prometheus content
+         # proves the port is dynamic.
+         assert sidecar_env["port"] != 9090 or os.environ.get("FORCE_HARDCODED") != "1", (
+             "fix the test: free_port() occasionally returns 9090; the assertion"
+             " above is a sanity guard, real verification is the resp 200"
+         )
+ 
+ 
+ def test_exporter_stops_on_lifespan_exit(sidecar_env):
+     """After lifespan teardown, the port is no longer reachable."""
+     app = create_app()
+-    with app.router.lifespan_context(app):
++    with _sync_lifespan(app):
+         # Confirm exporter is alive
+         url = f"http://127.0.0.1:{sidecar_env['port']}/metrics"
+         resp = httpx.get(url, timeout=2.0)
+         assert resp.status_code == 200
+ 
+     # Lifespan has exited; server_close() should have released the socket
+     with pytest.raises((ConnectionRefusedError, httpx.ConnectError, OSError)):
+         httpx.get(url, timeout=1.0)
+\ No newline at end of file

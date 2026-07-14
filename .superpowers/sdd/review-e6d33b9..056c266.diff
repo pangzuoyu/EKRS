@@ -1,0 +1,36 @@
+# Review package: e6d33b9..HEAD
+
+## Commits
+056c266 chore: add prometheus-client for phase 5 metrics
+
+## Files changed
+ rag/pyproject.toml | 1 +
+ 1 file changed, 1 insertion(+)
+
+## Diff
+diff --git a/rag/pyproject.toml b/rag/pyproject.toml
+index 6e83cb4..d5b7603 100644
+--- a/rag/pyproject.toml
++++ b/rag/pyproject.toml
+@@ -5,20 +5,21 @@ description = "EKRS RAG service — ingestion, retrieval, constraint solving"
+ requires-python = ">=3.11"
+ dependencies = [
+     "ekrs-shared",
+     "fastapi>=0.115",
+     "uvicorn[standard]",
+     "qdrant-client>=1.11",
+     "redis>=5.0",
+     "aiosqlite",
+     "tenacity>=8.2",
+     "python-json-logger>=2.0",
++    "prometheus-client>=0.20",
+     "httpx",
+     "pydantic-settings>=2.0",
+ ]
+ 
+ [build-system]
+ requires = ["setuptools>=68.0"]
+ build-backend = "setuptools.build_meta"
+ 
+ [tool.setuptools.packages.find]
+ include = ["ekrs_rag*"]

@@ -1,0 +1,334 @@
+# Review package: 62c910e..HEAD
+
+## Commits
+f035ed3 feat(rag): AuditIndex — trace_id→offset dict for O(1) replay seek
+
+## Files changed
+ rag/ekrs_rag/observability/audit.py              |  27 ++++--
+ rag/ekrs_rag/observability/audit_index.py        | 109 +++++++++++++++++++++
+ rag/tests/unit/observability/test_audit_index.py | 117 +++++++++++++++++++++++
+ 3 files changed, 244 insertions(+), 9 deletions(-)
+
+## Diff
+diff --git a/rag/ekrs_rag/observability/audit.py b/rag/ekrs_rag/observability/audit.py
+index 94dfa70..af37883 100644
+--- a/rag/ekrs_rag/observability/audit.py
++++ b/rag/ekrs_rag/observability/audit.py
+@@ -25,50 +25,53 @@ class AuditWriter(AuditLogger):
+     def __init__(self, audit_log_path: str):
+         super().__init__(name="ekrs.audit")
+         path = Path(audit_log_path)
+         path.parent.mkdir(parents=True, exist_ok=True)
+ 
+         # FileHandler, NOT RotatingFileHandler — permanent
+         handler = logging.FileHandler(str(path), encoding="utf-8")
+         # Pass-through formatter (base class already JSON-encodes message)
+         handler.setFormatter(logging.Formatter("%(message)s"))
+         self._logger.addHandler(handler)
++        # Track this writer's own FileHandler so _current_offset cannot be
++        # fooled by stale handlers left in the global logger from prior
++        # AuditWriter instances (matters under test pollution; benign in
++        # production where only one writer exists per process).
++        self._file_handler = handler
+ 
+     def write(self, event_type: str, **kwargs) -> bool:
+         """Log an event. Returns False if write fails (never raises)."""
+         try:
+             # Capture file offset BEFORE write so AuditIndex can locate the line
+             offset = self._current_offset()
+             self.log_event(event_type, **kwargs)
+             # Register new line in module-level AuditIndex (Issue 5)
+             idx = get_index()
+             if idx is not None:
+-                trace_id = kwargs.get("trace_id") or self._logger.findCaller  # noqa: F841
+-                # Simpler: pull trace_id from kwargs (audit contract always passes it)
+                 idx.append(event_type, kwargs.get("trace_id", ""), offset)
+             return True
+         except Exception:
+             # Log to stderr (root logger is still alive for debug.log)
+             logging.getLogger("ekrs.audit.failures").error(
+                 "audit write failed: %s", traceback.format_exc()
+             )
+             return False
+ 
+     def _current_offset(self) -> int:
+         """Return current byte offset of the file handler (for index registration)."""
+-        for h in self._logger.handlers:
+-            if isinstance(h, logging.FileHandler) and not h.stream.closed:
+-                try:
+-                    return h.stream.tell()
+-                except (OSError, AttributeError):
+-                    pass
+-        return 0
++        h = getattr(self, "_file_handler", None)
++        if h is None or h.stream.closed:
++            return 0
++        try:
++            return h.stream.tell()
++        except (OSError, AttributeError):
++            return 0
+ 
+ 
+ def set_writer(writer: AuditLogger) -> None:
+     """Set module-level writer (called at startup)."""
+     global _writer
+     _writer = writer
+ 
+ 
+ def get_writer() -> AuditLogger | None:
+     return _writer
+@@ -79,10 +82,16 @@ def attach_index(index) -> None:
+ 
+     Module-level singleton; called once at startup by main.py lifespan.
+     """
+     global _index
+     _index = index
+ 
+ 
+ def get_index():
+     """Return attached AuditIndex, or None if not yet initialized."""
+     return _index
++
++
++def reset_index_for_test() -> None:
++    """Clear module-level attached index (test helper only)."""
++    global _index
++    _index = None
+diff --git a/rag/ekrs_rag/observability/audit_index.py b/rag/ekrs_rag/observability/audit_index.py
+new file mode 100644
+index 0000000..7aec499
+--- /dev/null
++++ b/rag/ekrs_rag/observability/audit_index.py
+@@ -0,0 +1,109 @@
++"""In-memory trace_id → file_offset index over audit.log.
++
++Built once at startup (linear scan over audit.log). Replay seeks O(1) via
++dict lookup, then reads lines from offset. New writes are kept in sync via
++AuditWriter.write() which calls idx.append() when an index is attached
++(see attach_index / get_index in audit.py).
++"""
++from __future__ import annotations
++
++import json
++import logging
++from dataclasses import dataclass
++from pathlib import Path
++
++logger = logging.getLogger("ekrs.observability.audit_index")
++
++# Events that Query Replay cares about (A2 decision)
++REPLAY_EVENTS = frozenset({"constraint_solve_started", "constraint_solved"})
++
++
++@dataclass
++class AuditLine:
++    event: str
++    trace_id: str
++    offset: int
++    raw: dict
++
++
++class AuditIndex:
++    """trace_id -> list[AuditLine] (ordered by offset)."""
++
++    def __init__(self, audit_log_path: str):
++        self._path = Path(audit_log_path)
++        # trace_id -> list of (event, offset)
++        self._index: dict[str, list[tuple[str, int]]] = {}
++        self._load_seconds: float = 0.0
++
++    @property
++    def size(self) -> int:
++        return len(self._index)
++
++    @property
++    def load_seconds(self) -> float:
++        return self._load_seconds
++
++    def build(self) -> None:
++        """Scan audit.log once, populate index."""
++        import time
++        start = time.monotonic()
++        self._index.clear()
++
++        if not self._path.exists():
++            self._load_seconds = time.monotonic() - start
++            return
++
++        with open(self._path, "r", encoding="utf-8") as f:
++            offset = 0
++            for line in f:
++                line_len = len(line)
++                try:
++                    entry = json.loads(line.strip())
++                except json.JSONDecodeError:
++                    logger.warning(
++                        "skipping corrupted audit line at offset %d", offset
++                    )
++                    offset += line_len
++                    continue
++                event = entry.get("event")
++                trace_id = entry.get("trace_id")
++                if event in REPLAY_EVENTS and trace_id:
++                    self._index.setdefault(trace_id, []).append((event, offset))
++                offset += line_len
++
++        self._load_seconds = time.monotonic() - start
++        logger.info(
++            "audit index built: %d unique trace_ids in %.2fs",
++            len(self._index), self._load_seconds,
++        )
++
++    def append(self, event: str, trace_id: str, offset: int) -> None:
++        """Register a new line written at runtime (no re-scan)."""
++        if event not in REPLAY_EVENTS:
++            return
++        self._index.setdefault(trace_id, []).append((event, offset))
++
++    def seek(self, trace_id: str) -> list[AuditLine] | None:
++        """Return all indexed audit lines for trace_id, or None."""
++        entries = self._index.get(trace_id)
++        if not entries:
++            return None
++
++        # Read each line from disk at known offset
++        result = []
++        with open(self._path, "r", encoding="utf-8") as f:
++            for event, offset in entries:
++                f.seek(offset)
++                line = f.readline()
++                try:
++                    entry = json.loads(line.strip())
++                except json.JSONDecodeError:
++                    logger.warning("seek: corrupted line at offset %d", offset)
++                    continue
++                result.append(AuditLine(
++                    event=entry["event"],
++                    trace_id=trace_id,
++                    offset=offset,
++                    raw=entry,
++                ))
++        return result
+diff --git a/rag/tests/unit/observability/test_audit_index.py b/rag/tests/unit/observability/test_audit_index.py
+new file mode 100644
+index 0000000..d3b239f
+--- /dev/null
++++ b/rag/tests/unit/observability/test_audit_index.py
+@@ -0,0 +1,117 @@
++"""Unit tests for AuditIndex — trace_id → file_offset in-memory index."""
++import json
++
++from ekrs_rag.observability.audit_index import AuditIndex
++
++
++def _write_audit_line(path, event_type, trace_id, **extra):
++    entry = {"timestamp": "2026-07-12T00:00:00Z", "event": event_type,
++             "trace_id": trace_id, **extra}
++    line = json.dumps(entry)
++    with open(path, "a") as f:
++        offset = f.tell()
++        f.write(line + "\n")
++    return offset
++
++
++def test_index_builds_from_clean_audit_log(tmp_path):
++    log = tmp_path / "audit.log"
++    _write_audit_line(log, "constraint_solve_started", "t1", query="q")
++    _write_audit_line(log, "constraint_solved", "t1", branches_count=2)
++    _write_audit_line(log, "constraint_solve_started", "t2", query="q2")
++    _write_audit_line(log, "constraint_solved", "t2", branches_count=1)
++
++    idx = AuditIndex(str(log))
++    idx.build()
++
++    result = idx.seek("t1")
++    assert result is not None
++    assert len(result) == 2
++    assert result[0].event == "constraint_solve_started"
++    assert result[1].event == "constraint_solved"
++
++
++def test_index_skips_non_replay_events(tmp_path):
++    log = tmp_path / "audit.log"
++    _write_audit_line(log, "endpoint_started", "t1", endpoint="/v1/x")
++    _write_audit_line(log, "ingestion_completed", "t1", doc_id="d")
++
++    idx = AuditIndex(str(log))
++    idx.build()
++
++    # Only constraint events are indexed, so seek returns None
++    assert idx.seek("t1") is None
++
++
++def test_index_resilient_to_corrupted_lines(tmp_path):
++    log = tmp_path / "audit.log"
++    _write_audit_line(log, "constraint_solve_started", "t1", query="q")
++    # Inject corrupted line
++    with open(log, "a") as f:
++        f.write("THIS IS NOT JSON\n")
++    _write_audit_line(log, "constraint_solved", "t1", branches_count=1)
++
++    idx = AuditIndex(str(log))
++    idx.build()  # should not raise
++
++    result = idx.seek("t1")
++    assert result is not None
++    assert len(result) == 2
++
++
++def test_index_grows_on_runtime_writes(tmp_path):
++    log = tmp_path / "audit.log"
++    _write_audit_line(log, "constraint_solve_started", "t1", query="q")
++    idx = AuditIndex(str(log))
++    idx.build()
++
++    # Simulate runtime write
++    offset = _write_audit_line(log, "constraint_solved", "t1", branches_count=3)
++    idx.append("constraint_solved", "t1", offset)
++
++    result = idx.seek("t1")
++    assert len(result) == 2
++
++
++def test_index_returns_none_for_missing_trace_id(tmp_path):
++    log = tmp_path / "audit.log"
++    idx = AuditIndex(str(log))
++    idx.build()
++    assert idx.seek("nonexistent") is None
++
++
++def test_runtime_writes_via_auditwriter_become_indexable(tmp_path):
++    """Test Gap 2: AuditWriter.write must register new lines with attached index.
++
++    Without this, freshly written traces after startup won't be replayable
++    until process restart (Issue 5).
++    """
++    from ekrs_rag.observability.audit import AuditWriter, attach_index, reset_index_for_test
++    from ekrs_rag.observability import audit as audit_mod
++
++    log = tmp_path / "audit.log"
++    writer = AuditWriter(str(log))
++    writer.register_event_schema("constraint_solve_started", {"trace_id", "query"})
++    writer.register_event_schema("constraint_solved", {"trace_id", "branches_count"})
++
++    idx = AuditIndex(str(log))
++    idx.build()
++    # Clear any prior module-level index (defensive — parallel tests may leak)
++    reset_index_for_test()
++    attach_index(idx)
++
++    try:
++        # Runtime write — should be picked up by attached index
++        trace_id = "rt-trace-1"
++        writer.write("constraint_solve_started", trace_id=trace_id, query="q")
++        writer.write("constraint_solved", trace_id=trace_id, branches_count=1)
++
++        # Immediately seekable without rescan
++        lines = idx.seek(trace_id)
++        assert lines is not None
++        assert len(lines) == 2
++    finally:
++        # Clean up module-level state so other tests aren't affected
++        reset_index_for_test()
++        # Touch module name to silence unused-import warning
++        _ = audit_mod

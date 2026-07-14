@@ -1,0 +1,25 @@
+# Review package: 64f91ba..HEAD
+
+## Commits
+3f6bfa0 T8: prometheus.yml — scrape ekrs-rag target on rag:9090
+
+## Files changed
+ deployment/prometheus.yml | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+## Diff
+diff --git a/deployment/prometheus.yml b/deployment/prometheus.yml
+new file mode 100644
+index 0000000..03b6adb
+--- /dev/null
++++ b/deployment/prometheus.yml
+@@ -0,0 +1,9 @@
++global:
++  scrape_interval: 15s
++  evaluation_interval: 15s
++
++scrape_configs:
++  - job_name: ekrs-rag
++    static_configs:
++      - targets: ['rag:9090']    # 容器内互访走 docker network DNS
++    metrics_path: /metrics

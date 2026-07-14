@@ -1,0 +1,9 @@
+# Ignore everything except intentional artifacts (review packages,
+# phase completion summaries, live ledger, this phase's report).
+# Brief drafts and per-task scratch reports stay ignored.
+*
+!*.diff
+!PHASE-*-COMPLETE.md
+!progress.md
+!task-8-report.md
+!.gitignore

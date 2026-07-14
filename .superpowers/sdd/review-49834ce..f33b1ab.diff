@@ -1,0 +1,208 @@
+# Review package: 49834ce..HEAD
+
+## Commits
+f33b1ab feat(rag): Phase 4.5 schema — source_path + payload_sha256 columns
+
+## Files changed
+ rag/ekrs_rag/storage/task_repo.py                | 44 +++++++++---
+ rag/tests/unit/storage/test_task_repo_phase45.py | 86 ++++++++++++++++++++++++
+ 2 files changed, 122 insertions(+), 8 deletions(-)
+
+## Diff
+diff --git a/rag/ekrs_rag/storage/task_repo.py b/rag/ekrs_rag/storage/task_repo.py
+index 9cf021c..ed61e01 100644
+--- a/rag/ekrs_rag/storage/task_repo.py
++++ b/rag/ekrs_rag/storage/task_repo.py
+@@ -13,30 +13,36 @@ from typing import Any
+ 
+ _SCHEMA = """
+ CREATE TABLE IF NOT EXISTS tasks (
+   request_id TEXT PRIMARY KEY,
+   doc_id TEXT NOT NULL,
+   status TEXT NOT NULL,
+   attempts INTEGER NOT NULL DEFAULT 0,
+   last_error TEXT,
+   created_at REAL NOT NULL,
+   updated_at REAL NOT NULL,
+-  unwired_skipped INTEGER NOT NULL DEFAULT 0
++  unwired_skipped INTEGER NOT NULL DEFAULT 0,
++  source_path TEXT,
++  payload_sha256 TEXT
+ );
+ CREATE INDEX IF NOT EXISTS idx_tasks_status_updated ON tasks(status, updated_at);
+ """
+ 
+-# Idempotent migration: existing DBs (pre-Phase4.5) lack unwired_skipped.
+-# ALTER TABLE ADD COLUMN with NOT NULL DEFAULT requires an explicit default
+-# in older SQLite; safe to re-run (OperationalError swallowed).
++# Idempotent migrations: existing DBs (pre-Phase4.5) lack unwired_skipped,
++# source_path, and payload_sha256. ALTER TABLE ADD COLUMN with NOT NULL DEFAULT
++# requires an explicit default in older SQLite; safe to re-run (OperationalError
++# swallowed). source_path / payload_sha256 are nullable — pre-Phase4.5 rows
++# keep NULL, allowing replay code to detect legacy tasks.
+ _MIGRATIONS = [
+     "ALTER TABLE tasks ADD COLUMN unwired_skipped INTEGER NOT NULL DEFAULT 0",
++    "ALTER TABLE tasks ADD COLUMN source_path TEXT",
++    "ALTER TABLE tasks ADD COLUMN payload_sha256 TEXT",
+ ]
+ 
+ 
+ class TaskRepo:
+     """同步 sqlite3 包装 — 任务状态记录 + 幂等去重."""
+ 
+     def __init__(self, db_path: str):
+         self._db_path = db_path
+         self._conn: sqlite3.Connection | None = None
+ 
+@@ -54,33 +60,55 @@ class TaskRepo:
+                 self._conn.execute(ddl)
+             except sqlite3.OperationalError:
+                 # Column already exists; migration is idempotent.
+                 pass
+         self._conn.commit()
+ 
+     def _c(self) -> sqlite3.Connection:
+         assert self._conn is not None
+         return self._conn
+ 
+-    def try_insert(self, request_id: str, doc_id: str) -> bool:
++    def try_insert(
++        self,
++        request_id: str,
++        doc_id: str,
++        source_path: str | None = None,
++        payload_sha256: str | None = None,
++    ) -> bool:
+         now = time.time()
+         try:
+             self._c().execute(
+-                "INSERT INTO tasks(request_id, doc_id, status, attempts, created_at, updated_at) "
+-                "VALUES (?, ?, 'PENDING', 0, ?, ?)",
+-                (request_id, doc_id, now, now),
++                "INSERT INTO tasks(request_id, doc_id, status, attempts, "
++                "created_at, updated_at, source_path, payload_sha256) "
++                "VALUES (?, ?, 'PENDING', 0, ?, ?, ?, ?)",
++                (request_id, doc_id, now, now, source_path, payload_sha256),
+             )
+             self._c().commit()
+             return True
+         except sqlite3.IntegrityError:
+             return False
+ 
++    def try_insert_with_source(
++        self,
++        request_id: str,
++        doc_id: str,
++        source_path: str,
++        payload_sha256: str,
++    ) -> bool:
++        """Insert with source_path + payload_sha256 (Phase 4.5 replay fields).
++
++        Explicit variant for callers that already know the parser payload
++        location. UNIQUE(request_id) still enforced — duplicate inserts
++        return False.
++        """
++        return self.try_insert(request_id, doc_id, source_path, payload_sha256)
++
+     def mark_status(self, request_id: str, status: str, error: str | None = None) -> None:
+         self._c().execute(
+             "UPDATE tasks SET status=?, last_error=?, updated_at=? WHERE request_id=?",
+             (status, error, time.time(), request_id),
+         )
+         self._c().commit()
+ 
+     def mark_running(self, request_id: str) -> None:
+         self.mark_status(request_id, "RUNNING")
+ 
+diff --git a/rag/tests/unit/storage/test_task_repo_phase45.py b/rag/tests/unit/storage/test_task_repo_phase45.py
+new file mode 100644
+index 0000000..83d772d
+--- /dev/null
++++ b/rag/tests/unit/storage/test_task_repo_phase45.py
+@@ -0,0 +1,86 @@
++"""Phase 4.5: TaskRepo schema extension for ingestion replay.
++
++Adds source_path + payload_sha256 columns to support Task 12
++(Ingestion Replay endpoint). The new columns allow replay handlers to
++locate the original parser payload without scanning shared storage.
++"""
++import tempfile
++from pathlib import Path
++
++import pytest
++
++from ekrs_rag.storage.task_repo import TaskRepo
++
++
++@pytest.fixture
++def repo(tmp_path):
++    r = TaskRepo(db_path=str(tmp_path / "tasks.db"))
++    r.init()
++    yield r
++    r.close()
++
++
++def test_init_adds_source_path_and_sha256_columns(repo):
++    """Schema migration adds source_path and payload_sha256 columns.
++
++    Regression for Phase 4.5: pre-Phase4.5 DBs only have the original
++    7 columns. After init(), both new columns must exist (whether the
++    DB was fresh or migrated in-place).
++    """
++    cols = {r["name"] for r in repo._c().execute("PRAGMA table_info(tasks)").fetchall()}
++    assert "source_path" in cols
++    assert "payload_sha256" in cols
++
++
++def test_try_insert_with_source_stores_both_fields(repo):
++    """try_insert_with_source persists source_path and payload_sha256."""
++    ok = repo.try_insert_with_source(
++        "req-1", "doc-abc",
++        source_path="/parsed_lib/doc-abc.jsonl",
++        payload_sha256="abc123def456",
++    )
++    assert ok is True
++    row = repo.get("req-1")
++    assert row is not None
++    assert row["source_path"] == "/parsed_lib/doc-abc.jsonl"
++    assert row["payload_sha256"] == "abc123def456"
++
++
++def test_try_insert_without_source_allows_null(repo):
++    """Backward compat: try_insert without source info persists NULL.
++
++    Pre-Phase4.5 callers that don't yet know about source_path /
++    payload_sha256 must keep working.
++    """
++    ok = repo.try_insert("req-2", "doc-xyz")
++    assert ok is True
++    row = repo.get("req-2")
++    assert row is not None
++    assert row["source_path"] is None
++    assert row["payload_sha256"] is None
++
++
++def test_pre_phase45_rows_have_null_source_path(repo):
++    """Pre-Phase4.5 rows (no source columns at insert time) → NULL.
++
++    Simulates a replay scenario where a task was inserted before
++    source_path/payload_sha256 existed. After migration the columns
++    exist but their values are NULL — replay code uses this NULL to
++    decide whether to attempt source-based recovery (Task 12 will
++    branch on this and return 409 {reason: 'pre_phase5'} when NULL).
++    """
++    # Insert via direct SQL, omitting the new columns — mimics a
++    # pre-Phase4.5 write against the upgraded schema.
++    import time
++    now = time.time()
++    repo._c().execute(
++        "INSERT INTO tasks(request_id, doc_id, status, attempts, "
++        "created_at, updated_at) VALUES (?, ?, 'PENDING', 0, ?, ?)",
++        ("legacy-req", "legacy-doc", now, now),
++    )
++    repo._c().commit()
++
++    row = repo.get("legacy-req")
++    assert row is not None
++    assert row["source_path"] is None
++    assert row["payload_sha256"] is None

@@ -1,0 +1,146 @@
+# Review package: 783edd0..HEAD
+
+## Commits
+b8a6622 feat(rag): /metrics endpoint exposes prometheus_client registry
+
+## Files changed
+ rag/ekrs_rag/api/routes/metrics.py             | 31 +++-------
+ rag/tests/integration/test_metrics_endpoint.py | 84 ++++++++++++++++++++++++++
+ 2 files changed, 94 insertions(+), 21 deletions(-)
+
+## Diff
+diff --git a/rag/ekrs_rag/api/routes/metrics.py b/rag/ekrs_rag/api/routes/metrics.py
+index 5d7716b..cf6d204 100644
+--- a/rag/ekrs_rag/api/routes/metrics.py
++++ b/rag/ekrs_rag/api/routes/metrics.py
+@@ -1,28 +1,17 @@
+-"""Metrics endpoint — placeholder for Phase 1.
+-
+-Phase 5 adds full Prometheus counters/histograms.
+-"""
+-
++"""Prometheus metrics endpoint — exposes the default prometheus_client registry."""
+ from __future__ import annotations
+ 
+ from fastapi import APIRouter
+-from fastapi.responses import PlainTextResponse
++from fastapi.responses import Response
++from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+ 
+ router = APIRouter(tags=["metrics"])
+ 
+-METRICS_PLACEHOLDER = """# EKRS RAG Service Metrics
+-# Phase 5 will add:
+-#   rag_ingestion_total{status="success|failed"}
+-#   rag_ingestion_duration_seconds
+-#   rag_retrieve_duration_seconds
+-#   rag_constraint_solve_duration_seconds
+-#   rag_queue_size
+-#   rag_worker_active
+-#   rag_db_operation_errors
+-"""
+-
+ 
+-@router.get("/metrics", response_class=PlainTextResponse)
+-async def metrics():
+-    """Prometheus metrics endpoint (placeholder)."""
+-    return PlainTextResponse(content=METRICS_PLACEHOLDER, media_type="text/plain")
++@router.get("/metrics")
++async def metrics() -> Response:
++    """Prometheus scrape endpoint."""
++    return Response(
++        content=generate_latest(),
++        media_type=CONTENT_TYPE_LATEST,
++    )
+\ No newline at end of file
+diff --git a/rag/tests/integration/test_metrics_endpoint.py b/rag/tests/integration/test_metrics_endpoint.py
+new file mode 100644
+index 0000000..5881894
+--- /dev/null
++++ b/rag/tests/integration/test_metrics_endpoint.py
+@@ -0,0 +1,84 @@
++"""Integration tests for the /metrics Prometheus scrape endpoint.
++
++The endpoint must:
++  1. Return Prometheus text exposition format (200 + correct content-type).
++  2. Expose every metric registered by ekrs_rag.observability.metrics.
++  3. Reflect real counter increments (not a static stub).
++"""
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++from prometheus_client import CONTENT_TYPE_LATEST
++
++from ekrs_rag.api.routes.metrics import router as metrics_router
++from ekrs_rag.api.middleware.observability import ObservabilityMiddleware
++from ekrs_rag.observability.metrics import METRICS, safe_inc
++
++
++def _make_app() -> FastAPI:
++    app = FastAPI()
++    app.add_middleware(ObservabilityMiddleware)
++    app.include_router(metrics_router)
++
++    @app.get("/trigger")
++    async def trigger():
++        safe_inc(METRICS.ingestion_total, status="completed")
++        return {"ok": True}
++
++    return app
++
++
++def test_metrics_endpoint_returns_prometheus_format():
++    """GET /metrics returns 200 with Prometheus content-type and HELP/TYPE lines."""
++    app = _make_app()
++    client = TestClient(app)
++
++    resp = client.get("/metrics")
++
++    assert resp.status_code == 200
++    assert resp.headers["content-type"].startswith(CONTENT_TYPE_LATEST.split(";")[0].strip())
++    body = resp.text
++    assert "# HELP rag_http_requests_total" in body
++    assert "# TYPE rag_http_requests_total counter" in body
++
++
++def test_metrics_endpoint_includes_all_phase5_metrics():
++    """All 13 metrics from Task 5 are exposed with # HELP lines."""
++    app = _make_app()
++    client = TestClient(app)
++
++    resp = client.get("/metrics")
++    body = resp.text
++
++    expected = [
++        "rag_http_requests_total",
++        "rag_http_request_duration_seconds",
++        "rag_http_requests_inprogress",
++        "rag_ingestion_total",
++        "rag_ingestion_duration_seconds",
++        "rag_ingestion_chunks_written",
++        "rag_constraint_solve_total",
++        "rag_constraint_solve_duration_seconds",
++        "rag_constraint_branches_count",
++        "rag_lock_acquire_total",
++        "rag_compensation_pending_tasks",
++        "rag_compensation_retries_total",
++        "rag_qdrant_write_failures_total",
++    ]
++    for name in expected:
++        assert f"# HELP {name}" in body, f"missing metric: {name}"
++
++
++def test_metrics_reflect_actual_traffic():
++    """Trigger safe_inc via a real request, then verify counter value increased."""
++    app = _make_app()
++    client = TestClient(app)
++
++    before = METRICS.ingestion_total.labels(status="completed")._value.get()
++    resp = client.get("/trigger")
++    assert resp.status_code == 200
++    after = METRICS.ingestion_total.labels(status="completed")._value.get()
++
++    assert after == before + 1
++
++    scrape = client.get("/metrics")
++    assert "rag_ingestion_total" in scrape.text
+\ No newline at end of file

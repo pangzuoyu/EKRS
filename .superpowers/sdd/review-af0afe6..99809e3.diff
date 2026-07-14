@@ -1,0 +1,407 @@
+# Review package: af0afe6..99809e3
+
+## Commits
+99809e3 feat(rag): POST /v1/ingestion/replay — re-run completed ingestion
+
+## Files changed
+ rag/ekrs_rag/api/routes/ingestion.py           | 105 +++++++++++++-
+ rag/ekrs_rag/ingestion/pipeline.py             |  32 +++++
+ rag/tests/integration/test_ingestion_replay.py | 186 +++++++++++++++++++++++++
+ 3 files changed, 322 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/rag/ekrs_rag/api/routes/ingestion.py b/rag/ekrs_rag/api/routes/ingestion.py
+index c3898a0..451fc4f 100644
+--- a/rag/ekrs_rag/api/routes/ingestion.py
++++ b/rag/ekrs_rag/api/routes/ingestion.py
+@@ -1,26 +1,32 @@
+ """Ingestion API routes.
+ 
+ POST /v1/ingestion/notify — accept parser notification, queue ingestion
+ GET /v1/ingestion/status/{doc_hash} — query ingestion status
+ """
+ 
+ from __future__ import annotations
+ 
++import hashlib
+ import hmac
+ import logging
++import time
++from pathlib import Path
+ 
+-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
++from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
++from pydantic import BaseModel
+ 
+ from ekrs_shared.idempotency import request_id_from_trace
+ from ekrs_shared.models import IngestionStatus, IngestionNotification
+ 
++from ..auth import require_parser_token
++
+ from ...concurrency.redis_lock import RedisLock
+ from ...core.config import settings
+ from ...ingestion.pipeline import IngestionPipeline
+ from ...storage.task_repo import TaskRepo
+ 
+ logger = logging.getLogger(__name__)
+ 
+ router = APIRouter(prefix="/v1/ingestion", tags=["ingestion"])
+ 
+ # Set by main.py lifespan
+@@ -115,10 +121,107 @@ async def notify(
+ async def get_status(doc_hash: str):
+     """Query ingestion status for a document."""
+     if _pipeline is None:
+         raise HTTPException(status_code=503, detail="Service not ready")
+ 
+     status = _pipeline._qdrant.get_ingestion_status(doc_hash)
+     if status is None:
+         raise HTTPException(status_code=404, detail=f"No ingestion record for {doc_hash}")
+ 
+     return status
++
++
++class IngestionReplayRequest(BaseModel):
++    """POST /v1/ingestion/replay body."""
++    request_id: str
++    replayed_by: str  # ops user / trace id
++
++
++@router.post("/replay")
++async def replay_ingestion(
++    req: IngestionReplayRequest,
++    request: Request,
++    _auth: None = Depends(require_parser_token),
++):
++    """Replay a completed ingestion by request_id.
++
++    Re-runs parse+chunk+upsert for an already-indexed document. Does NOT
++    trigger parser callback. Rejects in-flight, failed, and pre-Phase-5
++    (NULL source_path) tasks with 409.
++    """
++    # Lazy imports for audit (writers may not be initialized in tests).
++    from ekrs_rag.observability.audit import get_writer
++
++    task_repo = getattr(request.app.state, "task_repo", None) or _repo
++    pipeline = _pipeline
++    if task_repo is None:
++        raise HTTPException(status_code=503, detail="task_repo not initialized")
++    if pipeline is None:
++        raise HTTPException(status_code=503, detail="pipeline not initialized")
++
++    row = task_repo.get(req.request_id)
++    if row is None:
++        raise HTTPException(status_code=404, detail="request_id not found")
++    if row["status"] in ("PENDING", "RUNNING"):
++        raise HTTPException(status_code=409, detail={"reason": "in_flight"})
++    if row["status"] != "COMPLETED":
++        raise HTTPException(status_code=409, detail={"reason": "not_completed"})
++
++    source_path = row.get("source_path")
++    if not source_path:
++        raise HTTPException(status_code=409, detail={"reason": "pre_phase5"})
++
++    expected_sha = row.get("payload_sha256")
++    jsonl_path = Path(source_path)
++    if not jsonl_path.exists():
++        raise HTTPException(status_code=409, detail={"reason": "file_missing"})
++
++    actual_sha = hashlib.sha256(jsonl_path.read_bytes()).hexdigest()
++    if actual_sha != expected_sha:
++        writer = get_writer()
++        if writer:
++            writer.write(
++                "ingestion_replay_sha256_mismatch",
++                request_id=req.request_id,
++                expected_sha256=expected_sha or "",
++                actual_sha256=actual_sha,
++            )
++        raise HTTPException(status_code=409, detail={"reason": "sha256_mismatch"})
++
++    # Audit started (best-effort: writer may be None in tests).
++    writer = get_writer()
++    if writer:
++        writer.write(
++            "ingestion_replay_started",
++            request_id=req.request_id,
++            replayed_by=req.replayed_by,
++            source_path=source_path,
++        )
++
++    # Re-run ingestion (no callback, no idempotency skip).
++    start = time.monotonic()
++    try:
++        chunks_written = await pipeline.replay(
++            jsonl_path=jsonl_path,
++            doc_hash=row["doc_id"],
++            version=row.get("version", 1),
++        )
++        duration_ms = int((time.monotonic() - start) * 1000)
++    except Exception as e:
++        logger.error("Replay failed for %s: %s", req.request_id, e)
++        raise HTTPException(status_code=500, detail=f"replay failed: {e}")
++
++    if writer:
++        writer.write(
++            "ingestion_replay_completed",
++            request_id=req.request_id,
++            sha256_match=True,
++            duration_ms=duration_ms,
++            chunks_written=chunks_written,
++        )
++
++    return {
++        "request_id": req.request_id,
++        "status": "completed",
++        "chunks_written": chunks_written,
++        "duration_ms": duration_ms,
++    }
+diff --git a/rag/ekrs_rag/ingestion/pipeline.py b/rag/ekrs_rag/ingestion/pipeline.py
+index b56cab3..20cebde 100644
+--- a/rag/ekrs_rag/ingestion/pipeline.py
++++ b/rag/ekrs_rag/ingestion/pipeline.py
+@@ -87,20 +87,52 @@ class IngestionPipeline:
+             count = self._qdrant.upsert_chunks(chunks)
+             logger.info("Ingested %d chunks for doc=%s v=%d", count, doc_hash, version)
+         except Exception as e:
+             logger.error("Qdrant upsert failed for %s: %s", doc_hash, e)
+             await self._send_callback(notification, "failed", error=str(e))
+             return
+ 
+         # Step 6: Callback success
+         await self._send_callback(notification, "success")
+ 
++    async def replay(
++        self,
++        jsonl_path: Path,
++        doc_hash: str,
++        version: int,
++    ) -> int:
++        """Re-run parse+chunk+upsert for an already-indexed document.
++
++        Used by /v1/ingestion/replay. Shares parse/chunk/upsert primitives
++        with ingest() but skips the parser callback and the idempotency
++        check (caller has already verified the source_path + sha256).
++
++        Returns the number of chunks written to Qdrant.
++        """
++        logger.info("Replaying ingestion: doc=%s v=%d path=%s",
++                     doc_hash, version, jsonl_path)
++
++        try:
++            blocks = parse_jsonl_file(str(jsonl_path))
++            if not blocks:
++                raise ValueError(f"Empty JSONL: {jsonl_path}")
++
++            chunks = chunk_blocks(blocks, doc_hash, version)
++            if not chunks:
++                raise ValueError("No chunks produced")
++        except IRParseError as e:
++            raise ValueError(f"JSONL parse error: {e}") from e
++
++        count = self._qdrant.upsert_chunks(chunks)
++        logger.info("Replayed %d chunks for doc=%s v=%d", count, doc_hash, version)
++        return count
++
+     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+     async def _send_callback(
+         self,
+         notification: IngestionNotification,
+         rag_status: str,
+         error: str | None = None,
+     ) -> None:
+         """Send callback to parser with ingestion result."""
+         if not notification.callback_url:
+             logger.warning("No callback_url, skipping callback for %s",
+diff --git a/rag/tests/integration/test_ingestion_replay.py b/rag/tests/integration/test_ingestion_replay.py
+new file mode 100644
+index 0000000..f96effd
+--- /dev/null
++++ b/rag/tests/integration/test_ingestion_replay.py
+@@ -0,0 +1,186 @@
++"""Integration tests for Ingestion Replay endpoint (POST /v1/ingestion/replay).
++
++Spec: Phase 5 — re-runs JSONL → parse → chunk → upsert for an already-indexed
++document by request_id. Bypasses notify idempotency + parser callback, but
++re-uses the sha256-validated source pointer stored on the task row at notify
++time.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++from pathlib import Path
++
++import pytest
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++from ekrs_rag.api.middleware.observability import ObservabilityMiddleware
++from ekrs_rag.api.routes.ingestion import router as ingestion_router
++from ekrs_rag.storage.task_repo import TaskRepo
++
++
++class MockPipeline:
++    """Test double for IngestionPipeline.replay()."""
++
++    def __init__(self, chunks: int = 7):
++        self._chunks = chunks
++        self.replay_calls: list[tuple[str, str, int]] = []
++
++    async def replay(self, jsonl_path, doc_hash, version):
++        self.replay_calls.append((str(jsonl_path), doc_hash, version))
++        return self._chunks
++
++
++@pytest.fixture(autouse=True)
++def _isolate_pipeline():
++    """Reset module-level pipeline between tests."""
++    from ekrs_rag.api.routes import ingestion as imod
++    imod.set_pipeline(None)
++    yield
++    imod.set_pipeline(None)
++
++
++def _build_app(repo: TaskRepo) -> FastAPI:
++    app = FastAPI()
++    app.add_middleware(ObservabilityMiddleware)
++    app.include_router(ingestion_router)
++    app.state.task_repo = repo
++    return app
++
++
++def test_replay_completed_task_succeeds(tmp_path):
++    """Happy path: COMPLETED task + matching sha256 → 200, chunks counted."""
++    # Make sure PARSER_TOKEN is empty so auth is a no-op
++    os.environ["PARSER_TOKEN"] = ""
++
++    jsonl = tmp_path / "doc.jsonl"
++    jsonl.write_text('{"doc_id": "d1", "blocks": []}\n')
++    expected_sha = hashlib.sha256(jsonl.read_bytes()).hexdigest()
++
++    db_path = tmp_path / "tasks.db"
++    repo = TaskRepo(str(db_path))
++    repo.init()
++    rid = "req-replay-1"
++    repo.try_insert_with_source(rid, "d1", str(jsonl), expected_sha)
++    repo.mark_status(rid, "COMPLETED")
++
++    # Inject mock pipeline
++    from ekrs_rag.api.routes import ingestion as imod
++    mock = MockPipeline(chunks=5)
++    imod.set_pipeline(mock)
++
++    app = _build_app(repo)
++    client = TestClient(app)
++    resp = client.post("/v1/ingestion/replay", json={
++        "request_id": rid,
++        "replayed_by": "ops-test",
++    })
++    assert resp.status_code == 200, resp.text
++    body = resp.json()
++    assert body["request_id"] == rid
++    assert body["status"] == "completed"
++    assert body["chunks_written"] == 5
++    assert body["duration_ms"] >= 0
++    # Mock was actually called with the right args
++    assert len(mock.replay_calls) == 1
++    assert mock.replay_calls[0][1] == "d1"
++    repo.close()
++
++
++def test_replay_pre_phase5_task_returns_409(tmp_path):
++    """Task with NULL source_path is pre-Phase 5 data → 409 pre_phase5."""
++    os.environ["PARSER_TOKEN"] = ""
++    db_path = tmp_path / "tasks.db"
++    repo = TaskRepo(str(db_path))
++    repo.init()
++    rid = "req-pre-phase5"
++    repo.try_insert(rid, "d-old")  # no source_path/payload_sha256
++    repo.mark_status(rid, "COMPLETED")
++
++    from ekrs_rag.api.routes import ingestion as imod
++    imod.set_pipeline(MockPipeline())
++
++    app = _build_app(repo)
++    client = TestClient(app)
++    resp = client.post("/v1/ingestion/replay", json={
++        "request_id": rid,
++        "replayed_by": "ops",
++    })
++    assert resp.status_code == 409
++    assert resp.json()["detail"]["reason"] == "pre_phase5"
++    repo.close()
++
++
++def test_replay_in_flight_task_returns_409(tmp_path):
++    """Tasks still PENDING cannot be replayed → 409 in_flight."""
++    os.environ["PARSER_TOKEN"] = ""
++    db_path = tmp_path / "tasks.db"
++    repo = TaskRepo(str(db_path))
++    repo.init()
++    rid = "req-inflight"
++    repo.try_insert_with_source(rid, "d", "/some/path.jsonl", "h")
++    # Leave status as PENDING (default from try_insert)
++
++    from ekrs_rag.api.routes import ingestion as imod
++    imod.set_pipeline(MockPipeline())
++
++    app = _build_app(repo)
++    client = TestClient(app)
++    resp = client.post("/v1/ingestion/replay", json={
++        "request_id": rid,
++        "replayed_by": "ops",
++    })
++    assert resp.status_code == 409
++    assert resp.json()["detail"]["reason"] == "in_flight"
++    repo.close()
++
++
++def test_replay_unknown_request_id_returns_404(tmp_path):
++    """request_id not in tasks table → 404."""
++    os.environ["PARSER_TOKEN"] = ""
++    db_path = tmp_path / "tasks.db"
++    repo = TaskRepo(str(db_path))
++    repo.init()
++
++    from ekrs_rag.api.routes import ingestion as imod
++    imod.set_pipeline(MockPipeline())
++
++    app = _build_app(repo)
++    client = TestClient(app)
++    resp = client.post("/v1/ingestion/replay", json={
++        "request_id": "nonexistent-request-id",
++        "replayed_by": "ops",
++    })
++    assert resp.status_code == 404
++    repo.close()
++
++
++def test_replay_sha256_mismatch_returns_409(tmp_path):
++    """If JSONL content changes since notify, sha256 check rejects → 409."""
++    os.environ["PARSER_TOKEN"] = ""
++    jsonl = tmp_path / "doc.jsonl"
++    jsonl.write_text('{"doc_id": "d1", "blocks": []}\n')
++
++    db_path = tmp_path / "tasks.db"
++    repo = TaskRepo(str(db_path))
++    repo.init()
++    rid = "req-sha-mismatch"
++    # Insert with wrong sha — what notify wrote at notify time
++    repo.try_insert_with_source(rid, "d1", str(jsonl), "wrong-hash-expected-at-notify")
++    repo.mark_status(rid, "COMPLETED")
++
++    from ekrs_rag.api.routes import ingestion as imod
++    imod.set_pipeline(MockPipeline())
++
++    app = _build_app(repo)
++    client = TestClient(app)
++    resp = client.post("/v1/ingestion/replay", json={
++        "request_id": rid,
++        "replayed_by": "ops",
++    })
++    assert resp.status_code == 409
++    assert resp.json()["detail"]["reason"] == "sha256_mismatch"
++    repo.close()

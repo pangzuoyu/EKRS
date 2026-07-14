@@ -1,0 +1,33 @@
+# Review package: d92d30b..HEAD
+
+## Commits
+dcc7864 T6: .env.example — add METRICS_HOST/PORT/PROMETHEUS_MULTIPROC_DIR guide, remove METRICS_TOKEN
+
+## Files changed
+ .env.example | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/.env.example b/.env.example
+index 6bcc2f1..cb31227 100644
+--- a/.env.example
++++ b/.env.example
+@@ -38,11 +38,17 @@ LOCK_TTL_SEC=300            # Redis lock TTL in seconds (default 5 min)
+ MAX_ATTEMPTS=3              # Compensation retry cap per task
+ TASK_DB_PATH=/var/lib/ekrs/tasks.db   # SQLite path for the tasks table
+ 
+ # Server
+ HOST=0.0.0.0
+ PORT=8000
+ 
+ # Phase 5: Observability
+ AUDIT_LOG_PATH=audit.log            # 永久 audit.log 路径
+ DEBUG_LOG_PATH=logs/debug.log       # debug 日志路径 (仅 EKRS_DEBUG=true 时生效)
+-# METRICS_TOKEN=changeme            # 可选: /metrics 鉴权 (留空 = 不鉴权)
++
++# Phase 5.5 D: Metrics sidecar exporter (与 RAG 主端口 8000 分离)
++# PROMETHEUS_MULTIPROC_DIR: 多 worker 模式必填;单 worker 留空即可。
++# 必须在 uvicorn fork 子进程前由部署层设置(部署层面的 env)。
++# PROMETHEUS_MULTIPROC_DIR=/tmp/prom_multiproc
++METRICS_HOST=0.0.0.0
++METRICS_PORT=9090

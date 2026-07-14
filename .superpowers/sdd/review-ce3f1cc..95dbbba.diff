@@ -1,0 +1,134 @@
+# Review package: ce3f1cc..HEAD
+
+## Commits
+95dbbba feat(rag): compensation scanner for failed/pending tasks
+
+## Files changed
+ rag/ekrs_rag/concurrency/compensation.py | 43 +++++++++++++++++++++
+ rag/tests/unit/test_compensation.py      | 66 ++++++++++++++++++++++++++++++++
+ 2 files changed, 109 insertions(+)
+
+## Diff
+diff --git a/rag/ekrs_rag/concurrency/compensation.py b/rag/ekrs_rag/concurrency/compensation.py
+new file mode 100644
+index 0000000..3d6f476
+--- /dev/null
++++ b/rag/ekrs_rag/concurrency/compensation.py
+@@ -0,0 +1,43 @@
++"""启动补偿扫描器: 重试 PENDING/FAILED 且超过 threshold_sec 的任务."""
++from __future__ import annotations
++
++import logging
++from typing import Any, Awaitable, Callable
++
++from ..storage.task_repo import TaskRepo
++
++logger = logging.getLogger(__name__)
++
++Handler = Callable[[dict[str, Any]], Awaitable[None]]
++
++
++class CompensationScanner:
++    def __init__(
++        self,
++        task_repo: TaskRepo,
++        handler: Handler,
++        max_attempts: int = 3,
++        threshold_sec: float = 60.0,
++    ):
++        self._repo = task_repo
++        self._handler = handler
++        self._max = max_attempts
++        self._threshold = threshold_sec
++
++    async def scan(self) -> int:
++        tasks = self._repo.pending_tasks_older_than(self._threshold)
++        retried = 0
++        for task in tasks:
++            if task["attempts"] >= self._max:
++                logger.warning("Skip task %s: max attempts reached", task["request_id"])
++                continue
++            self._repo.mark_running(task["request_id"])
++            self._repo.increment_attempts(task["request_id"])
++            try:
++                await self._handler(task)
++                self._repo.mark_status(task["request_id"], "COMPLETED")
++                retried += 1
++            except Exception as e:
++                logger.exception("Compensation handler failed for %s", task["request_id"])
++                self._repo.mark_status(task["request_id"], "FAILED", error=str(e))
++        return retried
+\ No newline at end of file
+diff --git a/rag/tests/unit/test_compensation.py b/rag/tests/unit/test_compensation.py
+new file mode 100644
+index 0000000..35c161f
+--- /dev/null
++++ b/rag/tests/unit/test_compensation.py
+@@ -0,0 +1,66 @@
++import os
++import tempfile
++import time
++import pytest
++
++from ekrs_rag.storage.task_repo import TaskRepo
++from ekrs_rag.concurrency.compensation import CompensationScanner
++
++
++@pytest.fixture
++def repo():
++    with tempfile.TemporaryDirectory() as d:
++        db = os.path.join(d, "test.db")
++        r = TaskRepo(db_path=db)
++        r.init()
++        yield r
++
++
++@pytest.mark.asyncio
++async def test_scan_retries_failed_old_tasks(repo):
++    repo.try_insert("req1", "doc_a")
++    repo.mark_status("req1", "FAILED", error="x")
++    old = time.time() - 3600
++    repo._conn.execute("UPDATE tasks SET updated_at=? WHERE request_id='req1'", (old,))
++    repo._conn.commit()
++
++    called = []
++    async def handler(task: dict) -> None:
++        called.append(task["request_id"])
++
++    scanner = CompensationScanner(task_repo=repo, handler=handler, threshold_sec=60.0)
++    n = await scanner.scan()
++    assert n == 1
++    assert called == ["req1"]
++    # 状态变为 RUNNING (handler 抛错才 FAILED)
++    assert repo.get("req1")["status"] in ("RUNNING", "COMPLETED")
++
++
++@pytest.mark.asyncio
++async def test_scan_skips_recent_pending(repo):
++    repo.try_insert("req1", "doc_a")  # PENDING, 新建
++    called = []
++    async def handler(task: dict) -> None:
++        called.append(task["request_id"])
++    scanner = CompensationScanner(task_repo=repo, handler=handler, threshold_sec=60.0)
++    n = await scanner.scan()
++    assert n == 0
++    assert called == []
++
++
++@pytest.mark.asyncio
++async def test_scan_respects_max_attempts(repo):
++    repo.try_insert("req1", "doc_a")
++    for _ in range(3):
++        repo.increment_attempts("req1")
++    old = time.time() - 3600
++    repo._conn.execute("UPDATE tasks SET updated_at=? WHERE request_id='req1'", (old,))
++    repo._conn.commit()
++
++    called = []
++    async def handler(task: dict) -> None:
++        called.append(task["request_id"])
++    scanner = CompensationScanner(task_repo=repo, handler=handler, max_attempts=3, threshold_sec=60.0)
++    n = await scanner.scan()
++    assert n == 0
++    assert called == []
+\ No newline at end of file

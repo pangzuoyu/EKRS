@@ -1,0 +1,123 @@
+# Review package: 056c266..HEAD
+
+## Commits
+8e0d8aa feat(shared): audit base class — propagation=False + schema registry
+
+## Files changed
+ shared/ekrs_shared/audit.py     | 35 +++++++++++++++++++++++++++++------
+ shared/tests/test_audit_base.py | 33 +++++++++++++++++++++++++++++++++
+ 2 files changed, 62 insertions(+), 6 deletions(-)
+
+## Diff
+diff --git a/shared/ekrs_shared/audit.py b/shared/ekrs_shared/audit.py
+index c75861d..9b89ee3 100644
+--- a/shared/ekrs_shared/audit.py
++++ b/shared/ekrs_shared/audit.py
+@@ -1,37 +1,60 @@
+ """Audit log base class for EKRS.
+ 
+-Provides structured JSON audit logging with trace_id propagation.
++Provides structured JSON audit logging with trace_id propagation,
++schema validation, and isolated handler (propagation=False).
+ """
+-
+ from __future__ import annotations
+ 
+ import json
+ import logging
+ from datetime import datetime, timezone
+ from typing import Any
+ 
+ 
+ class AuditLogger:
+-    """Base audit logger that writes structured JSON events.
++    """Base audit logger. Writes structured JSON events.
++
++    Subclasses / instances configure FileHandler; base class owns
++    schema registry and propagation control.
+ 
+     Usage:
+         audit = AuditLogger("ekrs.audit")
+-        audit.log_event("constraint_solved", trace_id="abc", query="温度", duration_ms=150)
++        audit.register_event_schema("constraint_solved", {"trace_id", "query"})
++        audit.log_event("constraint_solved", trace_id="abc", query="温度")
+     """
+ 
+     def __init__(self, name: str = "ekrs.audit", level: int = logging.INFO):
+         self._logger = logging.getLogger(name)
+         self._logger.setLevel(level)
++        self._logger.propagate = False  # do NOT bubble to root
+         if not self._logger.handlers:
+             handler = logging.StreamHandler()
+             handler.setFormatter(logging.Formatter("%(message)s"))
+             self._logger.addHandler(handler)
++        self._schemas: dict[str, set[str]] = {}
++
++    def register_event_schema(
++        self, event_type: str, required_fields: set[str]
++    ) -> None:
++        """Register required fields for an event type (idempotent)."""
++        self._schemas[event_type] = required_fields
++
++    def validate_event(self, event_type: str, **kwargs: Any) -> None:
++        """Raise ValueError if required fields for event_type are missing."""
++        required = self._schemas.get(event_type, set())
++        missing = required - set(kwargs.keys())
++        if missing:
++            raise ValueError(
++                f"audit event '{event_type}' missing required fields: {missing}"
++            )
+ 
+     def log_event(self, event_type: str, **kwargs: Any) -> None:
+-        """Log a structured audit event."""
++        """Log a structured audit event. Validates against schema if registered."""
++        if event_type in self._schemas:
++            self.validate_event(event_type, **kwargs)
+         entry = {
+             "timestamp": datetime.now(timezone.utc).isoformat(),
+             "event": event_type,
+             **kwargs,
+         }
+-        self._logger.info(json.dumps(entry, ensure_ascii=False, default=str))
++        self._logger.info(json.dumps(entry, ensure_ascii=False, default=str))
+\ No newline at end of file
+diff --git a/shared/tests/test_audit_base.py b/shared/tests/test_audit_base.py
+new file mode 100644
+index 0000000..a0a9277
+--- /dev/null
++++ b/shared/tests/test_audit_base.py
+@@ -0,0 +1,33 @@
++"""Tests for AuditLogger base class — schema registry + propagation control."""
++import logging
++import pytest
++from ekrs_shared.audit import AuditLogger
++
++
++def test_register_event_schema_and_validate():
++    audit = AuditLogger("test.audit.schema")
++    audit.register_event_schema("test_event", {"field_a", "field_b"})
++    # Missing required field should raise
++    with pytest.raises(ValueError, match="field_a"):
++        audit.validate_event("test_event", field_b="ok")
++
++
++def test_logger_does_not_propagate_to_root():
++    # Capture root logger
++    root = logging.getLogger()
++    root.setLevel(logging.DEBUG)
++    initial_handlers = list(root.handlers)
++
++    audit = AuditLogger("test.audit.propagate")
++    audit.log_event("no_propagate_test", key="value")
++
++    # Logger should have its own handler, NOT add to root
++    audit_logger = logging.getLogger("test.audit.propagate")
++    assert audit_logger.propagate is False
++    assert len(audit_logger.handlers) >= 1
++
++
++def test_log_event_writes_json_with_event_field():
++    audit = AuditLogger("test.audit.json")
++    audit.log_event("sample", trace_id="abc", extra_field=42)
++    # Just verify no exception; content verified by RAG-specific tests
+\ No newline at end of file

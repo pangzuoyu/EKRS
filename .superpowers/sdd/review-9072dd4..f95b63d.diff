@@ -1,0 +1,54 @@
+# Review package: 9072dd4..HEAD
+
+## Commits
+f95b63d feat(shared): idempotency key generator
+
+## Files changed
+ shared/ekrs_shared/idempotency.py | 10 ++++++++++
+ shared/tests/test_idempotency.py  | 21 +++++++++++++++++++++
+ 2 files changed, 31 insertions(+)
+
+## Diff
+diff --git a/shared/ekrs_shared/idempotency.py b/shared/ekrs_shared/idempotency.py
+new file mode 100644
+index 0000000..bfbe010
+--- /dev/null
++++ b/shared/ekrs_shared/idempotency.py
+@@ -0,0 +1,10 @@
++"""幂等键生成工具."""
++from __future__ import annotations
++
++import hashlib
++
++
++def request_id_from_trace(trace_id: str, doc_hash: str, version: int) -> str:
++    """生成稳定的幂等键: md5(trace_id|doc_hash|version) hex."""
++    raw = f"{trace_id}|{doc_hash}|{version}".encode("utf-8")
++    return hashlib.md5(raw).hexdigest()
+diff --git a/shared/tests/test_idempotency.py b/shared/tests/test_idempotency.py
+new file mode 100644
+index 0000000..3107fdc
+--- /dev/null
++++ b/shared/tests/test_idempotency.py
+@@ -0,0 +1,21 @@
++"""Tests for idempotency key generator."""
++from ekrs_shared.idempotency import request_id_from_trace
++
++
++def test_same_inputs_same_id():
++    a = request_id_from_trace("t1", "doc_abc", 3)
++    b = request_id_from_trace("t1", "doc_abc", 3)
++    assert a == b
++    assert len(a) == 32  # hex md5
++
++
++def test_different_doc_different_id():
++    a = request_id_from_trace("t1", "doc_abc", 3)
++    b = request_id_from_trace("t1", "doc_xyz", 3)
++    assert a != b
++
++
++def test_different_version_different_id():
++    a = request_id_from_trace("t1", "doc_abc", 3)
++    b = request_id_from_trace("t1", "doc_abc", 4)
++    assert a != b

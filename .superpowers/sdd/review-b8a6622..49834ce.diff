@@ -1,0 +1,177 @@
+# Review package: b8a6622..HEAD
+
+## Commits
+49834ce feat(rag): debug.log RotatingFileHandler (100MB x 5)
+
+## Files changed
+ rag/ekrs_rag/core/logging.py            | 52 +++++++++++++++++++-----
+ rag/tests/unit/test_logging_rotation.py | 70 +++++++++++++++++++++++++++++++++
+ 2 files changed, 112 insertions(+), 10 deletions(-)
+
+## Diff
+diff --git a/rag/ekrs_rag/core/logging.py b/rag/ekrs_rag/core/logging.py
+index 84ddbf3..16a2d68 100644
+--- a/rag/ekrs_rag/core/logging.py
++++ b/rag/ekrs_rag/core/logging.py
+@@ -1,43 +1,75 @@
+ """Structured JSON logging setup for EKRS RAG service."""
+-
+ from __future__ import annotations
+ 
+ import logging
+ import sys
++from logging.handlers import RotatingFileHandler
++from pathlib import Path
++
+ from pythonjsonlogger import json as json_logger
+ 
+ 
+ class CustomJsonFormatter(json_logger.JsonFormatter):
+     """Adds standard EKRS fields to every log entry."""
+ 
+     def add_fields(self, log_record, record, message_dict):
+         super().add_fields(log_record, record, message_dict)
+         log_record.setdefault("level", record.levelname)
+         log_record.setdefault("module", record.module)
+         log_record.setdefault("message", record.getMessage())
+ 
+ 
+-def setup_logging(debug: bool = False) -> None:
+-    """Configure root logger with JSON formatter.
++def _tag_handler(h):
++    h._ekrs_tag = True
++
++
++def _is_our_handler(h):
++    return getattr(h, "_ekrs_tag", False)
++
+ 
+-    Fields in every log line: timestamp, level, module, message.
+-    Optional fields (added by context): trace_id, doc_hash, duration_ms.
++def setup_logging(
++    debug: bool = False, debug_log_path: str = "logs/debug.log"
++) -> None:
++    """Configure root logger.
++
++    Always: StreamHandler to stdout with JSON formatter.
++    If debug=True: also RotatingFileHandler at debug_log_path (100MB x 5 backups).
++
++    Idempotent: removes only handlers previously installed by this function,
++    leaving framework handlers (pytest caplog, etc.) intact.
+     """
+     level = logging.DEBUG if debug else logging.INFO
+ 
+     formatter = CustomJsonFormatter(
+         fmt="%(timestamp)s %(level)s %(module)s %(message)s",
+         rename_fields={"timestamp": "timestamp", "levelname": "level"},
+     )
+ 
+-    handler = logging.StreamHandler(sys.stdout)
+-    handler.setFormatter(formatter)
+-
+     root = logging.getLogger()
+     root.setLevel(level)
+-    root.handlers.clear()
+-    root.addHandler(handler)
++    # Remove only OUR previous handlers — preserves framework handlers
++    root.handlers = [h for h in root.handlers if not _is_our_handler(h)]
++
++    # Always stdout
++    stdout_handler = logging.StreamHandler(sys.stdout)
++    stdout_handler.setFormatter(formatter)
++    _tag_handler(stdout_handler)
++    root.addHandler(stdout_handler)
++
++    # Optional debug file (RotatingFileHandler, 100MB x 5)
++    if debug:
++        log_path = Path(debug_log_path)
++        log_path.parent.mkdir(parents=True, exist_ok=True)
++        file_handler = RotatingFileHandler(
++            str(log_path),
++            maxBytes=100 * 1024 * 1024,  # 100MB
++            backupCount=5,
++            encoding="utf-8",
++        )
++        file_handler.setFormatter(formatter)
++        _tag_handler(file_handler)
++        root.addHandler(file_handler)
+ 
+     # Quiet noisy libraries
+     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+     logging.getLogger("qdrant_client").setLevel(logging.WARNING)
+diff --git a/rag/tests/unit/test_logging_rotation.py b/rag/tests/unit/test_logging_rotation.py
+new file mode 100644
+index 0000000..32b8ff5
+--- /dev/null
++++ b/rag/tests/unit/test_logging_rotation.py
+@@ -0,0 +1,70 @@
++"""Tests for debug.log RotatingFileHandler setup (Task 9)."""
++from __future__ import annotations
++
++import logging
++from logging.handlers import RotatingFileHandler
++
++from ekrs_rag.core.logging import setup_logging
++
++
++def test_debug_log_creates_rotating_handler(tmp_path):
++    log = tmp_path / "debug.log"
++    setup_logging(debug=True, debug_log_path=str(log))
++
++    root = logging.getLogger()
++    rot_handlers = [h for h in root.handlers if isinstance(h, RotatingFileHandler)]
++    assert len(rot_handlers) == 1
++    assert rot_handlers[0].maxBytes == 100 * 1024 * 1024
++    assert rot_handlers[0].backupCount == 5
++
++
++def test_no_debug_log_when_debug_false(tmp_path):
++    log = tmp_path / "debug.log"
++    setup_logging(debug=False, debug_log_path=str(log))
++
++    root = logging.getLogger()
++    rot_handlers = [h for h in root.handlers if isinstance(h, RotatingFileHandler)]
++    assert rot_handlers == []
++
++
++def test_debug_log_directory_created(tmp_path):
++    log = tmp_path / "subdir" / "debug.log"
++    setup_logging(debug=True, debug_log_path=str(log))
++    # Should not raise; parent dir created
++    assert log.parent.exists()
++
++
++def test_debug_log_handler_is_ekrs_tagged(tmp_path):
++    """Our rotating handler carries the _ekrs_tag so re-setup can clean up."""
++    log = tmp_path / "debug.log"
++    setup_logging(debug=True, debug_log_path=str(log))
++
++    root = logging.getLogger()
++    rot_handlers = [h for h in root.handlers if isinstance(h, RotatingFileHandler)]
++    assert getattr(rot_handlers[0], "_ekrs_tag", False) is True
++
++
++def test_setup_logging_is_idempotent(tmp_path):
++    """Calling setup_logging twice must not pile up handlers."""
++    log = tmp_path / "debug.log"
++    setup_logging(debug=True, debug_log_path=str(log))
++    setup_logging(debug=True, debug_log_path=str(log))
++
++    root = logging.getLogger()
++    rot_handlers = [h for h in root.handlers if isinstance(h, RotatingFileHandler)]
++    assert len(rot_handlers) == 1
++
++
++def test_setup_logging_does_not_clear_non_ekrs_handlers(tmp_path):
++    """Re-setup must preserve foreign handlers (e.g. pytest caplog, framework)."""
++    log = tmp_path / "debug.log"
++
++    root = logging.getLogger()
++    foreign = logging.NullHandler()
++    root.addHandler(foreign)
++
++    try:
++        setup_logging(debug=True, debug_log_path=str(log))
++        assert foreign in root.handlers
++    finally:
++        root.removeHandler(foreign)

@@ -1,0 +1,75 @@
+# Review package: 99809e3..c5d1878
+
+## Commits
+c5d1878 test(rag): audit durability — corrupted lines + truncated file + empty log
+
+## Files changed
+ rag/tests/integration/test_audit_durability.py | 59 ++++++++++++++++++++++++++
+ 1 file changed, 59 insertions(+)
+
+## Diff
+diff --git a/rag/tests/integration/test_audit_durability.py b/rag/tests/integration/test_audit_durability.py
+new file mode 100644
+index 0000000..2beb2fd
+--- /dev/null
++++ b/rag/tests/integration/test_audit_durability.py
+@@ -0,0 +1,59 @@
++import json
++from pathlib import Path
++
++import pytest
++
++from ekrs_rag.observability.audit import AuditWriter
++from ekrs_rag.observability.audit_index import AuditIndex
++
++
++def test_replay_skips_corrupted_audit_lines(tmp_path):
++    """Index build must skip lines that fail JSON parsing."""
++    log = tmp_path / "audit.log"
++
++    # Write valid line, then corrupted line, then another valid line
++    entry = {"timestamp": "2026-07-12T00:00:00Z", "event": "constraint_solve_started",
++             "trace_id": "t1", "query": "q"}
++    with open(log, "w") as f:
++        f.write(json.dumps(entry) + "\n")
++        f.write("THIS IS NOT JSON\n")
++        f.write(json.dumps({**entry, "event": "constraint_solved", "branches_count": 1}) + "\n")
++
++    idx = AuditIndex(str(log))
++    idx.build()  # should not raise
++
++    lines = idx.seek("t1")
++    assert lines is not None
++    assert len(lines) == 2
++
++
++def test_replay_handles_truncated_audit_file(tmp_path):
++    """Audit file with truncated final line (no newline) must still work."""
++    log = tmp_path / "audit.log"
++
++    entry1 = {"timestamp": "2026-07-12T00:00:00Z", "event": "constraint_solve_started",
++              "trace_id": "t1", "query": "q"}
++    entry2 = {"timestamp": "2026-07-12T00:00:01Z", "event": "constraint_solved",
++              "trace_id": "t1", "branches_count": 1}
++    with open(log, "w") as f:
++        f.write(json.dumps(entry1) + "\n")
++        f.write(json.dumps(entry2))  # no trailing newline (truncated)
++
++    idx = AuditIndex(str(log))
++    idx.build()  # should not raise
++
++    lines = idx.seek("t1")
++    assert lines is not None
++    assert len(lines) == 2
++
++
++def test_replay_returns_empty_for_empty_audit_log(tmp_path):
++    """Empty audit file → empty index, seek returns None."""
++    log = tmp_path / "audit.log"
++    log.write_text("")
++
++    idx = AuditIndex(str(log))
++    idx.build()
++
++    assert idx.seek("anything") is None
++    assert idx.size == 0

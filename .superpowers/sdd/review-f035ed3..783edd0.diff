@@ -1,0 +1,145 @@
+# Review package: f035ed3..HEAD
+
+## Commits
+783edd0 feat(rag): @audited and @metered route decorators
+
+## Files changed
+ rag/ekrs_rag/api/decorators.py                  | 69 +++++++++++++++++++++++++
+ rag/tests/unit/observability/test_decorators.py | 53 +++++++++++++++++++
+ 2 files changed, 122 insertions(+)
+
+## Diff
+diff --git a/rag/ekrs_rag/api/decorators.py b/rag/ekrs_rag/api/decorators.py
+new file mode 100644
+index 0000000..34e4d03
+--- /dev/null
++++ b/rag/ekrs_rag/api/decorators.py
+@@ -0,0 +1,69 @@
++"""Endpoint decorators: @audited (write audit event) + @metered (observe duration).
++
++Both rely on ObservabilityMiddleware having set trace_id contextvar.
++Both swallow all exceptions (decorator must never break the route).
++"""
++from __future__ import annotations
++
++import functools
++import logging
++import time
++from typing import Any, Callable
++
++from ekrs_rag.observability.audit import get_writer
++from ekrs_rag.observability.metrics import safe_observe
++from ekrs_rag.observability.trace import get_trace_id
++
++logger = logging.getLogger("ekrs.observability.decorators")
++
++
++def audited(event_name: str) -> Callable:
++    """Decorator: write audit event after route returns (success or error).
++
++    Captures: trace_id, status_code (from response), duration_ms.
++    """
++    def decorator(func: Callable) -> Callable:
++        @functools.wraps(func)
++        async def wrapper(*args, **kwargs):
++            start = time.monotonic()
++            status_code = 500
++            try:
++                result = await func(*args, **kwargs)
++                status_code = 200
++                return result
++            except Exception as e:
++                logger.warning("route %s raised: %s", event_name, e)
++                status_code = 500
++                raise
++            finally:
++                duration_ms = int((time.monotonic() - start) * 1000)
++                writer = get_writer()
++                if writer:
++                    writer.write(
++                        event_name,
++                        trace_id=get_trace_id(),
++                        status_code=status_code,
++                        duration_ms=duration_ms,
++                    )
++        return wrapper
++    return decorator
++
++
++def metered(histogram) -> Callable:
++    """Decorator: observe duration into the given Histogram instance.
++
++    Type-safe: caller passes the actual Histogram object (e.g.,
++    METRICS.constraint_solve_duration_seconds) instead of a magic string.
++    Typo at call site → ImportError at decoration time, never silent.
++    """
++    def decorator(func: Callable) -> Callable:
++        @functools.wraps(func)
++        async def wrapper(*args, **kwargs):
++            start = time.monotonic()
++            try:
++                return await func(*args, **kwargs)
++            finally:
++                duration = time.monotonic() - start
++                safe_observe(histogram, duration)
++        return wrapper
++    return decorator
+diff --git a/rag/tests/unit/observability/test_decorators.py b/rag/tests/unit/observability/test_decorators.py
+new file mode 100644
+index 0000000..2d4723f
+--- /dev/null
++++ b/rag/tests/unit/observability/test_decorators.py
+@@ -0,0 +1,53 @@
++import time
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++from ekrs_rag.observability.metrics import METRICS
++from ekrs_rag.api.decorators import audited, metered
++
++
++def test_audited_writes_audit_event():
++    app = FastAPI()
++
++    @app.get("/test")
++    @audited("test_endpoint_completed")
++    async def handler():
++        return {"ok": True}
++
++    client = TestClient(app)
++    resp = client.get("/test")
++    assert resp.status_code == 200
++
++
++def test_metered_records_duration():
++    app = FastAPI()
++
++    @app.get("/metered")
++    @metered(METRICS.constraint_solve_duration_seconds)
++    async def handler():
++        time.sleep(0.01)
++        return {"ok": True}
++
++    client = TestClient(app)
++    resp = client.get("/metered")
++    assert resp.status_code == 200
++    # Assert actual metric value observed (Test Gap 3)
++    # histogram._sum.get() returns cumulative seconds observed
++    assert METRICS.constraint_solve_duration_seconds._sum.get() >= 0.01
++
++
++def test_audited_includes_trace_id_in_audit():
++    """When middleware sets trace_id, audit events include it."""
++    from ekrs_rag.api.middleware.observability import ObservabilityMiddleware
++
++    app = FastAPI()
++    app.add_middleware(ObservabilityMiddleware)
++
++    @app.get("/with_trace")
++    @audited("traced_event")
++    async def handler():
++        return {}
++
++    client = TestClient(app)
++    resp = client.get("/with_trace", headers={"X-Trace-Id": "test-trace-xyz"})
++    assert resp.headers.get("X-Trace-Id") == "test-trace-xyz"

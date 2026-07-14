@@ -1,0 +1,108 @@
+# Review package: cbcdbb7..HEAD
+
+## Commits
+ce3f1cc feat(rag): RedisLock with Lua release script
+
+## Files changed
+ rag/ekrs_rag/concurrency/__init__.py   |  0
+ rag/ekrs_rag/concurrency/redis_lock.py | 34 ++++++++++++++++++++++++
+ rag/tests/unit/test_redis_lock.py      | 47 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 81 insertions(+)
+
+## Diff
+diff --git a/rag/ekrs_rag/concurrency/__init__.py b/rag/ekrs_rag/concurrency/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/rag/ekrs_rag/concurrency/redis_lock.py b/rag/ekrs_rag/concurrency/redis_lock.py
+new file mode 100644
+index 0000000..ae964d7
+--- /dev/null
++++ b/rag/ekrs_rag/concurrency/redis_lock.py
+@@ -0,0 +1,34 @@
++"""Redis 分布式锁: SET NX EX + Lua 释放 token 校验."""
++from __future__ import annotations
++
++import uuid
++
++# Lua: 仅当 token 匹配才删除 (避免持锁者过期后误删新持有者的锁)
++_RELEASE_LUA = """
++if redis.call("get", KEYS[1]) == ARGV[1] then
++  return redis.call("del", KEYS[1])
++else
++  return 0
++end
++"""
++
++
++class RedisLock:
++    def __init__(self, redis_client):
++        self._r = redis_client
++        self._release_script_sha: str | None = None
++
++    async def _ensure_release_script(self) -> str:
++        if self._release_script_sha is None:
++            self._release_script_sha = await self._r.script_load(_RELEASE_LUA)
++        return self._release_script_sha
++
++    async def acquire(self, key: str, ttl_sec: int) -> str | None:
++        token = uuid.uuid4().hex
++        ok = await self._r.set(key, token, nx=True, ex=ttl_sec)
++        return token if ok else None
++
++    async def release(self, key: str, token: str) -> bool:
++        sha = await self._ensure_release_script()
++        result = await self._r.evalsha(sha, 1, key, token)
++        return bool(result)
+diff --git a/rag/tests/unit/test_redis_lock.py b/rag/tests/unit/test_redis_lock.py
+new file mode 100644
+index 0000000..452aabd
+--- /dev/null
++++ b/rag/tests/unit/test_redis_lock.py
+@@ -0,0 +1,47 @@
++import pytest
++import fakeredis.aioredis
++
++from ekrs_rag.concurrency.redis_lock import RedisLock
++
++
++@pytest.fixture
++def lock():
++    client = fakeredis.aioredis.FakeRedis()
++    return RedisLock(client)
++
++
++@pytest.mark.asyncio
++async def test_acquire_returns_token(lock):
++    token = await lock.acquire("k1", ttl_sec=10)
++    assert token is not None
++    assert len(token) == 32  # uuid4 hex
++
++
++@pytest.mark.asyncio
++async def test_acquire_same_key_blocked(lock):
++    t1 = await lock.acquire("k1", ttl_sec=10)
++    t2 = await lock.acquire("k1", ttl_sec=10)
++    assert t1 is not None
++    assert t2 is None
++
++
++@pytest.mark.asyncio
++async def test_release_with_correct_token_succeeds(lock):
++    t = await lock.acquire("k1", ttl_sec=10)
++    assert await lock.release("k1", t) is True
++    # 锁释放后能再拿
++    t2 = await lock.acquire("k1", ttl_sec=10)
++    assert t2 is not None
++
++
++@pytest.mark.asyncio
++async def test_release_with_wrong_token_fails(lock):
++    await lock.acquire("k1", ttl_sec=10)
++    assert await lock.release("k1", "wrong-token") is False
++
++
++@pytest.mark.asyncio
++async def test_different_keys_independent(lock):
++    t1 = await lock.acquire("k1", ttl_sec=10)
++    t2 = await lock.acquire("k2", ttl_sec=10)
++    assert t1 and t2

@@ -1,0 +1,46 @@
+# Review package: dcc7864..HEAD
+
+## Commits
+64f91ba T7: docker-compose — add prometheus sidecar service scraping rag:9090
+
+## Files changed
+ deployment/docker-compose.yml | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+## Diff
+diff --git a/deployment/docker-compose.yml b/deployment/docker-compose.yml
+index 9e2c97b..ea6b3cd 100644
+--- a/deployment/docker-compose.yml
++++ b/deployment/docker-compose.yml
+@@ -48,13 +48,31 @@ services:
+       qdrant:
+         condition: service_healthy
+       redis:
+         condition: service_healthy
+     healthcheck:
+       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+       interval: 15s
+       timeout: 5s
+       retries: 5
+ 
++  prometheus:
++    image: prom/prometheus:latest
++    ports:
++      - "19090:9090"          # host:19090 -> container:9090 (UI / sanity probe)
++    volumes:
++      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
++    command:
++      - '--config.file=/etc/prometheus/prometheus.yml'
++      - '--storage.tsdb.retention.time=7d'
++    depends_on:
++      rag:
++        condition: service_healthy
++    healthcheck:
++      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
++      interval: 30s
++      timeout: 5s
++      retries: 3
++
+ volumes:
+   qdrant_data:
+   parsed_lib:

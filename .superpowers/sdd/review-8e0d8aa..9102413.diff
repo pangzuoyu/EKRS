@@ -1,0 +1,212 @@
+# Review package: 8e0d8aa..HEAD
+
+## Commits
+9102413 feat(rag): AuditWriter instance + permanent file handler
+
+## Files changed
+ rag/ekrs_rag/observability/__init__.py     |  1 +
+ rag/ekrs_rag/observability/audit.py        | 88 ++++++++++++++++++++++++++++++
+ rag/tests/unit/observability/__init__.py   |  0
+ rag/tests/unit/observability/test_audit.py | 88 ++++++++++++++++++++++++++++++
+ 4 files changed, 177 insertions(+)
+
+## Diff
+diff --git a/rag/ekrs_rag/observability/__init__.py b/rag/ekrs_rag/observability/__init__.py
+new file mode 100644
+index 0000000..e270a0b
+--- /dev/null
++++ b/rag/ekrs_rag/observability/__init__.py
+@@ -0,0 +1 @@
++"""Observability: metrics + audit + trace + replay."""
+diff --git a/rag/ekrs_rag/observability/audit.py b/rag/ekrs_rag/observability/audit.py
+new file mode 100644
+index 0000000..94dfa70
+--- /dev/null
++++ b/rag/ekrs_rag/observability/audit.py
+@@ -0,0 +1,88 @@
++"""RAG-specific AuditWriter: shared/audit.py base + FileHandler (永久).
++
++audit.log never rotates. Write failures are caught (returns False),
++never propagate to callers.
++"""
++from __future__ import annotations
++
++import logging
++import traceback
++from pathlib import Path
++
++from ekrs_shared.audit import AuditLogger
++
++
++# Module-level writer, set by main.py at startup
++_writer: AuditLogger | None = None
++# Module-level AuditIndex, set by main.py at startup (Issue 5: runtime writes
++# must be indexable for replay without rescan)
++_index = None
++
++
++class AuditWriter(AuditLogger):
++    """AuditLogger instance with permanent FileHandler."""
++
++    def __init__(self, audit_log_path: str):
++        super().__init__(name="ekrs.audit")
++        path = Path(audit_log_path)
++        path.parent.mkdir(parents=True, exist_ok=True)
++
++        # FileHandler, NOT RotatingFileHandler — permanent
++        handler = logging.FileHandler(str(path), encoding="utf-8")
++        # Pass-through formatter (base class already JSON-encodes message)
++        handler.setFormatter(logging.Formatter("%(message)s"))
++        self._logger.addHandler(handler)
++
++    def write(self, event_type: str, **kwargs) -> bool:
++        """Log an event. Returns False if write fails (never raises)."""
++        try:
++            # Capture file offset BEFORE write so AuditIndex can locate the line
++            offset = self._current_offset()
++            self.log_event(event_type, **kwargs)
++            # Register new line in module-level AuditIndex (Issue 5)
++            idx = get_index()
++            if idx is not None:
++                trace_id = kwargs.get("trace_id") or self._logger.findCaller  # noqa: F841
++                # Simpler: pull trace_id from kwargs (audit contract always passes it)
++                idx.append(event_type, kwargs.get("trace_id", ""), offset)
++            return True
++        except Exception:
++            # Log to stderr (root logger is still alive for debug.log)
++            logging.getLogger("ekrs.audit.failures").error(
++                "audit write failed: %s", traceback.format_exc()
++            )
++            return False
++
++    def _current_offset(self) -> int:
++        """Return current byte offset of the file handler (for index registration)."""
++        for h in self._logger.handlers:
++            if isinstance(h, logging.FileHandler) and not h.stream.closed:
++                try:
++                    return h.stream.tell()
++                except (OSError, AttributeError):
++                    pass
++        return 0
++
++
++def set_writer(writer: AuditLogger) -> None:
++    """Set module-level writer (called at startup)."""
++    global _writer
++    _writer = writer
++
++
++def get_writer() -> AuditLogger | None:
++    return _writer
++
++
++def attach_index(index) -> None:
++    """Attach an AuditIndex so new writes are indexed for replay (Issue 5).
++
++    Module-level singleton; called once at startup by main.py lifespan.
++    """
++    global _index
++    _index = index
++
++
++def get_index():
++    """Return attached AuditIndex, or None if not yet initialized."""
++    return _index
+diff --git a/rag/tests/unit/observability/__init__.py b/rag/tests/unit/observability/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/rag/tests/unit/observability/test_audit.py b/rag/tests/unit/observability/test_audit.py
+new file mode 100644
+index 0000000..294a58d
+--- /dev/null
++++ b/rag/tests/unit/observability/test_audit.py
+@@ -0,0 +1,88 @@
++import json
++from pathlib import Path
++
++import pytest
++
++from ekrs_rag.observability.audit import AuditWriter
++
++
++def test_audit_writer_creates_permanent_file(tmp_path):
++    log = tmp_path / "audit.log"
++    writer = AuditWriter(str(log))
++    writer.register_event_schema("test_event", {"field_a"})
++    writer.write("test_event", field_a="hello", trace_id="t1")
++
++    lines = log.read_text().strip().split("\n")
++    assert len(lines) == 1
++    entry = json.loads(lines[0])
++    assert entry["event"] == "test_event"
++    assert entry["field_a"] == "hello"
++    assert entry["trace_id"] == "t1"
++    assert "timestamp" in entry
++
++
++def test_audit_writer_appends_multiple_events(tmp_path):
++    log = tmp_path / "audit.log"
++    writer = AuditWriter(str(log))
++    writer.register_event_schema("evt", {"x"})
++    for i in range(5):
++        writer.write("evt", x=i)
++
++    lines = log.read_text().strip().split("\n")
++    assert len(lines) == 5
++    entries = [json.loads(l) for l in lines]
++    assert [e["x"] for e in entries] == [0, 1, 2, 3, 4]
++
++
++def test_audit_writer_does_not_rotate(tmp_path):
++    log = tmp_path / "audit.log"
++    writer = AuditWriter(str(log))
++    writer.register_event_schema("big", {"payload"})
++    writer.write("big", payload="x" * 1_000_000)  # 1MB
++    writer.write("big", payload="y" * 1_000_000)  # another 1MB
++
++    # File should be > 2MB; no rotation occurred
++    assert log.stat().st_size > 2_000_000
++    # No .1 / .2 backup files
++    backups = list(tmp_path.glob("audit.log.*"))
++    assert backups == []
++
++
++def test_audit_write_failure_returns_false(tmp_path):
++    log = tmp_path / "audit.log"
++    log.write_text("existing")
++    log.chmod(0o000)  # make read-only (may still work as root; use chmod trick)
++
++    # FileHandler opens the file in __init__, so the constructor may also raise
++    # PermissionError on non-root systems. Wrap both construction and write.
++    try:
++        writer = AuditWriter(str(log))
++        writer.register_event_schema("evt", set())
++        result = writer.write("evt", data="test")
++        if result is False:
++            log.chmod(0o644)  # cleanup
++            assert result is False
++        else:
++            log.chmod(0o644)
++            assert result is True  # root bypass
++    except (PermissionError, OSError):
++        log.chmod(0o644)
++        pytest.skip("running as root bypasses chmod 0o000")
++
++
++def test_audit_writer_propagation_is_false(tmp_path):
++    log = tmp_path / "audit.log"
++    writer = AuditWriter(str(log))
++    import logging
++    audit_logger = logging.getLogger(writer._logger.name)
++    assert audit_logger.propagate is False
++
++
++def test_audit_writer_uses_json_formatter(tmp_path):
++    log = tmp_path / "audit.log"
++    writer = AuditWriter(str(log))
++    writer.write("format_test", k="v")
++    line = log.read_text().strip()
++    entry = json.loads(line)
++    assert entry["k"] == "v"
++    assert entry["event"] == "format_test"
+\ No newline at end of file

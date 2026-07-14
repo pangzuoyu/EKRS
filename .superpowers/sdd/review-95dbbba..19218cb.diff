@@ -1,0 +1,170 @@
+# Review package: 95dbbba..HEAD
+
+## Commits
+19218cb fix(rag): compensation scanner re-scan bug
+
+## Files changed
+ rag/ekrs_rag/concurrency/compensation.py |  8 +++--
+ rag/ekrs_rag/storage/task_repo.py        | 32 +++++++++++++++++++
+ rag/tests/unit/test_compensation.py      | 53 +++++++++++++++++++++++++++++++-
+ 3 files changed, 89 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/rag/ekrs_rag/concurrency/compensation.py b/rag/ekrs_rag/concurrency/compensation.py
+index 3d6f476..dce0b25 100644
+--- a/rag/ekrs_rag/concurrency/compensation.py
++++ b/rag/ekrs_rag/concurrency/compensation.py
+@@ -24,20 +24,22 @@ class CompensationScanner:
+         self._max = max_attempts
+         self._threshold = threshold_sec
+ 
+     async def scan(self) -> int:
+         tasks = self._repo.pending_tasks_older_than(self._threshold)
+         retried = 0
+         for task in tasks:
+             if task["attempts"] >= self._max:
+                 logger.warning("Skip task %s: max attempts reached", task["request_id"])
+                 continue
+-            self._repo.mark_running(task["request_id"])
+-            self._repo.increment_attempts(task["request_id"])
++            # 原子地把任务置为 RUNNING 并 attempts+=1, 不刷 updated_at.
++            # 失败时 mark_failed_with_error 也不刷 updated_at, 任务能再被
++            # pending_tasks_older_than 挑出重试, 直到 attempts >= max_attempts.
++            self._repo.claim_for_retry(task["request_id"])
+             try:
+                 await self._handler(task)
+                 self._repo.mark_status(task["request_id"], "COMPLETED")
+                 retried += 1
+             except Exception as e:
+                 logger.exception("Compensation handler failed for %s", task["request_id"])
+-                self._repo.mark_status(task["request_id"], "FAILED", error=str(e))
++                self._repo.mark_failed_with_error(task["request_id"], str(e))
+         return retried
+\ No newline at end of file
+diff --git a/rag/ekrs_rag/storage/task_repo.py b/rag/ekrs_rag/storage/task_repo.py
+index edf79b5..5b71bd3 100644
+--- a/rag/ekrs_rag/storage/task_repo.py
++++ b/rag/ekrs_rag/storage/task_repo.py
+@@ -70,20 +70,52 @@ class TaskRepo:
+         cur = self._c().execute(
+             "UPDATE tasks SET attempts=attempts+1, updated_at=? WHERE request_id=?",
+             (time.time(), request_id),
+         )
+         self._c().commit()
+         row = self._c().execute(
+             "SELECT attempts FROM tasks WHERE request_id=?", (request_id,)
+         ).fetchone()
+         return int(row["attempts"]) if row else 0
+ 
++    def claim_for_retry(self, request_id: str) -> None:
++        """原子地将任务置为 RUNNING 并增加 attempts, 不更新 updated_at.
++
++        不更新 updated_at 的关键原因: 失败时 mark_failed_with_error 也不会更新
++        updated_at, 这样下次 scan() 通过 updated_at < now - threshold 仍能挑出
++        该任务, 真正实现 max_attempts 次重试. 一次 SQL = 一次事务, 避免
++        mark_running 与 increment_attempts 之间的崩溃导致任务永久 RUNNING.
++        """
++        self._c().execute(
++            "UPDATE tasks SET status='RUNNING', attempts=attempts+1 "
++            "WHERE request_id=?",
++            (request_id,),
++        )
++        self._c().commit()
++
++    def mark_failed_with_error(self, request_id: str, error: str) -> None:
++        """记录失败, 追加错误到 last_error (保留历史), 不刷新 updated_at.
++
++        updated_at 不刷新, 是为了让 pending_tasks_older_than 的窗口过滤
++        能继续命中此任务以触发重试. 不会覆盖已有 last_error, 用 " | " 拼接.
++        """
++        row = self._c().execute(
++            "SELECT last_error FROM tasks WHERE request_id=?", (request_id,)
++        ).fetchone()
++        prior = row["last_error"] if row and row["last_error"] else ""
++        merged = f"{prior} | {error}" if prior else error
++        self._c().execute(
++            "UPDATE tasks SET status='FAILED', last_error=? WHERE request_id=?",
++            (merged, request_id),
++        )
++        self._c().commit()
++
+     def get(self, request_id: str) -> dict[str, Any] | None:
+         row = self._c().execute(
+             "SELECT * FROM tasks WHERE request_id=?", (request_id,)
+         ).fetchone()
+         return dict(row) if row else None
+ 
+     def pending_tasks_older_than(self, seconds: float) -> list[dict[str, Any]]:
+         threshold = time.time() - seconds
+         rows = self._c().execute(
+             "SELECT * FROM tasks WHERE status IN ('PENDING','FAILED') AND updated_at < ?",
+diff --git a/rag/tests/unit/test_compensation.py b/rag/tests/unit/test_compensation.py
+index 35c161f..b2b3e6e 100644
+--- a/rag/tests/unit/test_compensation.py
++++ b/rag/tests/unit/test_compensation.py
+@@ -56,11 +56,62 @@ async def test_scan_respects_max_attempts(repo):
+     old = time.time() - 3600
+     repo._conn.execute("UPDATE tasks SET updated_at=? WHERE request_id='req1'", (old,))
+     repo._conn.commit()
+ 
+     called = []
+     async def handler(task: dict) -> None:
+         called.append(task["request_id"])
+     scanner = CompensationScanner(task_repo=repo, handler=handler, max_attempts=3, threshold_sec=60.0)
+     n = await scanner.scan()
+     assert n == 0
+-    assert called == []
+\ No newline at end of file
++    assert called == []
++
++
++@pytest.mark.asyncio
++async def test_scan_retries_after_handler_failure(repo):
++    """回归测试: 修复 mark_status(FAILED) 刷新 updated_at 导致 max_attempts=3
++    退化为 1 的 bug. 第一次 scan 失败后, 任务必须仍然落在
++    pending_tasks_older_than 窗口内, 第二次 scan 才能再次尝试.
++    """
++    repo.try_insert("req1", "doc_a")
++    old = time.time() - 3600
++    repo._conn.execute("UPDATE tasks SET updated_at=? WHERE request_id='req1'", (old,))
++    repo._conn.commit()
++
++    call_count = {"n": 0}
++
++    async def flaky_handler(task: dict) -> None:
++        call_count["n"] += 1
++        if call_count["n"] == 1:
++            raise RuntimeError("first attempt blows up")
++
++    scanner = CompensationScanner(task_repo=repo, handler=flaky_handler, threshold_sec=60.0)
++    n1 = await scanner.scan()
++    # 第一次失败: 不算成功重试, 但任务应当仍可重试
++    assert n1 == 0
++    assert call_count["n"] == 1
++    # 第一次失败后, last_error 应当记录错误且 status=FAILED, 任务未被永久废弃
++    after_first = repo.get("req1")
++    assert after_first["status"] == "FAILED"
++    assert "first attempt blows up" in after_first["last_error"]
++    assert after_first["attempts"] == 1
++
++    # 第二次 scan: 同一任务应当被再次挑出 (updated_at 未被刷新), 并成功完成
++    n2 = await scanner.scan()
++    assert n2 == 1
++    assert call_count["n"] == 2
++    final = repo.get("req1")
++    assert final["status"] == "COMPLETED"
++    assert final["attempts"] == 2
++    # 两次 scan 累计的 retried 数 = 1 (只有第二次算成功重试)
++    assert n1 + n2 == 1
++
++
++@pytest.mark.asyncio
++async def test_mark_failed_with_error_appends_history(repo):
++    """回归测试: 重试失败时, 旧错误不应被覆盖, 应以分隔符拼接保留全链路."""
++    repo.try_insert("req1", "doc_a")
++    repo.mark_status("req1", "FAILED", error="original boom")
++    repo.mark_failed_with_error("req1", "retry 1 blew up")
++    repo.mark_failed_with_error("req1", "retry 2 blew up")
++    rec = repo.get("req1")
++    assert rec["last_error"] == "original boom | retry 1 blew up | retry 2 blew up"
+\ No newline at end of file
