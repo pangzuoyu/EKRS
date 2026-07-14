@@ -64,3 +64,47 @@ def test_safe_inc_accepts_template_label():
 def test_safe_observe_works():
     safe_observe(METRICS.constraint_solve_duration_seconds, 0.123)
     # Just verify no exception; histogram state verified via prometheus_client
+
+
+def test_is_route_template_rejects_missing_or_empty_segments():
+    assert is_route_template("") is False
+    assert is_route_template("v1/constraints") is False
+    assert is_route_template("/") is False
+
+
+def test_safe_inc_logs_metric_failure(caplog):
+    class BrokenCounter:
+        def labels(self, **labels):
+            raise RuntimeError("counter unavailable")
+
+    with caplog.at_level(logging.WARNING):
+        safe_inc(BrokenCounter(), status="failed")
+
+    assert "metric inc failed: counter unavailable" in caplog.text
+
+
+def test_safe_observe_supports_labels():
+    class RecordingHistogram:
+        def labels(self, **labels):
+            self.labels_seen = labels
+            return self
+
+        def observe(self, value):
+            self.value_seen = value
+
+    histogram = RecordingHistogram()
+    safe_observe(histogram, 0.25, operation="retrieve")
+
+    assert histogram.labels_seen == {"operation": "retrieve"}
+    assert histogram.value_seen == 0.25
+
+
+def test_safe_observe_logs_metric_failure(caplog):
+    class BrokenHistogram:
+        def observe(self, value):
+            raise RuntimeError("histogram unavailable")
+
+    with caplog.at_level(logging.WARNING):
+        safe_observe(BrokenHistogram(), 0.25)
+
+    assert "metric observe failed: histogram unavailable" in caplog.text

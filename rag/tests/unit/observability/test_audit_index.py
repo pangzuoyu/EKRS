@@ -115,3 +115,14 @@ def test_runtime_writes_via_auditwriter_become_indexable(tmp_path):
         reset_index_for_test()
         # Touch module name to silence unused-import warning
         _ = audit_mod
+
+
+def test_seek_skips_line_truncated_after_index_build(tmp_path, caplog):
+    log = tmp_path / "audit.log"
+    _write_audit_line(log, "constraint_solve_started", "truncated", query="q")
+    idx = AuditIndex(str(log))
+    idx.build()
+    log.write_text("{\"event\":", encoding="utf-8")
+
+    assert idx.seek("truncated") == []
+    assert "seek: corrupted line at offset 0" in caplog.text

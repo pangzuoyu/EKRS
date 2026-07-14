@@ -72,3 +72,14 @@ def test_event_names_are_unchanged():
         "document_metadata_failed",
     }
     assert set(_EVENT_SCHEMAS) == expected_names
+
+
+def test_audit_writer_returns_false_when_log_event_fails(tmp_path, monkeypatch):
+    writer = AuditWriter(str(tmp_path / "audit.log"))
+
+    def fail_log_event(*args, **kwargs):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(writer, "log_event", fail_log_event)
+
+    assert writer.write("custom_event", trace_id="t-failed") is False
