@@ -179,9 +179,7 @@ class QdrantManager:
         """
         from qdrant_client import models
 
-        search_params = models.SearchParams(
-            hnsw_algorithm=models.HNSWParams(m=16, ef=128)
-        )
+        search_params = models.SearchParams(hnsw_ef=128)
         results = self._client.search(
             collection_name=self._collection_name,
             query_vector=("dense", query_vector),
