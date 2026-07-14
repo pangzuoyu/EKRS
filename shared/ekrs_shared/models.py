@@ -8,7 +8,7 @@ from __future__ import annotations
 from enum import IntEnum
 from typing import Any, List, Literal, Optional, Tuple, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # --- DocumentBlock IR (mirrors doc-to-md shared/schema.py) ---
@@ -145,6 +145,25 @@ class Constraint(BaseModel):
     scope_path: Optional[List[str]] = None
     version: Optional[int] = None
     content_hash: Optional[str] = None
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def _accept_priority_name(cls, v: Any) -> Any:
+        """Accept string enum names (e.g. "NATIONAL") for JSON API callers.
+
+        Pydantic v2 IntEnum rejects string names by default; this lets
+        /v1/calculate receive `"priority": "NATIONAL"` from external
+        callers without breaking in-process users that pass `Priority.NATIONAL`.
+        """
+        if isinstance(v, str):
+            try:
+                return Priority[v]
+            except KeyError as e:
+                raise ValueError(
+                    f"priority must be one of {[p.name for p in Priority]}, "
+                    f"got {v!r}"
+                ) from e
+        return v
 
 
 class Evidence(BaseModel):

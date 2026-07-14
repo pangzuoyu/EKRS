@@ -7,9 +7,13 @@ from typing import Any, Optional
 
 import portion  # type: ignore[import]
 
-from ekrs_shared.models import ConstraintV2, Evidence
+from ekrs_shared.models import ConstraintV2, Evidence, Priority
 from ekrs_shared.normalizer import normalize_temperature, normalize_parameter
 from ekrs_shared.models import Constraint as ConstraintV1
+
+
+class StrictViolationError(Exception):
+    """Raised when strict mode forbids a soft fallback (R6 enforcement, D3)."""
 
 
 # =============================================================================
@@ -242,6 +246,88 @@ class IntervalSolver:
             "trace": all_trace,
         }
 
+    # =====================================================================
+    # Phase 6A (D3, D4, §8.2): soft-fallback path for /v1/calculate
+    # =====================================================================
+
+    def solve_with_fallback(
+        self,
+        constraints: list[ConstraintV2 | ConstraintV1],
+        active_scope: Optional[list[str]] = None,
+        *,
+        allow_soft_fallback: bool = True,
+        strict: bool = False,
+    ) -> dict[str, _ParameterResult]:
+        """Solve with soft-fallback support. Returns dict keyed by parameter.
+
+        D3: strict mode disables soft fallback (R6: "no inference" wins).
+        D4: each `_ParameterResult.had_conflict` is True when the soft-fallback
+        path was taken, so /v1/calculate can emit `conflict_details` to the
+        audit log for lineage explainability.
+
+        Return shape: `dict[str, _ParameterResult]` (V1 shape) — distinct from
+        the V2 multi-branch shape returned by `solve()`, so the /v1/calculate
+        endpoint can iterate per-parameter cleanly.
+        """
+        if not constraints:
+            return {}
+
+        constraints_v2 = [_ensure_v2(c) for c in constraints]
+        hard, soft = _partition_by_priority(constraints_v2)
+
+        # Group by parameter
+        grouped: dict[str, list[ConstraintV2]] = defaultdict(list)
+        for c in constraints_v2:
+            param = normalize_parameter(c.parameter)
+            grouped[param].append(c)
+
+        # Solve hard constraints per parameter
+        results: dict[str, _ParameterResult] = {}
+        for param, param_constraints in grouped.items():
+            results[param] = _solve_parameter(param, param_constraints, active_scope)
+
+        # If hard is non-empty for all parameters, return as-is
+        if not any(r.interval.empty for r in results.values()):
+            return results
+
+        # Hard is unsatisfiable for at least one parameter
+        if strict:
+            raise StrictViolationError(
+                "Hard constraints are unsatisfiable and soft fallback is "
+                "disabled by strict mode (R6 enforcement, D3)"
+            )
+
+        if not allow_soft_fallback or not soft:
+            # No fallback path: return hard results (with had_conflict set
+            # on the parameters that went empty).
+            return results
+
+        # D4: take soft path → mark each result had_conflict=True
+        return self._intersect_with_fallback(soft, active_scope)
+
+    def _intersect_with_fallback(
+        self,
+        soft: list[ConstraintV2],
+        active_scope: Optional[list[str]],
+    ) -> dict[str, _ParameterResult]:
+        """Intersect only the soft (REFERENCE-priority) constraints.
+
+        Returns `dict[str, _ParameterResult]` keyed by parameter. Each
+        result has `had_conflict = True` so downstream callers can emit
+        `conflict_details` audit events.
+        """
+        grouped: dict[str, list[ConstraintV2]] = defaultdict(list)
+        for c in soft:
+            param = normalize_parameter(c.parameter)
+            grouped[param].append(c)
+
+        results: dict[str, _ParameterResult] = {}
+        for param, param_constraints in grouped.items():
+            result = _solve_parameter(param, param_constraints, active_scope)
+            result.had_conflict = True
+            results[param] = result
+        return results
+
 
 # =============================================================================
 # Internal helpers
@@ -436,3 +522,22 @@ def _trace_entry_to_dict(entry: _TraceEntry) -> dict:
         "interval_snapshot": entry.interval_snapshot,
         "reason": entry.reason,
     }
+
+
+def _partition_by_priority(
+    constraints: list[ConstraintV2],
+) -> tuple[list[ConstraintV2], list[ConstraintV2]]:
+    """Split constraints into (hard, soft) by explicit_level.
+
+    Hard: PROJECT (40) and above — the default "active" rules.
+    Soft: REFERENCE (20) and below — fallback pool used when hard is empty.
+    """
+    hard: list[ConstraintV2] = []
+    soft: list[ConstraintV2] = []
+    for c in constraints:
+        level = c.priority.get("explicit_level", int(Priority.PROJECT))
+        if level >= int(Priority.PROJECT):
+            hard.append(c)
+        else:
+            soft.append(c)
+    return hard, soft
