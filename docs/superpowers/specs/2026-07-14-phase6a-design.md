@@ -40,7 +40,7 @@
 
 | # | Spec § | 缺项 | 归位 | 理由 |
 |---|--------|------|------|------|
-| 1 | §4 | documents/doc_supersedes/provision_overrides 三表 | **6A** | 是 §5 /trace 的数据基础,前置 |
+| 1 | §4 | documents/doc_supersedes/provision_overrides 三表 | **6A** | ingestion notify 阶段 RAG 从 IR metadata 自动抽取写入(见 A1) |
 | 2 | §5 | /v1/constraints/trace 端点 | **6A** | spec 声明,只读 audit log,可与 #1 并行(soft dep:文档表增强 `lineage_snapshot` 字段可读性) |
 | 3 | §5 | /v1/calculate 端点(无 retrieve 直算) | **6A** | 独立功能,测试比 /trace 简单 |
 | 4 | §8.2 | `intersect_with_fallback` 硬空回退软 | **6A** | 求解器语义补丁,影响 R6 strict 行为 |
@@ -158,7 +158,7 @@ client → POST /trace{trace_id} → AuditIndex.seek(trace_id)
   → 读 audit.log 偏移 → 解析该 trace 事件序列
   → 过滤 scope(可选) → 返回 {trace_id, events, lineage_snapshot, conflict_details}
 ```
-只读 audit log,无新写。
+只读 audit log,无新写。**lineage_snapshot / conflict_details 对老 trace 返回 null**(6A 才加的字段,旧条目无值)。
 
 ### 数据流(/v1/calculate)
 ```
@@ -171,12 +171,22 @@ admin client → POST /calculate{constraints, op, scope_path, strict, allow_soft
   → 返回 {branches: [...], lineage_snapshot, conflict_details}
 ```
 
+### 数据流(ingestion 写入文档表 — A1 决议)
+```
+parser → POST /v1/ingestion/notify{IR, doc_metadata}
+  → 现有 ingestion flow 处理 IR
+  → 新增:从 IR.doc_metadata 抽取 doc_id, type, scope_path, status
+  → DocumentRepo.insert(documents)
+  → 跨文档 supersede/override 时:DocumentRepo.link_supersede/override
+```
+RAG 侧负责写入,parser 提供 metadata 字段(A1 决议,见 §7)。
+
 ### 错误处理
 - 401 missing/bad X-Admin-Key(/calculate、admin scope 端点)
 - 503 `ADMIN_KEY` 未配置(守护已开但缺配置)
 - 422 输入约束非法(Pydantic 自动)
 - 400 strict=true 触发软回退场景(明文 `strict_violation` 错误)
-- 503 Qdrant 不可达(/trace 读 audit 不受影响,不算)
+- 注:/trace 读 audit.log 不依赖 Qdrant,无 Qdrant 不可达分支
 
 ### Iron Rules 兼容
 D3 已说明 strict 优先于软回退,R6 维持。
@@ -288,7 +298,7 @@ ENGINE_URL=http://localhost:8000    # parser 回调地址
 - ✅ ADMIN_KEY 缺配 → 503 — D1 锁定
 
 ### 待解(不阻塞 spec,实施时定)
-- ❓ 4: handbook §4 文档表由谁写入?parser 推 vs RAG 自建 — 待与 parser 团队对齐
+- ✅ 4: 文档表由 RAG 在 ingestion notify 阶段从 IR.doc_metadata 抽取写入(见 §4 数据流)— A1 决议
 - ❓ 5: `lineage_snapshot` 字段格式(JSON 字符串 vs 结构化对象)— 实施时定
 - ❓ 6: 黄金集 7 个新例具体数值 — 实施时定,先写 1-2 例占位
 - ❓ 7: 求解器 fallback 是否真为非破坏(加 optional 参数)— 实施时验证
@@ -307,7 +317,7 @@ ENGINE_URL=http://localhost:8000    # parser 回调地址
 3. **#2** (/trace):trace.py + test_trace,使用 #1 的 DocumentRepo
 4. **#7 + #8** (audit 2 字段):audit.py schema + shared/ekrs_shared/audit.py 白名单
 5. **#3 + #4** (/calculate + fallback):solver.solve 加 allow_soft_fallback + calculate.py + test_fallback + test_calculate
-6. **#5** (黄金集 7 例):fixtures/golden/v2/ + 索引更新
+6. **#5** (黄金集 7 例):fixtures/golden/v2/ + 索引更新。**注:黄金集为静态数据,允许 1 commit 跨 500 LOC 上限(CQ2 决议)**
 7. **#6** (覆盖率):末态跑 --cov,补真实缺测路径
 8. **#9** (handbook 同步):合并到各 commit,无独立 commit
 9. **打 tag**:`phase6a-spec-closure`
