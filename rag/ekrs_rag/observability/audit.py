@@ -29,6 +29,15 @@ class AuditWriter(AuditLogger):
         path = Path(audit_log_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
+        # The base AuditLogger uses a shared singleton logger ("ekrs.audit").
+        # Remove any prior RebuildingRotatingFileHandler on it so a new
+        # AuditWriter instance (FastAPI hot reload, test fixture, etc.)
+        # does not accumulate stale handlers pointing at old/closed files.
+        for prior in list(self._logger.handlers):
+            if isinstance(prior, RebuildingRotatingFileHandler):
+                prior.close()
+                self._logger.removeHandler(prior)
+
         handler = RebuildingRotatingFileHandler(
             str(path),
             maxBytes=100 * 1024 * 1024,

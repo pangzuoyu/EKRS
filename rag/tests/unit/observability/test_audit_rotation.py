@@ -3,6 +3,7 @@ import gzip
 from pathlib import Path
 
 from ekrs_rag.observability.audit import AuditWriter
+from ekrs_rag.observability.audit_handler import RebuildingRotatingFileHandler
 
 
 def test_audit_writer_uses_rotation_with_correct_params(tmp_path):
@@ -48,3 +49,27 @@ def test_audit_writer_gz_backup_is_valid_gzip(tmp_path):
     content = gzip.open(str(gz), "rt").read()
     assert len(content) > 0
     assert "\n" in content  # multi-line events
+
+
+def test_new_instance_drops_prior_rebuilding_handlers(tmp_path):
+    """A second AuditWriter replaces prior RebuildingRotatingFileHandlers
+    on the shared `ekrs.audit` logger to prevent file-handler accumulation
+    (singleton logger bug)."""
+    log1 = tmp_path / "audit1.log"
+    log2 = tmp_path / "audit2.log"
+    w1 = AuditWriter(str(log1))
+    w1.register_event_schema("e", {"i"})
+    assert any(
+        isinstance(h, RebuildingRotatingFileHandler) for h in w1._logger.handlers
+    )
+
+    w2 = AuditWriter(str(log2))
+    # Only ONE RebuildingRotatingFileHandler should remain — w1's was closed
+    # and removed by w2's __init__.
+    rotating = [
+        h for h in w2._logger.handlers
+        if isinstance(h, RebuildingRotatingFileHandler)
+    ]
+    assert len(rotating) == 1
+    assert rotating[0] is w2._file_handler
+    assert rotating[0].baseFilename == str(log2)
