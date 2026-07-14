@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import CollectorRegistry, multiprocess, start_http_server
 
 from .api.middleware.observability import ObservabilityMiddleware
-from .api.routes import constraints, ingestion
+from .api.routes import constraints, ingestion, trace
 from .concurrency.compensation import CompensationScanner
 from .concurrency.redis_lock import RedisLock
 from .core.config import settings
@@ -255,6 +255,7 @@ def create_app() -> FastAPI:
     app.add_middleware(ObservabilityMiddleware)
     app.include_router(ingestion.router)
     app.include_router(constraints.router)
+    app.include_router(trace.router)
 
     @app.get("/health", response_class=PlainTextResponse)
     async def health():
