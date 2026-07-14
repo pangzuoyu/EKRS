@@ -37,32 +37,35 @@ def client(mock_qdrant):
     mock_task_repo = MagicMock()
     mock_task_repo.init.return_value = None
     mock_task_repo.try_insert.return_value = True
+    mock_doc_repo = MagicMock()
+    mock_doc_repo.init.return_value = None
     mock_redis_lock = MagicMock()
     mock_redis_lock.acquire = AsyncMock(return_value="lock-token")
     mock_redis_lock.release = AsyncMock(return_value=True)
     mock_redis = MagicMock()
     mock_scanner = MagicMock()
     mock_scanner.scan = AsyncMock(return_value=0)
-    with patch("ekrs_rag.main.QdrantManager", return_value=mock_qdrant):
-        with patch("ekrs_rag.main.setup_logging"):
-            with patch("ekrs_rag.main.TaskRepo", return_value=mock_task_repo):
-                with patch("ekrs_rag.main.aioredis.from_url", return_value=mock_redis):
-                    with patch("ekrs_rag.main.RedisLock", return_value=mock_redis_lock):
-                        with patch("ekrs_rag.main.CompensationScanner", return_value=mock_scanner):
-                            from ekrs_rag.main import app
-                            # Re-init pipeline with mock
-                            from ekrs_rag.ingestion.pipeline import IngestionPipeline
-                            from ekrs_rag.core.config import settings
-                            pipeline = IngestionPipeline(mock_qdrant, settings.SHARED_STORAGE_PATH)
-                            from ekrs_rag.api.routes.ingestion import (
-                                get_pipeline, get_redis_lock, get_task_repo,
-                            )
-                            app.dependency_overrides[get_pipeline] = lambda: pipeline
-                            app.dependency_overrides[get_redis_lock] = lambda: mock_redis_lock
-                            app.dependency_overrides[get_task_repo] = lambda: mock_task_repo
+    with patch("ekrs_rag.main.QdrantManager", return_value=mock_qdrant), \
+         patch("ekrs_rag.main.setup_logging"), \
+         patch("ekrs_rag.main.TaskRepo", return_value=mock_task_repo), \
+         patch("ekrs_rag.main.DocumentRepo", return_value=mock_doc_repo), \
+         patch("ekrs_rag.main.aioredis.from_url", return_value=mock_redis), \
+         patch("ekrs_rag.main.RedisLock", return_value=mock_redis_lock), \
+         patch("ekrs_rag.main.CompensationScanner", return_value=mock_scanner):
+        from ekrs_rag.main import app
+        # Re-init pipeline with mock
+        from ekrs_rag.ingestion.pipeline import IngestionPipeline
+        from ekrs_rag.core.config import settings
+        pipeline = IngestionPipeline(mock_qdrant, settings.SHARED_STORAGE_PATH)
+        from ekrs_rag.api.routes.ingestion import (
+            get_pipeline, get_redis_lock, get_task_repo,
+        )
+        app.dependency_overrides[get_pipeline] = lambda: pipeline
+        app.dependency_overrides[get_redis_lock] = lambda: mock_redis_lock
+        app.dependency_overrides[get_task_repo] = lambda: mock_task_repo
 
-                            with TestClient(app) as c:
-                                yield c
+        with TestClient(app) as c:
+            yield c
 
 
 @pytest.fixture

@@ -29,6 +29,7 @@ from .retrieval.embedder import BGESmallEmbedder
 from .retrieval.qdrant_client import QdrantManager
 from .retrieval.retriever import EKRSRetriever
 from .storage.task_repo import TaskRepo
+from .storage.documents import DocumentRepo
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ _retriever: EKRSRetriever | None = None
 _audit_writer: AuditWriter | None = None
 _audit_index: AuditIndex | None = None
 _task_repo: TaskRepo | None = None
+_doc_repo: DocumentRepo | None = None
 
 # All 15 audit event schemas required by spec §Audit (registered at startup).
 _EVENT_SCHEMAS = {
@@ -85,7 +87,7 @@ async def lifespan(app: FastAPI):
     """Startup: init logging, Qdrant, embedder, retriever, ingestion pipeline,
     redis, task_repo, compensation scanner, AuditWriter, AuditIndex."""
     global _qdrant, _pipeline, _embedder, _retriever
-    global _audit_writer, _audit_index, _task_repo
+    global _audit_writer, _audit_index, _task_repo, _doc_repo
 
     # ---- Phase 5.5 D: sidecar metrics exporter ----
     multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
@@ -174,6 +176,11 @@ async def lifespan(app: FastAPI):
         app.state.redis = _redis
         app.state.redis_lock = _redis_lock
         app.state.task_repo = _task_repo
+
+        # Phase 6A: DocumentRepo for spec §4 metadata tables
+        _doc_repo = DocumentRepo(db_path=settings.DOCUMENTS_DB_PATH)
+        _doc_repo.init()
+        app.state.document_repo = _doc_repo
 
         # handler lookup is dynamic so tests can patch compensation_handler.
         handler = _get_compensation_handler()

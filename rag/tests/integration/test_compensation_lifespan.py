@@ -61,6 +61,7 @@ def lifespan_with_seeded_db(tmp_path, monkeypatch):
     monkeypatch.setattr("ekrs_rag.main._get_compensation_handler", lambda: recording_handler)
     monkeypatch.setattr("ekrs_rag.main.COMPENSATION_HANDLER_IMPLEMENTED", True)
     monkeypatch.setattr("ekrs_rag.main.settings.TASK_DB_PATH", db)
+    monkeypatch.setattr("ekrs_rag.main.settings.DOCUMENTS_DB_PATH", os.path.join(str(tmp_path), "documents.db"))
     monkeypatch.setattr("ekrs_rag.main.settings.PARSER_TOKEN", PARSER_TOKEN)
 
     # Patch Qdrant + logging so lifespan doesn't try real connections.

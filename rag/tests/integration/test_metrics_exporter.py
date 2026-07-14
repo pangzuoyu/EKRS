@@ -44,6 +44,9 @@ def sidecar_env(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "ekrs_rag.main.settings.TASK_DB_PATH", str(tmp_path / "tasks.db")
     )
+    monkeypatch.setattr(
+        "ekrs_rag.main.settings.DOCUMENTS_DB_PATH", str(tmp_path / "documents.db")
+    )
     return {"port": port}
 
 

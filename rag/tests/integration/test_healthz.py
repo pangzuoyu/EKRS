@@ -15,6 +15,7 @@ from ekrs_rag.main import create_app
 def test_healthz_returns_audit_index_status(tmp_path, monkeypatch):
     monkeypatch.setenv("AUDIT_LOG_PATH", str(tmp_path / "audit.log"))
     monkeypatch.setenv("TASK_DB_PATH", str(tmp_path / "tasks.db"))
+    monkeypatch.setenv("DOCUMENTS_DB_PATH", str(tmp_path / "documents.db"))
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379")
 
     app = create_app()

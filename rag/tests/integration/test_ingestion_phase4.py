@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 from ekrs_rag.concurrency.redis_lock import RedisLock
 from ekrs_rag.concurrency.compensation import CompensationScanner
 from ekrs_rag.storage.task_repo import TaskRepo
+from ekrs_rag.storage.documents import DocumentRepo
 
 
 PARSER_TOKEN = "change-me-to-a-secure-random-string-32chars"
@@ -55,6 +56,8 @@ def client():
 
         repo.init = _init_thread_safe  # type: ignore[assignment]
         repo.init()
+        doc_repo = DocumentRepo(db_path=os.path.join(d, "documents.db"))
+        doc_repo.init()
         lock = RedisLock(fake_redis)
 
         mock_pipeline = MagicMock()
@@ -63,6 +66,7 @@ def client():
         with patch("ekrs_rag.main.QdrantManager"), \
              patch("ekrs_rag.main.setup_logging"), \
              patch("ekrs_rag.main.TaskRepo", return_value=repo), \
+             patch("ekrs_rag.main.DocumentRepo", return_value=doc_repo), \
              patch("ekrs_rag.main.aioredis.from_url", return_value=fake_redis), \
              patch("ekrs_rag.main.RedisLock", return_value=lock), \
              patch("ekrs_rag.main.CompensationScanner") as mock_scanner_cls:

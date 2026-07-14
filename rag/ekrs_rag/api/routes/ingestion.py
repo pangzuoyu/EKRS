@@ -23,6 +23,7 @@ from ...concurrency.redis_lock import RedisLock
 from ...core.config import settings
 from ...ingestion.pipeline import IngestionPipeline
 from ...storage.task_repo import TaskRepo
+from ...storage.documents import Document
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ def get_task_repo(request: Request) -> TaskRepo:
 async def notify(
     notification: IngestionNotification,
     background_tasks: BackgroundTasks,
+    request: Request,
     pipeline: IngestionPipeline = Depends(get_pipeline),
     lock: RedisLock = Depends(get_redis_lock),
     repo: TaskRepo = Depends(get_task_repo),
@@ -97,6 +99,37 @@ async def notify(
     except Exception:
         await lock.release(lock_key, token)
         raise
+
+    # Phase 6A (A1) / Q1: extract doc_metadata from notification and persist
+    # via DocumentRepo. Parser populates notification.metadata with
+    # {doc_id, type, scope_path, status}. If absent, skip silently (back-compat
+    # with pre-A1 payloads). On write failure, soft-fail with audit warning —
+    # never block ingestion.
+    _doc_meta = (notification.metadata or {}).get("doc_metadata")
+    _repo_doc = getattr(request.app.state, "document_repo", None)
+    if _doc_meta is not None and _repo_doc is not None:
+        try:
+            _repo_doc.insert(Document(
+                doc_id=_doc_meta["doc_id"],
+                doc_type=_doc_meta.get("type", "unknown"),
+                scope_path=_doc_meta.get("scope_path", ""),
+                status=_doc_meta.get("status", "active"),
+                created_at=time.time(),
+            ))
+        except Exception as _e:
+            logger.warning("document_metadata_extraction_failed: %s", _e)
+            try:
+                from ekrs_rag.observability.audit import get_writer as _gw
+                _writer = _gw()
+                if _writer is not None:
+                    _writer.write(
+                        "document_metadata_failed",
+                        request_id=getattr(request.state, "request_id", "unknown"),
+                        doc_id=str(_doc_meta.get("doc_id", "?")),
+                        error=str(_e),
+                    )
+            except Exception:
+                pass  # audit best-effort
 
     async def _locked_ingest() -> None:
         try:
