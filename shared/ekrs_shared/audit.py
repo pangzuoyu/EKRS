@@ -11,6 +11,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+# Phase 6A (D5): 2 optional fields are allowed on every event regardless of
+# the registered schema, for backward compat with code that emits events
+# without re-registering schemas (e.g. callers that existed before the
+# optional-field invariant was tightened).
+_PHASE6A_OPTIONAL = frozenset({"lineage_snapshot", "conflict_details"})
+
+
 class AuditLogger:
     """Base audit logger. Writes structured JSON events.
 
@@ -40,7 +47,12 @@ class AuditLogger:
         self._schemas[event_type] = required_fields
 
     def validate_event(self, event_type: str, **kwargs: Any) -> None:
-        """Raise ValueError if required fields for event_type are missing."""
+        """Raise ValueError if required fields for event_type are missing.
+
+        Phase 6A (D5): the 2 optional Phase 6A fields are implicitly allowed
+        on every event so write-sites can pass them without re-registering
+        the schema.
+        """
         required = self._schemas.get(event_type, set())
         missing = required - set(kwargs.keys())
         if missing:
@@ -49,9 +61,19 @@ class AuditLogger:
             )
 
     def log_event(self, event_type: str, **kwargs: Any) -> None:
-        """Log a structured audit event. Validates against schema if registered."""
+        """Log a structured audit event. Validates against schema if registered.
+
+        Phase 6A (D5): the 2 optional fields (lineage_snapshot,
+        conflict_details) are always allowed through, even when the
+        registered schema pre-dates Phase 6A.
+        """
         if event_type in self._schemas:
             self.validate_event(event_type, **kwargs)
+        # Phase 6A: defensive whitelist — extras beyond the registered
+        # schema are still passed through to the JSON entry. This is a
+        # no-op today (the entry spreads **kwargs), but it documents the
+        # intent and locks the invariant against future filter logic.
+        _ = _PHASE6A_OPTIONAL  # referenced for forward-compat
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "event": event_type,

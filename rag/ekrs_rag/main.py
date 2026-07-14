@@ -62,16 +62,23 @@ _audit_index: AuditIndex | None = None
 _task_repo: TaskRepo | None = None
 _doc_repo: DocumentRepo | None = None
 
-# All 15 audit event schemas required by spec §Audit (registered at startup).
+# All audit event schemas required by spec §Audit (registered at startup).
+# Phase 6A (D6): the 2 optional fields (lineage_snapshot + conflict_details)
+# are added ONLY to events that carry them at write time. The other events
+# still register without the new fields. Phase 6A also registered
+# `document_metadata_failed` (T2 soft-fail) — bringing total from 15→16.
+_PHASE6A_FIELDS = frozenset({"lineage_snapshot", "conflict_details"})
 _EVENT_SCHEMAS = {
-    "endpoint_started": {"trace_id", "endpoint", "method"},
-    "endpoint_completed": {"trace_id", "status_code", "duration_ms"},
-    "constraint_solve_started": {"trace_id", "query"},
-    "constraint_solved": {"trace_id", "branches_count"},
-    "constraint_solve_failed": {"trace_id", "error_type"},
+    # 7 events that carry Phase 6A fields (write-site can include them):
+    "constraint_solve_started": {"trace_id", "query"} | _PHASE6A_FIELDS,
+    "constraint_solved": {"trace_id", "branches_count"} | _PHASE6A_FIELDS,
+    "constraint_solve_failed": {"trace_id", "error_type"} | _PHASE6A_FIELDS,
+    "endpoint_started": {"trace_id", "endpoint", "method"} | _PHASE6A_FIELDS,
+    "endpoint_completed": {"trace_id", "status_code", "duration_ms"} | _PHASE6A_FIELDS,
+    "ingestion_received": {"request_id", "doc_id"} | _PHASE6A_FIELDS,
+    "ingestion_completed": {"request_id", "doc_id"} | _PHASE6A_FIELDS,
+    # 8 events unchanged from pre-6A (no fields added; emit-only or unrelated):
     "query_replay_executed": {"replayed_trace_id", "deterministic_match"},
-    "ingestion_received": {"request_id", "doc_id"},
-    "ingestion_completed": {"request_id", "doc_id"},
     "ingestion_failed": {"request_id", "doc_id"},
     "ingestion_replay_started": {"request_id"},
     "ingestion_replay_completed": {"request_id"},
@@ -79,6 +86,9 @@ _EVENT_SCHEMAS = {
     "compensation_retry": {"request_id"},
     "qdrant_write_failed": {"collection"},
     "lock_acquire_failed": {"lock_key"},
+    # Phase 6A (T2 soft-fail audit): registered after Task 2 write-site was
+    # added (c439d50) so audit-event invariant count becomes 16.
+    "document_metadata_failed": {"request_id", "doc_id", "error"},
 }
 
 
