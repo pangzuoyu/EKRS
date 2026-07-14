@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
 
+    # Phase 6A: admin auth + parser callback
+    ADMIN_KEY: str = ""  # empty = /calculate returns 503
+    ENGINE_URL: str = "http://localhost:8000"
+    # D8: independent DB path for spec §4 documents table trio
+    # (decoupled from TASK_DB_PATH so the two repos can run on separate disks).
+    DOCUMENTS_DB_PATH: str = "/var/lib/ekrs/documents.db"
+
     @field_validator("PARSER_TOKEN")
     @classmethod
     def token_min_length(cls, v: str) -> str:
