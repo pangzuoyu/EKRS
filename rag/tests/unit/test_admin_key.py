@@ -27,6 +27,10 @@ def test_verify_admin_key_returns_false_on_none():
     assert verify_admin_key(None, expected="right") is False
 
 
+def test_verify_admin_key_returns_false_on_empty_value():
+    assert verify_admin_key("", expected="right") is False
+
+
 def test_require_admin_key_missing_header_raises_401(admin_key_env):
     with pytest.raises(HTTPException) as exc:
         require_admin_key(x_admin_key=None)
