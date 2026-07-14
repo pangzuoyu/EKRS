@@ -200,3 +200,11 @@ Discovered across Tasks 1-8, deferred to Task 11 whole-branch review:
 - **Q-8 from Task 2 review**: try/except Exception + sync audit-write in async route — perf risk, not blocking
 - **Q-2/Q-5/Q-6/Q-10/Q-11/Q-12** (Task 2 review minor): documents/provision_overrides test coupling, LIKE prefix lack escape, first-writer-wins silent drops, get_document_repo 500 vs 503, get_document_repo dep unused, lifespan doesn't close DocumentRepo
 - **Task 4 review minor** (already noted): `_ = _PHASE6A_OPTIONAL` dead reference + missing trailing newline on shared/ekrs_shared/audit.py
+
+## Phase 6A Complete
+
+- Task 9 (Handbook sync): complete (commit 4f02fbd). Updated §6 phase plan with Phase 6A row, §9 golden count to 42, §16 audit from "15 events" to "16 events" with full inventory + lineage_snapshot/conflict_details whitelist note, §18 .env.example expanded + CI gate note.
+- Task 10 (Tag): complete (tag `phase6a-spec-closure` created locally, HEAD = 4f02fbd). `git push origin phase6a-spec-closure` failed (no `origin` remote configured). Tag exists in local repo only.
+- Total Phase 6A commits since spec base `fcf6f6a`: 22 (Task 8 split into 8 due to ≤500 LOC cap).
+- Final test count: 531 passed + 1 skipped + 0 failed. Coverage: 86.63% (gate ≥85% satisfied).
+- Task 11 (final whole-branch review) pending.
