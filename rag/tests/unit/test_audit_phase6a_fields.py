@@ -37,26 +37,26 @@ def test_log_event_without_new_fields_still_works(tmp_path):
 
 # --- T2: schema registry must wire Phase 6A fields at app startup ---
 
-def test_event_schemas_include_phase6a_fields_on_seven_events():
-    """D6: 7 solve/lifecycle endpoints carry the 2 fields; the other 9 don't."""
+def test_event_schemas_exclude_phase6a_fields_from_required_set():
+    """D5 retro: the 2 optional Phase 6A fields are NOT in any event's required
+    schema — they pass through `log_event`'s defensive spread
+    (`_PHASE6A_OPTIONAL` in the shared audit base), so write-sites can include
+    them without re-registering the schema."""
     from ekrs_rag.main import _EVENT_SCHEMAS
     # Phase 6A expanded the count from 15 to 16 by registering
     # `document_metadata_failed` (orphan-audit-event memory note).
     assert len(_EVENT_SCHEMAS) == 16, "Event count is 16 after Phase 6A registration"
 
-    with_fields = {
-        "constraint_solve_started", "constraint_solved", "constraint_solve_failed",
-        "endpoint_started", "endpoint_completed",
-        "ingestion_received", "ingestion_completed",
-    }
-    for ev in with_fields:
-        assert "lineage_snapshot" in _EVENT_SCHEMAS[ev], f"{ev} missing lineage_snapshot"
-        assert "conflict_details" in _EVENT_SCHEMAS[ev], f"{ev} missing conflict_details"
-
-    without_fields = set(_EVENT_SCHEMAS) - with_fields
-    for ev in without_fields:
-        assert "lineage_snapshot" not in _EVENT_SCHEMAS[ev], f"{ev} should not include lineage_snapshot"
-        assert "conflict_details" not in _EVENT_SCHEMAS[ev], f"{ev} should not include conflict_details"
+    # No event's required schema should list the 2 optional Phase 6A fields.
+    for ev, required in _EVENT_SCHEMAS.items():
+        assert "lineage_snapshot" not in required, (
+            f"{ev} required schema should NOT include lineage_snapshot; "
+            f"it's allowed via _PHASE6A_OPTIONAL defensive spread"
+        )
+        assert "conflict_details" not in required, (
+            f"{ev} required schema should NOT include conflict_details; "
+            f"it's allowed via _PHASE6A_OPTIONAL defensive spread"
+        )
 
 
 def test_event_names_are_unchanged():
