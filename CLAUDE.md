@@ -44,6 +44,7 @@ Data flow: Parser (external) → `POST /v1/ingestion/notify` → RAG reads JSONL
 | R5 | Only entity-overlap scoring for KG — no graph DB, no multi-hop | No graph DB dependency |
 | R6 | strict=true forbids inference; missing context returns 400 | API test |
 | R7 | Every hint carries scope_path; queries can filter by scope | Multi-branch tests |
+| R8 | Index layer only filters illegal status; never trims authority | Qdrant payload check |
 
 ## Key Dependencies
 

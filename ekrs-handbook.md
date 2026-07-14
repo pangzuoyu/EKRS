@@ -256,7 +256,7 @@ Phase 5	可观测性：Prometheus、审计日志、CI 门禁	监控面板、Repl
 组件	技术选型	用途
 业务层	Python 3.11 + FastAPI	API、文档管理、RAG
 向量数据库	Qdrant 1.11	dense + sparse 检索
-嵌入模型	bge-m3 (ONNX)	文本向量化
+嵌入模型	bge-small-en-v1.5 (ONNX, 384d)	文本向量化
 关系数据库	aiosqlite / PostgreSQL	文档元数据、覆盖关系
 缓存/锁	Redis 7	分布式锁、会话缓存
 引擎	Python / Rust (可选)	纯计算服务
@@ -342,19 +342,26 @@ conflict_details：硬冲突时记录双方 provision_id 及原文片段
 13. 代码仓库目录结构
 text
 ekrs/
-├── business/                 # 上层业务系统
-├── engine/                   # 下层纯计算引擎
-├── shared/                   # 共享 IR 模型
-├── dev_ui/                   # Streamlit 调试界面
-├── deployment/               # docker-compose, k8s
-├── tests/                    # 单元、黄金集、集成
+├── rag/                      # RAG 服务（API + 检索 + 约束引擎 + 可观测性）
+│   ├── ekrs_rag/             # 主包
+│   │   ├── api/              # FastAPI 路由 + 中间件
+│   │   ├── constraint_engine/  # IR V2 求解器（替代原独立 engine/）
+│   │   ├── ingestion/        # 解析器通知 → 分块 → 向量化
+│   │   ├── observability/    # Audit / Metrics / Trace
+│   │   ├── retrieval/        # Qdrant 客户端
+│   │   └── models.py / config.py / cli.py
+│   └── tests/                # 单元、黄金集、集成（pytest）
+├── shared/ekrs_shared/       # 共享 IR 模型 + 归一化 + 审计基类
+├── dev_ui/                   # Streamlit 调试界面（占位，Phase 6 实施）
+├── deployment/               # docker-compose.yml, prometheus.yml
 ├── docs/superpowers/         # 设计 spec + 实施 plan
-└── scripts/                  # 运维脚本
+└── scripts/                  # 运维脚本（mock_parser_notify.sh, load_golden_fixtures.py）
 14. 依赖清单
-text
-fastapi, uvicorn, pydantic, qdrant-client, httpx, tenacity, redis,
+运行时：fastapi, uvicorn, pydantic, qdrant-client, httpx, tenacity, redis,
 aiosqlite, prometheus-client, python-json-logger, portion, onnxruntime,
-FlagEmbedding, streamlit
+transformers（bge tokenizer）
+dev：pytest, pytest-asyncio, pytest-cov, fakeredis
+注：streamlit 尚未安装（dev_ui/ 占位待 Phase 6 实施）；FlagEmbedding 未使用（实现选 onnxruntime + transformers 直接调用）。
 15. 部署拓扑与网络架构
 Docker Compose 编排 Qdrant、Redis、Engine、Business。生产环境通过 Ingress 暴露业务层 API。
 
@@ -376,9 +383,15 @@ RAG 服务暴露两个端口：
 17. 错误码参考
 HTTP	业务错误码	说明
 400	missing_context	strict 模式缺必要上下文或存在 inferred
-400	invalid_interval	lower > upper
-409	conflict	硬冲突
-422	invalid_ir	IR 格式错误
+400	no_prior_solve	replay 但无历史 solve（先调 /v1/constraints）
+400	incomplete_prior_solve	历史 solve 缺证据,无法 replay
+400	replay_trace_id_required	replay 参数缺 trace_id
+404	insufficient_recall	召回 chunk 数低于 MIN_RECALL_CHUNKS
+404	no_constraints_extracted	提取门失败：chunk 内无 NumericHint
+409	conflict	硬冲突（约束求解期,区间空集）
+409	in_flight / not_completed / pre_phase5 / file_missing / sha256_mismatch	replay 请求被既有任务/状态/数据阻塞
+422	invalid_ir / invalid_interval	IR 格式或区间非法（由 Pydantic validation 自动返回）
+503	service_uninitialized	依赖（retriever/audit_index/pipeline/redis_lock/task_repo）未初始化
 18. 配置模板
 .env 包含 PARSER_TOKEN、ENGINE_URL、QDRANT_HOST、REDIS_URL 等。
 
