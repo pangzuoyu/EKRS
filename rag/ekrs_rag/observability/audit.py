@@ -11,11 +11,7 @@ from pathlib import Path
 
 from ekrs_shared.audit import AuditLogger
 
-from ekrs_rag.observability.audit_handler import (
-    RebuildingRotatingFileHandler,
-    gzip_namer,
-    gzip_rotator,
-)
+from ekrs_rag.observability.audit_handler import RebuildingRotatingFileHandler
 
 
 # Module-level writer, set by main.py at startup
@@ -40,8 +36,6 @@ class AuditWriter(AuditLogger):
             encoding="utf-8",
             on_rollover=on_rollover,
         )
-        handler.namer = gzip_namer
-        handler.rotator = gzip_rotator
         # Pass-through formatter (base class already JSON-encodes message)
         handler.setFormatter(logging.Formatter("%(message)s"))
         self._logger.addHandler(handler)

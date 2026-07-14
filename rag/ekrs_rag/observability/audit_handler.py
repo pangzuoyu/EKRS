@@ -26,7 +26,11 @@ def gzip_rotator(source: str, dest: str) -> None:
 
 
 class RebuildingRotatingFileHandler(RotatingFileHandler):
-    """RotatingFileHandler that invokes on_rollover after each rotation.
+    """RotatingFileHandler with gzip rotator + on_rollover callback.
+
+    Defaults to gzip compression (`gzip_namer`/`gzip_rotator`) so callers
+    only need to pass `on_rollover`. Override namer/rotator=None to
+    disable gzip or supply custom rotator functions.
 
     The callback runs synchronously inside doRollover(). Exceptions are
     caught and logged (via a dedicated logger) so a buggy rebuild cannot
@@ -43,12 +47,16 @@ class RebuildingRotatingFileHandler(RotatingFileHandler):
         delay=False,
         errors=None,
         on_rollover=None,
+        namer=gzip_namer,
+        rotator=gzip_rotator,
     ):
         super().__init__(
             filename, mode, maxBytes, backupCount,
             encoding, delay, errors,
         )
         self._on_rollover = on_rollover
+        self.namer = namer
+        self.rotator = rotator
 
     def doRollover(self):
         super().doRollover()

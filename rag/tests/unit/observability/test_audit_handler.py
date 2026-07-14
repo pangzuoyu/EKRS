@@ -70,3 +70,42 @@ def test_rollover_swallows_callback_exception(tmp_path):
     for _ in range(20):
         h.emit(_make_record("x" * 30))
     h.close()
+
+
+def test_handler_has_gzip_defaults_from_constructor(tmp_path):
+    """RebuildingRotatingFileHandler self-applies gzip namer/rotator."""
+    log = tmp_path / "app.log"
+    h = RebuildingRotatingFileHandler(
+        str(log),
+        maxBytes=50,
+        backupCount=1,
+        on_rollover=lambda: None,
+    )
+    # No external attribute assignment needed.
+    assert h.namer is gzip_namer
+    assert h.rotator is gzip_rotator
+    h.close()
+
+
+def test_handler_overridable_namer_rotator(tmp_path):
+    """Caller can override namer/rotator via constructor kwargs."""
+    log = tmp_path / "app.log"
+
+    def custom_namer(name):
+        return name + ".custom"
+
+    def custom_rotator(src, dst):
+        import shutil
+        shutil.copyfile(src, dst)
+
+    h = RebuildingRotatingFileHandler(
+        str(log),
+        maxBytes=50,
+        backupCount=1,
+        namer=custom_namer,
+        rotator=custom_rotator,
+        on_rollover=lambda: None,
+    )
+    assert h.namer is custom_namer
+    assert h.rotator is custom_rotator
+    h.close()
