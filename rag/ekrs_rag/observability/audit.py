@@ -12,6 +12,7 @@ from pathlib import Path
 from ekrs_shared.audit import AuditLogger
 
 from ekrs_rag.observability.audit_handler import RebuildingRotatingFileHandler
+from ekrs_rag.observability.trace import get_skip_audit
 
 
 # Module-level writer, set by main.py at startup
@@ -53,7 +54,6 @@ class AuditWriter(AuditLogger):
 
     def write(self, event_type: str, **kwargs) -> bool:
         """Log an event. Returns False if write fails (never raises)."""
-        from ekrs_rag.observability.trace import get_skip_audit
         if get_skip_audit():
             return False
         try:
@@ -75,7 +75,7 @@ class AuditWriter(AuditLogger):
     def _current_offset(self) -> int:
         """Return current byte offset of the file handler (for index registration)."""
         h = getattr(self, "_file_handler", None)
-        if h is None or h.stream.closed:
+        if h is None or h.stream is None or h.stream.closed:
             return 0
         try:
             return h.stream.tell()

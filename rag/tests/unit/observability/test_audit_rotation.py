@@ -73,3 +73,23 @@ def test_new_instance_drops_prior_rebuilding_handlers(tmp_path):
     assert len(rotating) == 1
     assert rotating[0] is w2._file_handler
     assert rotating[0].baseFilename == str(log2)
+
+
+def test_current_offset_returns_zero_when_stream_closed(tmp_path):
+    """_current_offset returns 0 after the handler is closed so the
+    AuditIndex never registers garbage offsets post-shutdown."""
+    log = tmp_path / "audit.log"
+    w = AuditWriter(str(log))
+    w._file_handler.close()
+    assert w._current_offset() == 0
+
+
+def test_current_offset_returns_zero_on_oserror(tmp_path, monkeypatch):
+    """_current_offset swallows OSError (e.g. stream.tell() on a broken
+    file descriptor) and returns 0 rather than crashing the request thread."""
+    log = tmp_path / "audit.log"
+    w = AuditWriter(str(log))
+    monkeypatch.setattr(
+        w._file_handler.stream, "tell", lambda: (_ for _ in ()).throw(OSError("disk gone"))
+    )
+    assert w._current_offset() == 0
