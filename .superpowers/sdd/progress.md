@@ -125,14 +125,21 @@ Started: 2026-06-25
     - M3: multiproc path has no automated CI test (out of scope, manual subprocess probe acceptable)
   - Verification: 3/3 targeted + 315 passed, 1 skipped full suite + runtime probes pass (default bind 0.0.0.0, port release, occupied-port survival, multiproc exposition without duplicates)
 
-## Phase 5.5 F (deferred)
+## Phase 5.5 F: Audit Rotation + /healthz Filter
 
-- [ ] Phase 5.5 F: audit.log rotation + /healthz filter (DEFERRED per user 2026-07-13)
-  - Trigger: audit.log = 1377 MB / 61122 events; endpoint_started/completed = 64.8% volume
-  - User chose: RotatingFileHandler (100MB × 5, gzip) + skip endpoint_started/completed for /healthz
-  - Timing: AFTER Phase 5.5 D completes
-  - Spec: rewrite CLAUDE.md "permanent, never disabled" → "permanent, size-bounded by rotation"
-  - See: .superpowers/sdd/task-4-fix-report.md context + plan to follow
+- Status: DONE
+- Tag: phase5.5-f-audit-rotation
+- Commits: T1=c05a98c (handler), T2=8019f22 (AuditWriter), T3=56436e4 (skip_audit ContextVar), T4=1a30b8a (write honors skip), T5=a7e2acb (middleware), T6=532f060 (lifespan rollover callback), T7=3a582d9 (CLAUDE.md), T8=78afc13 (ledger), C1=c9e84c6 (hoist namer/rotator), C3=f2a64de (handler accumulation fix + missing C2/spec/plan)
+- Tests: 346 passed, 1 skipped, 0 failed
+- Trigger: audit.log = 1377 MB / 61122 events; endpoint_started/completed = 64.8% volume
+- Solution: `RebuildingRotatingFileHandler` (gzip rotator, 100 MB × 5 backups) + `ContextVar` skip_audit on /healthz + on_rollover callback → `AuditIndex.build()`
+- gstack-plan-eng-review findings resolved:
+  - P2-1 (namer/rotator hoist): defaults set in `RebuildingRotatingFileHandler.__init__` (overridable via kwargs)
+  - P2-2 (rollover → index rebuild test): `tests/integration/test_audit_rollover_rebuild.py` 3 tests
+  - P3 (lazy `get_skip_audit` import): deferred
+  - P3 (`_current_offset` defensive branches): deferred
+- C3 fix-up: `AuditWriter.__init__` closes & removes prior `RebuildingRotatingFileHandler` from shared `ekrs.audit` singleton logger (was causing cross-test handler accumulation after C2 test additions)
+- Known issues: none
 ## Phase 5.5 E: Retriever Depends Migration
 
 - Status: DONE
