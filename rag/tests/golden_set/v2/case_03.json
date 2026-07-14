@@ -1,0 +1,18 @@
+{
+  "name": "tc_builder_03",
+  "query": "压力上限",
+  "raw_text": "不得超过100 MPa",
+  "strict": false,
+  "note": "Parser normalizes MPa to Pa (project-wide convention). golden.md says upper=100 MPa; project normalizes to upper=100_000_000 Pa. Lower-bound exclusivity is lost in V1->V2 translation; for e2e, validates upper-bound only.",
+  "expected": {
+    "pressure": {
+      "range": [null, 100000000.0],
+      "unit": "pa"
+    }
+  },
+  "gates": {
+    "recall": {"min_chunks": 1},
+    "extraction": {"must_have_hint": {"value": 100000000.0, "unit": "pa", "operator": "<="}},
+    "solve": {"range_upper": 100000000.0}
+  }
+}

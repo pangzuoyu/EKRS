@@ -1,0 +1,9 @@
+{
+  "name": "tc_filter_02",
+  "query": "lifecycle状态过滤",
+  "raw_text": "Active标准中的压力约束",
+  "strict": false,
+  "note": "lifecycle.status filter (active + transitional) is an ingestion layer concern. e2e golden set does not exercise retrieval filters. Awaiting filter unit test for TC-FILTER-02.",
+  "expected": {"status": "EMPTY"},
+  "gates": {}
+}

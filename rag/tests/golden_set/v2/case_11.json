@@ -1,0 +1,9 @@
+{
+  "name": "tc_builder_11",
+  "query": "过渡期标准",
+  "raw_text": "Transitional约束文本",
+  "strict": false,
+  "note": "lifecycle.status='transitional' / is_binding=True is set by DocumentRepo. e2e golden set cannot validate transitional lifecycle. Awaiting unit-level IR test for TC-BUILDER-11.",
+  "expected": {"status": "EMPTY"},
+  "gates": {}
+}

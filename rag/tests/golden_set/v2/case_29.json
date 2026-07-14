@@ -1,0 +1,9 @@
+{
+  "name": "tc_unit_edge_01",
+  "query": "开尔文零度以下转换",
+  "raw_text": "温度 ≥ 0 K",
+  "strict": false,
+  "note": "Unit edge case: Kelvin-to-Celsius below absolute zero. Affine conversion (K-273.15) yields lower=-273.15; solver must accept negative Celsius without raising. Builder IR-layer: K unit not extracted by current EvidenceBuilder. Awaiting unit-level builder test for TC-UNIT-EDGE-01.",
+  "expected": {"status": "EMPTY"},
+  "gates": {}
+}

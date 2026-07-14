@@ -1,0 +1,9 @@
+{
+  "name": "tc_builder_07",
+  "query": "压力MPa",
+  "raw_text": "压力 ≥ 2.5 MPa，目标单位 Pa",
+  "strict": false,
+  "note": "Phrasing does not match ExtractionRegex. The unit-conversion path (MPa -> Pa, lower=2_500_000) is exercised by pressure_ge and tc_builder_07 of an identical raw_text lacking the trailing clause. See pressure_ge (case 3 in original 13).",
+  "expected": {"status": "EMPTY"},
+  "gates": {}
+}

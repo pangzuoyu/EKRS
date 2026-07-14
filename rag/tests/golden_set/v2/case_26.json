@@ -1,0 +1,13 @@
+{
+  "name": "tc_recall_01",
+  "query": "召回 chunk 数低于阈值",
+  "raw_text": "本文件描述了工程项目的施工流程和质量管理方法。",
+  "strict": false,
+  "note": "Recall-insufficient case: only 2 chunks recalled (MIN_RECALL_CHUNKS=5). Verifies Gate 1 (recall) returns 404 insufficient_recall. e2e golden set runs on a single chunk; cannot exercise recall-count thresholds. Awaiting integration test for TC-RECALL-01.",
+  "expected": {"status": "EMPTY"},
+  "gates": {
+    "recall": {"min_chunks": 1},
+    "extraction": {"must_have_hint": null},
+    "solve": {"status": "EMPTY"}
+  }
+}

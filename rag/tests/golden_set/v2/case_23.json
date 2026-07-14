@@ -1,0 +1,13 @@
+{
+  "name": "tc_strict_01",
+  "query": "严格模式拒绝inferred",
+  "raw_text": "请提供温度参数",
+  "strict": true,
+  "note": "strict=true + inferred constraint must return 400 (missing_context). When the chunk has NO numeric constraint, strict mode returns EMPTY per R6 — this matches the existing strict_mode_rejection test. Awaiting multi-chunk integration test where a chunk has an inferred constraint that strict mode would reject.",
+  "expected": {"status": "EMPTY"},
+  "gates": {
+    "recall": {"min_chunks": 1},
+    "extraction": {"must_have_hint": null},
+    "solve": {"status": "EMPTY"}
+  }
+}

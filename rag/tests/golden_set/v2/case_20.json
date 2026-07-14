@@ -1,0 +1,18 @@
+{
+  "name": "tc_overlay_02",
+  "query": "用户覆盖替换",
+  "raw_text": "温度不得超过80°C",
+  "strict": false,
+  "note": "Overlay (replace) is a /v1/calculate concern (D2/D3/D4 path). e2e golden set exercises extraction+solve only. Awaiting /v1/calculate integration test for TC-OVERLAY-02.",
+  "expected": {
+    "temperature": {
+      "range": [null, 80.0],
+      "unit": "°C"
+    }
+  },
+  "gates": {
+    "recall": {"min_chunks": 1},
+    "extraction": {"must_have_hint": {"value": 80.0, "unit": "°C", "operator": "<="}},
+    "solve": {"range_upper": 80.0}
+  }
+}

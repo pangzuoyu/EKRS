@@ -1,0 +1,9 @@
+{
+  "name": "tc_builder_12",
+  "query": "已弃用标准",
+  "raw_text": "Deprecated约束文本",
+  "strict": false,
+  "note": "lifecycle.status='deprecated' / is_binding=False is set by DocumentRepo. e2e golden set cannot validate deprecated lifecycle. Awaiting unit-level IR test for TC-BUILDER-12.",
+  "expected": {"status": "EMPTY"},
+  "gates": {}
+}

@@ -1,0 +1,9 @@
+{
+  "name": "tc_builder_09",
+  "query": "审阅意见温度",
+  "raw_text": "建议将温度上限调至70℃",
+  "strict": false,
+  "note": "lifecycle.status='review' / is_binding=False is set by DocumentRepo. e2e golden set cannot validate review lifecycle. Awaiting unit-level IR test for TC-BUILDER-09.",
+  "expected": {"status": "EMPTY"},
+  "gates": {}
+}

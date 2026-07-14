@@ -1,0 +1,9 @@
+{
+  "name": "tc_builder_02",
+  "query": "温度大于",
+  "raw_text": "温度需大于50℃",
+  "strict": false,
+  "note": "Strict-greater operator (>) is not extracted by current EvidenceBuilder. Builder IR-layer test; e2e golden set cannot validate open-interval lower bound. Awaiting unit-level builder test for TC-BUILDER-02.",
+  "expected": {"status": "EMPTY"},
+  "gates": {}
+}

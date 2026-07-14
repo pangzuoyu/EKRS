@@ -1,0 +1,19 @@
+{
+  "name": "tc_scope_01",
+  "query": "高温条件独立求解",
+  "raw_text": "温度不得超过80°C",
+  "scope_path": ["national", "GB", "high_temp"],
+  "strict": false,
+  "note": "Scope-aware multi-branch output is exercised by the existing scope_national_vs_enterprise test. TC-SCOPE-01 broadens scope_path with a third segment to validate that deeper prefix still routes to the same branch. Awaiting full multi-branch golden case (low_temp branch) for TC-SCOPE-01.",
+  "expected": {
+    "temperature": {
+      "range": [null, 80.0],
+      "unit": "°C"
+    }
+  },
+  "gates": {
+    "recall": {"min_chunks": 1},
+    "extraction": {"must_have_hint": {"value": 80.0, "unit": "°C", "operator": "<="}},
+    "solve": {"range_upper": 80.0, "active_scope": ["national", "GB", "high_temp"]}
+  }
+}

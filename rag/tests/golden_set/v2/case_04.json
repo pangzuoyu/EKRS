@@ -1,0 +1,9 @@
+{
+  "name": "tc_builder_04",
+  "query": "压力下限",
+  "raw_text": "至少60 MPa",
+  "strict": false,
+  "note": "'至少60 MPa' phrasing without explicit operator is not extracted by current EvidenceBuilder. Builder IR-layer test; awaiting unit-level builder test for TC-BUILDER-04.",
+  "expected": {"status": "EMPTY"},
+  "gates": {}
+}

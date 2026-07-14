@@ -1,0 +1,18 @@
+{
+  "name": "tc_trace_01",
+  "query": "条款历史演变追溯",
+  "raw_text": "温度不得超过80°C",
+  "strict": false,
+  "note": "Trace test: provision_id has multiple versions; returns list of (interval, status, date) per version. Phase 6A: covered by Task 3 POST /v1/constraints/trace endpoint. e2e golden set cannot assert on the audit index directly.",
+  "expected": {
+    "temperature": {
+      "range": [null, 80.0],
+      "unit": "°C"
+    }
+  },
+  "gates": {
+    "recall": {"min_chunks": 1},
+    "extraction": {"must_have_hint": {"value": 80.0, "unit": "°C", "operator": "<="}},
+    "solve": {"range_upper": 80.0}
+  }
+}

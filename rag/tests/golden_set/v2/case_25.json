@@ -1,0 +1,13 @@
+{
+  "name": "tc_empty_01",
+  "query": "无匹配约束查询",
+  "raw_text": "本文件描述了工程项目的施工流程和质量管理方法。",
+  "strict": false,
+  "note": "No-constraint recall returns status=EMPTY per existing empty_no_constraints. tc_empty_01 is a parallel phrasing; functionally identical to case 10 in the original 13.",
+  "expected": {"status": "EMPTY"},
+  "gates": {
+    "recall": {"min_chunks": 1},
+    "extraction": {"must_have_hint": null},
+    "solve": {"status": "EMPTY"}
+  }
+}

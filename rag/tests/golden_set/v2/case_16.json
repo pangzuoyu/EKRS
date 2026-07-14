@@ -1,0 +1,19 @@
+{
+  "name": "tc_priority_01",
+  "query": "ExplicitDoc覆盖Inferred",
+  "raw_text": "温度不得超过80°C",
+  "scope_path": ["national", "GB"],
+  "strict": false,
+  "note": "Priority dedup between Explicit_Doc and Inferred_Doc requires multi-chunk ingestion. e2e golden set runs on a single chunk so cannot exercise priority dedup. The single-chunk extraction itself uses the scope path; expected output mirrors the existing scope_national_vs_enterprise coverage. Awaiting multi-chunk priority test for TC-PRIORITY-01.",
+  "expected": {
+    "temperature": {
+      "range": [null, 80.0],
+      "unit": "°C"
+    }
+  },
+  "gates": {
+    "recall": {"min_chunks": 1},
+    "extraction": {"must_have_hint": {"value": 80.0, "unit": "°C", "operator": "<="}},
+    "solve": {"range_upper": 80.0, "active_scope": ["national", "GB"]}
+  }
+}

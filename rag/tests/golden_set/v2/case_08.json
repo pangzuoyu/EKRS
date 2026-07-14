@@ -1,0 +1,9 @@
+{
+  "name": "tc_builder_08",
+  "query": "草案标准温度",
+  "raw_text": "温度不超过80℃（征求意见稿）",
+  "strict": false,
+  "note": "lifecycle.status='draft' / is_binding=False is set by DocumentRepo on ingestion (not by EvidenceBuilder). e2e golden set cannot validate lifecycle metadata. Awaiting unit-level IR/V2 layer test for TC-BUILDER-08.",
+  "expected": {"status": "EMPTY"},
+  "gates": {}
+}

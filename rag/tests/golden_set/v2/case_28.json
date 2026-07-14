@@ -1,0 +1,18 @@
+{
+  "name": "tc_replay_01",
+  "query": "基于 trace_id 的确定性重放",
+  "raw_text": "温度不得超过80°C",
+  "strict": false,
+  "note": "Replay determinism test: replay with same trace_id + same inputs yields identical branches_count and primary_branch. Phase 6A: covered by Phase 5 query-replay endpoint. e2e golden set exercises extraction+solve only; replay endpoint tested at integration layer.",
+  "expected": {
+    "temperature": {
+      "range": [null, 80.0],
+      "unit": "°C"
+    }
+  },
+  "gates": {
+    "recall": {"min_chunks": 1},
+    "extraction": {"must_have_hint": {"value": 80.0, "unit": "°C", "operator": "<="}},
+    "solve": {"range_upper": 80.0}
+  }
+}

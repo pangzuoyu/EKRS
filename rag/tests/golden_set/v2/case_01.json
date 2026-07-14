@@ -1,0 +1,9 @@
+{
+  "name": "tc_builder_01",
+  "query": "温度区间",
+  "raw_text": "温度应在50℃至80℃之间",
+  "strict": false,
+  "note": "Range form (50<=T<=80) is not extracted by current EvidenceBuilder. golden.md describes builder IR-layer semantics; e2e golden set cannot validate closed-interval extraction. Awaiting unit-level builder test for TC-BUILDER-01.",
+  "expected": {"status": "EMPTY"},
+  "gates": {}
+}

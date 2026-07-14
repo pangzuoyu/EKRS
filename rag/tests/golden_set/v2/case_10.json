@@ -1,0 +1,9 @@
+{
+  "name": "tc_builder_10",
+  "query": "正式标准温度",
+  "raw_text": "Active标准中的温度约束",
+  "strict": false,
+  "note": "lifecycle.status='active' / is_binding=True is set by DocumentRepo when doc_meta.status='active'. e2e golden set cannot validate active lifecycle without a real DocumentRepo fixture. Awaiting unit-level test for TC-BUILDER-10.",
+  "expected": {"status": "EMPTY"},
+  "gates": {}
+}

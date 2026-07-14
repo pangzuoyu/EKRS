@@ -1,0 +1,9 @@
+{
+  "name": "tc_conflict_01",
+  "query": "硬冲突场景",
+  "raw_text": "两个binding区间在[0,50]和[60,100]无交集",
+  "strict": false,
+  "note": "Hard conflict (binding vs binding, no overlap) requires parser to find BOTH numeric constraints on the same document, then solver returns CONFLICT. Known limitation: parser currently extracts only the first numeric constraint per context window (see conflict_detection note in original golden set). This placeholder exercises the EMPTY path; awaiting parser fix or unit test for TC-CONFLICT-01.",
+  "expected": {"status": "EMPTY"},
+  "gates": {}
+}

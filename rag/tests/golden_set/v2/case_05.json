@@ -1,0 +1,13 @@
+{
+  "name": "tc_builder_05",
+  "query": "压力标量",
+  "raw_text": "压力为1.5 MPa",
+  "strict": false,
+  "note": "Scalar (==) constraints produce EMPTY from interval solver (per existing diameter_exact test). golden.md describes builder IR semantics; e2e golden set validates scalar extraction only.",
+  "expected": {"status": "EMPTY"},
+  "gates": {
+    "recall": {"min_chunks": 1},
+    "extraction": {"must_have_hint": {"value": 1500000.0, "unit": "pa", "operator": "=="}},
+    "solve": {"status": "EMPTY"}
+  }
+}

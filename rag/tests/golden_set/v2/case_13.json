@@ -1,0 +1,9 @@
+{
+  "name": "tc_builder_13",
+  "query": "高温环境条件",
+  "raw_text": "在高温环境下，温度≤80℃",
+  "strict": false,
+  "note": "Conditions extraction is parser-layer; current EvidenceBuilder does not emit conditions. The numeric hint extraction also fails on this phrasing (no extraction). Awaiting unit-level builder test for TC-BUILDER-13.",
+  "expected": {"status": "EMPTY"},
+  "gates": {}
+}

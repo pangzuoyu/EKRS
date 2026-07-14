@@ -1,0 +1,9 @@
+{
+  "name": "tc_builder_06",
+  "query": "开尔文温度",
+  "raw_text": "温度 ≤ 300 K",
+  "strict": false,
+  "note": "Kelvin unit (K) is not extracted by current EvidenceBuilder. The FtoC path is supported; KtoC requires separate conversion hook (builder IR-layer). Awaiting unit-level builder test for TC-BUILDER-06.",
+  "expected": {"status": "EMPTY"},
+  "gates": {}
+}

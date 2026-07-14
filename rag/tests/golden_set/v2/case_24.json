@@ -1,0 +1,18 @@
+{
+  "name": "tc_strict_02",
+  "query": "严格模式接受显式",
+  "raw_text": "温度不得超过80°C",
+  "strict": true,
+  "note": "strict=true + all explicit constraints must return OK. Existing strict_mode_rejection exercises the rejection path; tc_strict_02 exercises the allow path.",
+  "expected": {
+    "temperature": {
+      "range": [null, 80.0],
+      "unit": "°C"
+    }
+  },
+  "gates": {
+    "recall": {"min_chunks": 1},
+    "extraction": {"must_have_hint": {"value": 80.0, "unit": "°C", "operator": "<="}},
+    "solve": {"range_upper": 80.0}
+  }
+}

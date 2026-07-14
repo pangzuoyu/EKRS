@@ -1,0 +1,18 @@
+{
+  "name": "tc_filter_01",
+  "query": "binding过滤",
+  "raw_text": "压力不低于1.0MPa",
+  "strict": false,
+  "note": "Filter (binding only) is an ingestion/retrieval layer concern. e2e golden set runs on a single chunk so there is no filtering stage. Awaiting IR-level filter test for TC-FILTER-01.",
+  "expected": {
+    "pressure": {
+      "range": [1000000.0, null],
+      "unit": "pa"
+    }
+  },
+  "gates": {
+    "recall": {"min_chunks": 1},
+    "extraction": {"must_have_hint": {"value": 1000000.0, "unit": "pa", "operator": ">="}},
+    "solve": {"range_lower_pa": 1000000.0}
+  }
+}
