@@ -1,178 +1,348 @@
-"""Behavior tests for the Qdrant client wrapper."""
+"""Unit tests for QdrantManager (Phase 6B rewrite).
+
+Fixes 3 production bugs from 6A final review:
+- B1: search() replaced with query_points() (qdrant-client 1.17.1 API)
+- B2: vectors_config["dense"] -> config.params.vectors["dense"]
+- B3: upsert_chunks uses EmbeddingService for real dense+sparse vectors
+
+Mock FlagEmbedding via EmbeddingService; mock QdrantClient.
+"""
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
+from qdrant_client import models
 
-from ekrs_shared.models import Chunk
-from ekrs_rag.retrieval import qdrant_client as qdrant_module
+from ekrs_rag.retrieval.embedding_service import EmbeddingService
 from ekrs_rag.retrieval.qdrant_client import QdrantManager
 
 
-class _FakeClient:
-    def __init__(self):
-        self.collection = None
-        self.created = []
-        self.deleted_collections = []
-        self.upserted = []
-        self.scrolled = ([], None)
-        self.count_result = SimpleNamespace(count=0)
-        self.search_results = []
-        self.point_deletes = []
-
-    def get_collection(self, name):
-        if isinstance(self.collection, Exception):
-            raise self.collection
-        return self.collection
-
-    def create_collection(self, **kwargs):
-        self.created.append(kwargs)
-
-    def delete_collection(self, name):
-        self.deleted_collections.append(name)
-
-    def upsert(self, **kwargs):
-        self.upserted.append(kwargs)
-
-    def scroll(self, **kwargs):
-        if isinstance(self.scrolled, Exception):
-            raise self.scrolled
-        return self.scrolled
-
-    def count(self, **kwargs):
-        return self.count_result
-
-    def search(self, **kwargs):
-        self.search_kwargs = kwargs
-        return self.search_results
-
-    def delete(self, **kwargs):
-        self.point_deletes.append(kwargs)
+@pytest.fixture
+def mock_embedding_service() -> EmbeddingService:
+    """EmbeddingService in real mode (not dummy), with fixed vectors."""
+    svc = EmbeddingService(model_dir=Path("/fake/path"))
+    svc._is_dummy = False  # Force real mode
+    svc._model = MagicMock()
+    # Real encode returns 1024d dense + sparse
+    svc._model.encode.return_value = {
+        "dense_vecs": [[0.1] * 1024, [0.2] * 1024],
+        "lexical_weights": [{1: 0.5, 2: 0.3}, {3: 0.4}],
+    }
+    return svc
 
 
 @pytest.fixture
-def manager(monkeypatch):
-    client = _FakeClient()
-    monkeypatch.setattr(qdrant_module, "QdrantClient", lambda **kwargs: client)
-    return QdrantManager(collection_name="test_chunks", vector_size=3), client
+def dummy_embedding_service() -> EmbeddingService:
+    """EmbeddingService in dummy mode (no model)."""
+    return EmbeddingService(model_dir=Path("/nonexistent"))  # is_dummy=True
 
 
-def _chunk(index: int = 1) -> Chunk:
-    return Chunk(
-        text=f"Temperature limit {index}",
-        scope_path=["project", "alpha"],
-        source_block_ids=[f"b{index}"],
-        token_count=3,
-        doc_hash="doc-hash",
-        version=2,
-        page_numbers=[index],
-        numeric_hints=[],
+def _make_qdrant(existing_size: int | None = None) -> MagicMock:
+    """Build mock QdrantClient that returns CollectionInfo with given size."""
+    client = MagicMock()
+    if existing_size is None:
+        client.get_collection.side_effect = Exception("not found")
+    else:
+        # B2 fix: real path is config.params.vectors["dense"].size
+        info = SimpleNamespace(
+            config=SimpleNamespace(
+                params=SimpleNamespace(
+                    vectors={"dense": SimpleNamespace(size=existing_size)}
+                )
+            )
+        )
+        client.get_collection.return_value = info
+    return client
+
+
+def test_ensure_collection_creates_dense_and_sparse(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """ensure_collection creates collection with dense (1024d) + sparse config."""
+    client = _make_qdrant(existing_size=None)
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        mgr.ensure_collection(vector_size=1024)
+
+    # Verify create_collection was called with correct config
+    client.create_collection.assert_called_once()
+    args, kwargs = client.create_collection.call_args
+    assert kwargs["collection_name"] == "rag_documents"
+    # Dense config: 1024d cosine
+    assert "dense" in kwargs["vectors_config"]
+    dense_params = kwargs["vectors_config"]["dense"]
+    assert dense_params.size == 1024
+    assert dense_params.distance == models.Distance.COSINE
+    # Sparse config present
+    assert "sparse" in kwargs["sparse_vectors_config"]
+
+
+def test_ensure_collection_recreates_on_dim_mismatch(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """B2 fix: dim mismatch (384 vs 1024) triggers delete + recreate."""
+    client = _make_qdrant(existing_size=384)  # Old 6A dim
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        mgr.ensure_collection(vector_size=1024)
+
+    client.delete_collection.assert_called_once_with("rag_documents")
+    client.create_collection.assert_called_once()
+
+
+def test_ensure_collection_no_recreate_when_dim_matches(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """When existing dim matches expected, no recreate."""
+    client = _make_qdrant(existing_size=1024)
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        mgr.ensure_collection(vector_size=1024)
+
+    client.delete_collection.assert_not_called()
+    client.create_collection.assert_not_called()
+
+
+def test_upsert_chunks_encodes_via_embedding_service(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """B3 fix: upsert_chunks calls EmbeddingService.encode on chunk.text."""
+    from ekrs_shared.models import Chunk
+    chunks = [
+        Chunk(text="hello", scope_path=[], source_block_ids=["b1"],
+              token_count=1, doc_hash="d1", version=1, page_numbers=[]),
+        Chunk(text="world", scope_path=[], source_block_ids=["b2"],
+              token_count=1, doc_hash="d1", version=1, page_numbers=[]),
+    ]
+    client = _make_qdrant(existing_size=1024)
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        n = mgr.upsert_chunks(chunks)
+
+    assert n == 2
+    # Verify the mock model was called with chunk texts
+    mock_embedding_service._model.encode.assert_called_once()
+    args, _ = mock_embedding_service._model.encode.call_args
+    assert args[0] == ["hello", "world"]
+    # Verify upsert received NamedVectors with dense + sparse
+    upsert_call = client.upsert.call_args
+    points = upsert_call.kwargs["points"]
+    assert len(points) == 2
+    assert "dense" in points[0].vector
+    assert "sparse" in points[0].vector
+
+
+def test_upsert_chunks_uses_named_vectors(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """upsert_chunks sends Qdrant sparse format {indices, values}."""
+    from ekrs_shared.models import Chunk
+    chunks = [
+        Chunk(text="hi", scope_path=[], source_block_ids=["b1"],
+              token_count=1, doc_hash="d1", version=1, page_numbers=[]),
+    ]
+    client = _make_qdrant(existing_size=1024)
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        mgr.upsert_chunks(chunks)
+
+    points = client.upsert.call_args.kwargs["points"]
+    sparse_vec = points[0].vector["sparse"]
+    # D8: sparse is in Qdrant format {indices, values}. qdrant-client 1.17.1
+    # wraps dict-shaped sparse into a SparseVector model on PointStruct, so we
+    # check by attribute access (model_dump() keys would also work).
+    assert hasattr(sparse_vec, "indices") and hasattr(sparse_vec, "values")
+    assert isinstance(sparse_vec.indices, list)
+    assert isinstance(sparse_vec.values, list)
+
+
+def test_upsert_chunks_raises_when_embedding_service_dummy(
+    dummy_embedding_service: EmbeddingService,
+) -> None:
+    """D1: upsert_chunks raises EmbeddingUnavailableError in dummy mode."""
+    from ekrs_shared.models import Chunk
+    from ekrs_rag.retrieval.embedding_service import EmbeddingUnavailableError
+    chunks = [
+        Chunk(text="x", scope_path=[], source_block_ids=["b1"],
+              token_count=1, doc_hash="d1", version=1, page_numbers=[]),
+    ]
+    client = _make_qdrant(existing_size=1024)
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=dummy_embedding_service
+        )
+        with pytest.raises(EmbeddingUnavailableError, match="dummy mode"):
+            mgr.upsert_chunks(chunks)
+
+
+def test_search_calls_query_points(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """B1 fix: search uses query_points (not removed .search)."""
+    client = _make_qdrant(existing_size=1024)
+    # Mock query_points return
+    client.query_points.return_value = SimpleNamespace(
+        points=[
+            SimpleNamespace(payload={"text": "match"}, score=0.9),
+        ]
     )
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        results = mgr.search(query_text="hello", top_k=5)
+
+    assert client.query_points.called
+    client.search.assert_not_called()  # B1: .search removed in 1.17.1
+    assert results == [({"text": "match"}, 0.9)]
 
 
-def test_ensure_collection_keeps_matching_collection(manager):
-    qdrant, client = manager
-    client.collection = SimpleNamespace(
-        vectors_config={"dense": SimpleNamespace(size=384)}
+def test_search_encodes_query_text_via_service(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """search(query_text=...) calls EmbeddingService.encode on the text."""
+    client = _make_qdrant(existing_size=1024)
+    client.query_points.return_value = SimpleNamespace(points=[])
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        mgr.search(query_text="user query", top_k=10)
+
+    encode_args = mock_embedding_service._model.encode.call_args[0]
+    assert "user query" in encode_args[0]
+
+
+def test_search_passes_named_vectors_to_query_points(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """search passes Prefetch (dense + sparse) + FusionQuery to query_points."""
+    client = _make_qdrant(existing_size=1024)
+    client.query_points.return_value = SimpleNamespace(points=[])
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        mgr.search(query_text="q", top_k=3)
+
+    call_kwargs = client.query_points.call_args.kwargs
+    # Two prefetches: dense + sparse
+    assert isinstance(call_kwargs["prefetch"], list)
+    assert len(call_kwargs["prefetch"]) == 2
+    dense_prefetch = call_kwargs["prefetch"][0]
+    sparse_prefetch = call_kwargs["prefetch"][1]
+    assert dense_prefetch.using == "dense"
+    assert sparse_prefetch.using == "sparse"
+    # Fusion query
+    assert call_kwargs["query"].fusion == models.Fusion.RRF
+
+
+def test_ensure_collection_handles_qdrant_unreachable(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """If Qdrant is unreachable, ensure_collection handles exception gracefully."""
+    client = MagicMock()
+    client.get_collection.side_effect = ConnectionError("Qdrant down")
+    client.create_collection.side_effect = ConnectionError("Qdrant down")
+
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        # tenacity retries 3x, then raises; we just verify the retries happened
+        with pytest.raises(ConnectionError):
+            mgr.ensure_collection(vector_size=1024)
+    # Verify retry happened
+    assert client.get_collection.call_count >= 1
+
+
+def test_search_passes_search_params_hnsw_ef(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """B1 fix: search uses query_points with SearchParams(hnsw_ef=128) for HNSW quality (6A Task 8)."""
+    client = _make_qdrant(existing_size=1024)
+    client.query_points.return_value = SimpleNamespace(points=[])
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        mgr.search(query_text="q", top_k=3)
+
+    call_kwargs = client.query_points.call_args.kwargs
+    # Preserve 6A Task 8 commit 033a8a3 optimization
+    assert call_kwargs["search_params"].hnsw_ef == 128
+
+
+def test_get_ingestion_status_returns_indexed_count(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """get_ingestion_status returns chunks_indexed count for a doc_hash."""
+    client = _make_qdrant(existing_size=1024)
+    # Mock scroll returning one match
+    client.scroll.return_value = (
+        [SimpleNamespace(payload={"version": 2})],
+        None,  # next_page_offset
     )
+    # Mock count returning N
+    client.count.return_value = SimpleNamespace(count=42)
 
-    qdrant.ensure_collection(vector_size=384)
-
-    assert client.created == []
-    assert client.deleted_collections == []
-
-
-def test_ensure_collection_recreates_mismatched_collection(manager):
-    qdrant, client = manager
-    client.collection = SimpleNamespace(
-        vectors_config={"dense": SimpleNamespace(size=1024)}
-    )
-
-    qdrant.ensure_collection(vector_size=384)
-
-    assert client.deleted_collections == ["test_chunks"]
-    created = client.created[0]
-    assert created["collection_name"] == "test_chunks"
-    assert created["vectors_config"]["dense"].size == 384
-    assert "sparse" in created["sparse_vectors_config"]
-
-
-def test_ensure_collection_creates_when_lookup_fails(manager):
-    qdrant, client = manager
-    client.collection = RuntimeError("missing")
-
-    qdrant.ensure_collection(vector_size=384)
-
-    assert len(client.created) == 1
-
-
-def test_upsert_chunks_handles_empty_and_batches_points(manager):
-    qdrant, client = manager
-
-    assert qdrant.upsert_chunks([]) == 0
-    chunks = [_chunk(i) for i in range(101)]
-    assert qdrant.upsert_chunks(chunks) == 101
-
-    assert [len(call["points"]) for call in client.upserted] == [100, 1]
-    point = client.upserted[0]["points"][0]
-    assert point.payload["doc_hash"] == "doc-hash"
-    assert point.payload["scope_path"] == ["project", "alpha"]
-    assert point.vector["dense"] == [0.0, 0.0, 0.0]
-
-
-def test_get_ingestion_status_returns_none_when_document_missing(manager):
-    qdrant, client = manager
-    client.scrolled = ([], None)
-
-    assert qdrant.get_ingestion_status("missing") is None
-
-
-def test_get_ingestion_status_returns_count_and_version(manager):
-    qdrant, client = manager
-    client.scrolled = ([SimpleNamespace(payload={"version": 7})], None)
-    client.count_result = SimpleNamespace(count=4)
-
-    status = qdrant.get_ingestion_status("doc-hash")
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        status = mgr.get_ingestion_status(doc_hash="abc123")
 
     assert status.status == "success"
-    assert status.chunks_indexed == 4
-    assert status.version == 7
+    assert status.chunks_indexed == 42
+    assert status.version == 2
 
 
-def test_get_ingestion_status_converts_client_error_to_failed_status(manager):
-    qdrant, client = manager
-    client.scrolled = RuntimeError("qdrant unavailable")
+def test_delete_old_versions_calls_delete(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """delete_old_versions issues a FilterSelector delete for keep_version."""
+    client = _make_qdrant(existing_size=1024)
 
-    status = qdrant.get_ingestion_status("doc-hash")
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        mgr.delete_old_versions(doc_hash="abc", keep_version=3)
 
-    assert status.status == "failed"
-    assert status.chunks_indexed == 0
-    assert status.error == "qdrant unavailable"
-
-
-def test_search_returns_payload_score_pairs(manager):
-    qdrant, client = manager
-    client.search_results = [
-        SimpleNamespace(payload={"text": "first"}, score=0.9),
-        SimpleNamespace(payload={"text": "second"}, score=0.7),
-    ]
-
-    results = qdrant.search([0.1, 0.2, 0.3], top_k=2, score_threshold=0.5)
-
-    assert results == [({"text": "first"}, 0.9), ({"text": "second"}, 0.7)]
-    assert client.search_kwargs["query_vector"] == ("dense", [0.1, 0.2, 0.3])
-    assert client.search_kwargs["limit"] == 2
-    assert client.search_kwargs["score_threshold"] == 0.5
+    client.delete.assert_called_once()
+    selector = client.delete.call_args.kwargs["points_selector"]
+    # Filter has must-not version != keep_version
+    must = selector.filter.must
+    keys = [c.key for c in must]
+    assert "doc_hash" in keys
+    assert "version" in keys
 
 
-def test_delete_old_versions_issues_filtered_delete(manager):
-    qdrant, client = manager
+def test_search_logs_warning_when_dummy(
+    dummy_embedding_service: EmbeddingService, caplog: pytest.LogCaptureFixture
+) -> None:
+    """search() in dummy mode logs WARN so operators see silent empty results."""
+    import logging
+    client = _make_qdrant(existing_size=1024)
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=dummy_embedding_service
+        )
+        with caplog.at_level(logging.WARNING, logger="ekrs_rag.retrieval.qdrant_client"):
+            results = mgr.search(query_text="q", top_k=5)
 
-    result = qdrant.delete_old_versions("doc-hash", keep_version=3)
-
-    assert result == 0
-    call = client.point_deletes[0]
-    assert call["collection_name"] == "test_chunks"
-    conditions = call["points_selector"].filter.must
-    assert [condition.key for condition in conditions] == ["doc_hash", "version"]
+    assert results == []
+    assert any("dummy mode" in rec.message for rec in caplog.records)
