@@ -1,17 +1,12 @@
-"""Behavior tests for end-to-end retrieval and scope filtering."""
+"""Behavior tests for end-to-end retrieval and scope filtering.
+
+Phase 6B D5: Retriever no longer takes an embedder; embedding happens
+inside qdrant.search via injected EmbeddingService. Mocks here only
+target qdrant.search(query_text=..., top_k=...).
+"""
 from __future__ import annotations
 
 from ekrs_rag.retrieval.retriever import EKRSRetriever
-
-
-class _Embedder:
-    def __init__(self, vectors):
-        self.vectors = vectors
-        self.calls = []
-
-    def encode(self, texts):
-        self.calls.append(texts)
-        return self.vectors
 
 
 class _Qdrant:
@@ -36,26 +31,15 @@ def _payload(scope_path, text="Temperature shall not exceed 80°C", block_id="b1
     }
 
 
-def test_retrieve_returns_empty_when_embedder_has_no_vector():
-    qdrant = _Qdrant([(_payload(["national"]), 0.9)])
-    retriever = EKRSRetriever(qdrant=qdrant, embedder=_Embedder([]))
-
-    result = retriever.retrieve("temperature limit")
-
-    assert result.chunks == []
-    assert result.final_scores == []
-    assert qdrant.calls == []
-
-
 def test_retrieve_returns_empty_when_search_has_no_hits():
     qdrant = _Qdrant([])
-    embedder = _Embedder([[0.1, 0.2]])
-    retriever = EKRSRetriever(qdrant=qdrant, embedder=embedder)
+
+    retriever = EKRSRetriever(qdrant=qdrant)
 
     result = retriever.retrieve("temperature limit", top_k=3)
 
     assert result.chunks == []
-    assert qdrant.calls == [{"query_vector": [0.1, 0.2], "top_k": 3}]
+    assert qdrant.calls == [{"query_text": "temperature limit", "top_k": 3}]
 
 
 def test_retrieve_filters_scope_and_extracts_evidenced_hints():
@@ -64,9 +48,7 @@ def test_retrieve_filters_scope_and_extracts_evidenced_hints():
         (_payload(["industry", "API"], block_id="wrong"), 0.95),
         (_payload(["national", "GB", "pressure"], block_id="match"), 0.8),
     ]
-    retriever = EKRSRetriever(
-        qdrant=_Qdrant(hits), embedder=_Embedder([[0.1, 0.2]])
-    )
+    retriever = EKRSRetriever(qdrant=_Qdrant(hits))
 
     result = retriever.retrieve(
         "temperature limit", active_scope=["national", "GB"]
@@ -87,9 +69,7 @@ def test_retrieve_ranks_matching_hits_by_composite_score():
         (_payload(["project", "alpha"], block_id="project"), 1.0),
         (_payload(["national", "GB"], block_id="national"), 0.8),
     ]
-    retriever = EKRSRetriever(
-        qdrant=_Qdrant(hits), embedder=_Embedder([[0.1, 0.2]])
-    )
+    retriever = EKRSRetriever(qdrant=_Qdrant(hits))
 
     result = retriever.retrieve("temperature limit")
 

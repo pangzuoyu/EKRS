@@ -25,7 +25,7 @@ from .core.logging import setup_logging
 from .ingestion.pipeline import IngestionPipeline
 from .observability.audit import AuditWriter, attach_index, set_writer
 from .observability.audit_index import AuditIndex
-from .retrieval.embedder import BGESmallEmbedder
+from .retrieval.embedding_service import EmbeddingService
 from .retrieval.qdrant_client import QdrantManager
 from .retrieval.retriever import EKRSRetriever
 from .storage.task_repo import TaskRepo
@@ -55,7 +55,6 @@ def _get_compensation_handler():
 # Shared across app via module-level state
 _qdrant: QdrantManager | None = None
 _pipeline: IngestionPipeline | None = None
-_embedder: BGESmallEmbedder | None = None
 _retriever: EKRSRetriever | None = None
 _audit_writer: AuditWriter | None = None
 _audit_index: AuditIndex | None = None
@@ -96,9 +95,9 @@ _EVENT_SCHEMAS = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: init logging, Qdrant, embedder, retriever, ingestion pipeline,
+    """Startup: init logging, Qdrant, embedding service, retriever, ingestion pipeline,
     redis, task_repo, compensation scanner, AuditWriter, AuditIndex."""
-    global _qdrant, _pipeline, _embedder, _retriever
+    global _qdrant, _pipeline, _retriever
     global _audit_writer, _audit_index, _task_repo, _doc_repo
 
     # ---- Phase 5.5 D: sidecar metrics exporter ----
@@ -155,26 +154,37 @@ async def lifespan(app: FastAPI):
     try:
         logger.info("Starting EKRS RAG service (debug=%s)", settings.EKRS_DEBUG)
 
-        _qdrant = QdrantManager(
-            host=settings.QDRANT_HOST,
-            port=settings.QDRANT_PORT,
-            collection_name=settings.COLLECTION_NAME,
-            vector_size=384,  # bge-small is 384d
-        )
-
         try:
-            _qdrant.ensure_collection(vector_size=384)
+            # Phase 6B D5: EmbeddingService facade wraps bge-m3 ONNX;
+            # QdrantManager consumes it (no embedder arg on retriever).
+            embedding_service = EmbeddingService()
+            _qdrant = QdrantManager(
+                host=settings.QDRANT_HOST,
+                port=settings.QDRANT_GRPC_PORT,
+                collection_name=settings.COLLECTION_NAME,
+                embedding_service=embedding_service,
+                auto_reindex=settings.AUTO_REINDEX,
+            )
+            # D4: rebuild collection (if dim mismatch) in lifespan, before serve.
+            # asyncio.to_thread: ensure_collection is sync; offload from event loop.
+            await asyncio.to_thread(_qdrant.ensure_collection)
             logger.info("Qdrant collection ready: %s", settings.COLLECTION_NAME)
         except Exception as e:
-            logger.error("Qdrant connection failed: %s", e)
-            # Don't crash — endpoints will return 503
+            logger.exception(
+                "RAG service startup failed during Qdrant/Embedding init: %s. "
+                "Check Qdrant reachability, model files, and AUTO_REINDEX setting.",
+                e,
+            )
+            raise  # FastAPI lifespan will record startup failure
 
-        # Phase 2b: init embedder + retriever
-        _embedder = BGESmallEmbedder()
-        _retriever = EKRSRetriever(qdrant=_qdrant, embedder=_embedder)
+        app.state.embedding_service = embedding_service
+        app.state.qdrant_manager = _qdrant
+
+        # Phase 2b: retriever (no longer takes embedder — qdrant.search
+        # handles embedding internally via injected EmbeddingService).
+        _retriever = EKRSRetriever(qdrant=_qdrant)
 
         # retriever wired to app.state below; get_retriever dep reads it
-        app.state.embedder = _embedder
         app.state.retriever = _retriever
 
         _pipeline = IngestionPipeline(_qdrant, settings.SHARED_STORAGE_PATH)

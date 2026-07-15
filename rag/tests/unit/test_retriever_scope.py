@@ -100,7 +100,7 @@ def test_national_scope_ranks_above_project(project_chunk, national_chunk):
     chunks = [project_chunk, national_chunk]
     vec_scores = [1.0, 1.0]
 
-    retriever = EKRSRetriever(qdrant=None, embedder=None)
+    retriever = EKRSRetriever(qdrant=None)
     sorted_chunks, sorted_vec, scope_scores, final_scores = retriever._rank_by_scope(
         chunks, vec_scores
     )
@@ -121,7 +121,7 @@ def test_industry_scope_ranks_above_enterprise(enterprise_chunk, industry_chunk)
     chunks = [enterprise_chunk, industry_chunk]
     vec_scores = [1.0, 1.0]
 
-    retriever = EKRSRetriever(qdrant=None, embedder=None)
+    retriever = EKRSRetriever(qdrant=None)
     sorted_chunks, sorted_vec, scope_scores, final_scores = retriever._rank_by_scope(
         chunks, vec_scores
     )
@@ -142,7 +142,7 @@ def test_no_active_scope_ranks_by_priority(
     chunks = [project_chunk, industry_chunk, national_chunk]
     vec_scores = [1.0, 1.0, 1.0]  # Equal vector scores
 
-    retriever = EKRSRetriever(qdrant=None, embedder=None)
+    retriever = EKRSRetriever(qdrant=None)
     sorted_chunks, sorted_vec, scope_scores, final_scores = retriever._rank_by_scope(
         chunks, vec_scores
     )
@@ -165,7 +165,7 @@ def test_composite_score_calculation(national_chunk, project_chunk):
     chunks = [project_chunk, national_chunk]
     vec_scores = [1.0, 1.0]
 
-    retriever = EKRSRetriever(qdrant=None, embedder=None)
+    retriever = EKRSRetriever(qdrant=None)
     sorted_chunks, sorted_vec, scope_scores, final_scores = retriever._rank_by_scope(
         chunks, vec_scores
     )
@@ -184,7 +184,7 @@ def test_composite_score_with_different_vector_scores(national_chunk, project_ch
     chunks = [national_chunk, project_chunk]
     vec_scores = [0.5, 1.0]  # national has lower vec score
 
-    retriever = EKRSRetriever(qdrant=None, embedder=None)
+    retriever = EKRSRetriever(qdrant=None)
     sorted_chunks, sorted_vec, scope_scores, final_scores = retriever._rank_by_scope(
         chunks, vec_scores
     )
@@ -203,7 +203,7 @@ def test_composite_score_with_different_vector_scores(national_chunk, project_ch
 
 def test_empty_chunks():
     """Empty input returns empty lists."""
-    retriever = EKRSRetriever(qdrant=None, embedder=None)
+    retriever = EKRSRetriever(qdrant=None)
     chunks, vec, scope, final = retriever._rank_by_scope([], [])
     assert chunks == []
     assert vec == []
@@ -224,7 +224,7 @@ def test_unknown_scope_defaults_to_project():
         numeric_hints=[],
     )
 
-    retriever = EKRSRetriever(qdrant=None, embedder=None)
+    retriever = EKRSRetriever(qdrant=None)
     priority = retriever._scope_priority(chunk)
 
     assert priority == pytest.approx(0.4)  # project = 40/100
@@ -243,7 +243,7 @@ def test_empty_scope_path_defaults_to_zero():
         numeric_hints=[],
     )
 
-    retriever = EKRSRetriever(qdrant=None, embedder=None)
+    retriever = EKRSRetriever(qdrant=None)
     priority = retriever._scope_priority(chunk)
 
     assert priority == 0.0
