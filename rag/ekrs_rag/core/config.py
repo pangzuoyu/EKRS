@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     # Embedding model
     EMBEDDING_MODEL: str = "bge-small-en-v1.5"
 
+    # Phase 6B: auto-rebuild Qdrant collection on dim mismatch (D4)
+    AUTO_REINDEX: bool = True
+
     # Distributed lock
     INGESTION_LOCK_TIMEOUT: int = 300  # seconds
 

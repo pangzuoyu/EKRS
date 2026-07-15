@@ -40,3 +40,6 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "heavy: marks tests as heavy (require real bge-m3 model, run in nightly job only)",
+]
