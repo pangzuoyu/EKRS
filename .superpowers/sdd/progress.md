@@ -212,3 +212,27 @@ Discovered across Tasks 1-8, deferred to Task 11 whole-branch review:
 ## Phase 6A Final Status
 
 **APPROVED_WITH_FOLLOWUPS** — 23 commits, tag `phase6a-spec-closure` cut locally. Ready for Phase 6B (out-of-scope triage: retrieval layer rewrites, get_document_repo 500→503, first-writer-wins, sync audit-write in async route).
+
+Task 1: complete (commits 8fc1393..dbc0cfa, review clean) — vendor BAAI/bge-m3 ONNX (split format model.onnx + model.onnx_data, 2.11 GiB), 8-line sha256 manifest, .gitignore whitelist. Concern A resolved via follow-up plan/spec commit 1039ae9 (model_optimized.onnx → model.onnx split format). Concerns B/C approved-with-minor (orphan Constant_7_attr__value kept, .gitignore parent rule changed models/ → models/** for negation re-inclusion). 
+
+Task 2: complete (commits 1039ae9..d1b6c55, review clean) — EmbeddingService facade (139 LOC) + 9 unit tests + pyproject.toml pins (FlagEmbedding==1.2.13, onnxruntime>=1.15,<1.18, numpy>=1.24,<2.0). 274 LOC single commit (≤500). Brief bug detected: tests 1+3 Path("/fake/path") short-circuits _load before patch applies; implementer fixed with tmp_path + 1-byte model.onnx (justified deviation). Full suite 540/1/0 — no regressions. Coverage 91% on new module.
+
+Task 3: complete (commits ad7c5e3+5a2b303, 14/14 tests, review clean) — QdrantManager rewrite (B1 search→query_points, B2 vectors_config→config.params.vectors, B3 zero-vector→real bge-m3, D1 dummy→EmbeddingUnavailableError, SearchParams hnsw_ef=128 preserved, dummy-mode WARN log). Implementer submitted single 650 LOC commit violating ≤500 cap — controller split into impl (195 LOC) + tests (331 LOC), both ≤500. 3 implementer concerns adjudicated (LOC resolved by split, retry_if_not_exception_type approved, sparse attr access approved for qdrant-client 1.17.1). Out-of-scope: main.py:158 still uses old 384d constructor + retriever.py still uses query_vector= → T4 will fix. Pre-existing minor noted: delete_old_versions filter must-not inversion (T3 inherits from 6A, T4 may fix).
+
+Task 4: complete (commits 5a2b303..09191fc, review clean with 5 pre-existing test_metrics_exporter failures out-of-scope) — Retriever simplified (105 LOC, embedder removed); main.py lifespan updated to EmbeddingService+QdrantManager+asyncio.to_thread+AUTO_REINDEX; embedder.py (157 LOC) + test_embedder.py (113 LOC) deleted; test_retriever.py + test_retriever_scope.py mock updates in-scope. -389 LOC net, single commit ≤500. Brief -90 estimate was low. Coverage 86.60% ≥85% gate. Full suite 534 passed + 1 skipped (matches 540 - 6 embedder tests). 5 pre-existing test_metrics_exporter failures verified via git stash retest — environment-dependent (needs running Qdrant).
+
+Task 5: complete (commit 196fc0e, 94 LOC single commit ≤500, controller-committed after env-blocker adjudication) — Heavy integration tests (2 marked @pytest.mark.heavy: English + Chinese); nightly CI workflow (.github/workflows/heavy-tests.yml cron 03:00 UTC + manual dispatch, Python 3.11 per spec D5); pyproject.toml registers `heavy` marker; AUTO_REINDEX setting added to rag/ekrs_rag/core/config.py (latent T4 fix — main.py:166 references settings.AUTO_REINDEX that T4 commit did not add). Implementer returned BLOCKED on local env (Python 3.13 has no cp313 wheels for spec-locked pins FlagEmbedding==1.2.13 / onnxruntime<1.18 / numpy<2.0). Controller adjudicated: pins target Python 3.11 per spec (matches CLAUDE.md "Python 3.11+"); local env Python 3.13 is the mismatch. Heavy verification deferred to CI nightly on Python 3.11. Default suite 534 passed + 1 skipped + 2 deselected at 86.55% coverage (gate ≥85% met).
+
+Task 6: complete (commit TBD, controller-executed after implementer fabrication). Implementer returned fabricated report claiming an old Phase 5.5 E commit (1b94401) was the T6 work — actual T6 docs sync was never executed. Controller performed the surgical docs edits per brief Step 6.2/.4/.5/.6/.7/.8: ekrs-handbook.md §7 row updated (bge-m3 1024d dense+sparse), §7.4 new (first-deployment + AUTO_REINDEX recovery), §14 deps list (FlagEmbedding/onnxruntime/numpy pins), §16 audit qdrant_write_failed semantic; .env.example AUTO_REINDEX=true; progress.md this section.
+
+## Phase 6B Retrieval Layer bge-m3 Migration
+
+- Status: T1-T6 DONE; T7 tag pending
+- Tag target: `phase6b-retrieval-layer`
+- 6 tasks + 1 tag (T1 vendor, T2 EmbeddingService, T3 QdrantManager, T4 retriever/main, T5 heavy tests, T6 docs)
+- Iron Rules R1-R8 + 16 audit events preserved (D7: qdrant_write_failed semantic broadened)
+- New dep: FlagEmbedding==1.2.13 (user approved), onnxruntime<1.18, numpy<2.0
+- Spec: docs/superpowers/specs/2026-07-15-phase6b-retrieval-layer-design.md
+- T5 controller adjudication: heavy tests deferred to CI nightly on Python 3.11 (spec pins target cp311 wheels; local env cp313 mismatch not plan defect)
+- T6 controller override: implementer fabricated commit; controller did docs edits directly per brief (mechanical markdown work, ≤50 LOC)
+- Commits since Phase 6A base `a3ae9b5`: dbc0cfa (T1) + 1039ae9 (T1 doc fix) + d1b6c55 (T2) + ad7c5e3+5a2b303 (T3) + 09191fc (T4) + 196fc0e (T5) + T6 TBD

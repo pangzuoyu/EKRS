@@ -257,12 +257,32 @@ Phase 6A	spec closure: 9 垂直切片补齐 (X-Admin-Key, DocumentRepo/A1, /trac
 组件	技术选型	用途
 业务层	Python 3.11 + FastAPI	API、文档管理、RAG
 向量数据库	Qdrant 1.11	dense + sparse 检索
-嵌入模型	bge-small-en-v1.5 (ONNX, 384d)	文本向量化
+嵌入模型	bge-m3 (ONNX, 1024d dense + sparse)	文本向量化(FlagEmbedding 框架)
 关系数据库	aiosqlite / PostgreSQL	文档元数据、覆盖关系
 缓存/锁	Redis 7	分布式锁、会话缓存
 引擎	Python / Rust (可选)	纯计算服务
 部署	Docker Compose / K8s	容器化编排
 监控	Prometheus + Grafana	指标采集展示
+
+### 7.4 首次部署与 dim 迁移流程(Phase 6B 新增)
+
+Phase 6B 起,嵌入从 bge-small-en (384d) 切换到 bge-m3 (1024d + sparse),Qdrant 集合 dim 不匹配。
+**首次部署**操作流程:
+
+1. **启动 RAG 服务**:lifespan 自动检测 dim 不匹配(384d → 1024d),`AUTO_REINDEX=true`(默认)触发删旧集合+重建。等待服务 listen。
+2. **触发 parser 全量重新推送**:parser 侧按文档清单逐个调 `POST /v1/ingestion/notify`,RAG 接收并 upsert(bge-m3 真实嵌入)。
+3. **验证检索**:调 `POST /v1/constraints` 验证返回非空 + score 合理。
+4. **监控**:首 24h 关注 `qdrant_write_failed` 审计事件(语义已放宽,见 §16)。
+
+**生产部署**:`AUTO_REINDEX=false` 显式禁止 dim 自动重建,要求 operator 手动确认数据迁移窗口。
+
+**AUTO_REINDEX=false 时的恢复步骤**(用户反馈点 3):
+- 启动时 lifespan 抛 `RuntimeError: Collection ... dim=N does not match expected 1024.`
+- 日志同时输出:`Set AUTO_REINDEX=true in .env to automatically rebuild the collection, OR manually delete and recreate it via Qdrant UI/API.`
+- 运维人员选择:
+  - (a) 临时方案:设 `AUTO_REINDEX=true`,重启服务(lifespan 重建)
+  - (b) 永久方案:经业务方确认数据可重建后,通过 Qdrant REST API `DELETE /collections/rag_documents` + `POST /collections/rag_documents`(用 bge-m3 config)
+
 8. DERE 核心实现
 8.1 引擎核心逻辑（适配 IR V2）
 python
@@ -361,6 +381,9 @@ ekrs/
 运行时：fastapi, uvicorn, pydantic, qdrant-client, httpx, tenacity, redis,
 aiosqlite, prometheus-client, python-json-logger, portion, onnxruntime,
 transformers（bge tokenizer）
+FlagEmbedding (==1.2.13) — bge-m3 dense+sparse 推理框架(Phase 6B 新增)
+onnxruntime (>=1.15.0,<1.18.0) — FlagEmbedding 依赖(锁定避免 API drift)
+numpy (>=1.24.0,<2.0.0) — FlagEmbedding 依赖(锁定 1.x API)
 dev：pytest, pytest-asyncio, pytest-cov, fakeredis
 注：streamlit 尚未安装（dev_ui/ 占位待 Phase 6 实施）；FlagEmbedding 未使用（实现选 onnxruntime + transformers 直接调用）。
 15. 部署拓扑与网络架构
@@ -376,6 +399,11 @@ RAG 服务暴露两个端口：
 管理接口 X-Admin-Key 认证
 
 敏感信息通过 Secrets 注入
+
+**16 个事件名/schema 不可变更**:...(省略)... `qdrant_write_failed` (语义 Phase 6B 起放宽:覆盖 Qdrant 任何操作失败 read/write/delete/upsert/scroll,payload 含 `operation: str` 字段区分 read/write)。**back-compat 提示**:现有审计消费者(如监控脚本)需兼容 `operation` 字段缺失的情况——Phase 6A 之前的事件无此字段,Phase 6B 起的失败事件携带。监控脚本应:
+- 处理新事件时优先用 `operation` 字段(若存在)
+- 处理老事件时默认 `operation="write"`(Phase 6A 之前只有写入失败)
+- 不要硬要求 `operation` 字段存在(用 `.get("operation", "write")`)
 
 审计日志不记录令牌
 
