@@ -69,11 +69,23 @@ class EncodedVector:
 class EmbeddingService:
     def __init__(self, model_dir: Path = DEFAULT_MODEL_DIR): ...
     def encode(self, texts: list[str]) -> list[EncodedVector]: ...
+    def to_qdrant_sparse(self, sparse: dict[int, float]) -> dict: ...  # D8
     @property
     def dense_size(self) -> int: return 1024
     @property
     def is_dummy(self) -> bool: ...   # 模型加载失败时为 True
 ```
+
+**加载流程**:
+1. 校验 `model_dir/model_optimized.onnx` 与 `bge-m3.sha256` 一致(SHA256 校验),**校验失败直接 raise RuntimeError,不允许进入 dummy 模式**(用户反馈点 4)
+2. 加载 ONNX session;FlagEmbedding 框架初始化
+3. 失败 → 标记 `is_dummy=True`,日志 WARN
+
+**Dummy 模式防御**(用户反馈点 2):
+- `is_dummy=True` 时 `encode()` 仍返回零向量 + 空 sparse(保留 CI 通过能力)
+- 但 `upsert_chunks` 必须先检查 `embedding_service.is_dummy`;True 则 raise `EmbeddingUnavailableError`,**禁止写入无效数据**
+- Service 可以启动(允许只读 + 测试),但写入路径完全禁用
+- Production 部署应通过 health check / 外部 probe 检测 dummy 状态,触发告警
 
 **回退策略**:模型加载失败 → 标记 `is_dummy=True`,encode 返回零向量 + 空 sparse,日志 WARN。这是 6A "测试覆盖" 思路的延续,允许 CI 在模型未就绪时通过。
 
@@ -96,13 +108,20 @@ class EmbeddingService:
 `.gitignore` 例外:`!rag/models/bge-m3/` 与 `!rag/models/bge-m3/**` 允许进仓。
 
 ### D4: 数据迁移(Qdrant 集合 dim 变化)
-**lifespan 启动时自动重建**:
-- `QdrantManager.ensure_collection(vector_size=1024)` 检测到现有集合 dim 不匹配(384d vs 1024d)
-- 删除旧集合 → 重建(dense=1024d + sparse 已配置)
+**lifespan 启动时自动重建**(FastAPI 标准模式,用户反馈点 3):
+- lifespan 是 FastAPI 标准 startup hook,在 server 接受请求前完成所有初始化
+- `QdrantManager.ensure_collection(vector_size=1024)` 在 lifespan 内部调用,保证重建完成后服务才 listen
+- 异步包装:`ensure_collection` 是 sync(网络阻塞 I/O),用 `asyncio.to_thread(ensure_collection)` 避免阻塞 event loop
+- 检测到 dim 不匹配(384d vs 1024d)→ 删旧集合 → 重建(dense=1024d + sparse 已配置)
 - 旧 384d 零向量被丢弃(零向量本无检索价值)
-- 操作记入 audit:复用 `qdrant_write_failed` 不适用(本操作是 migration),改用普通 logger.info
+- 操作记入 logger INFO(迁移事件非业务事件,不入 audit)
 
 **运维提示**:README + `.env.example` 注释说明首次部署后需触发 ingestion 重新推送所有文档(parser 侧)。
+
+**AUTO_REINDEX 环境变量**(用户反馈点 8):
+- 默认 `AUTO_REINDEX=true` → 启动时检测到 dim 不匹配自动重建
+- `AUTO_REINDEX=false` → 检测到 dim 不匹配时 raise,要求 operator 手动处理(适合 prod 防误删)
+- 该变量仅控制 Qdrant 集合 dim 重建,不控制 ingestion 数据(由 parser 侧处理)
 
 ### D5: retriever 简化
 **采用方案 A**:`EKRSRetriever` 不再持有 `embedder`,只持有 `qdrant_manager`。`retrieve(query)` 改为:
@@ -123,12 +142,39 @@ def retrieve(self, query, top_k, active_scope):
 `.github/workflows/test.yml` 增加 `heavy` job,触发条件 `schedule: cron: '0 3 * * *'`(每日 03:00 UTC)+ `workflow_dispatch`。
 
 ### D7: 16 audit 事件不变(回归保护)
-- B1 修复后 search 失败 → 复用 `qdrant_write_failed`(失败时统一审计)
+- B1 修复后 search 失败 → 复用 `qdrant_write_failed`(用户反馈点 6:语义放宽,覆盖 read/write 全部 Qdrant 操作失败,handbook §16 同步更新语义说明)
 - B3 零向量回退(模型加载失败)→ logger WARN,**不入 audit**(运维事件非业务事件)
 - 集合重建 → logger INFO,**不入 audit**(迁移事件非业务事件)
-- 新事件种类不增加
+- 新事件种类不增加(16 事件集冻结)
+
+**qdrant_write_failed 语义放宽决议**(用户反馈点 6 决议):
+- 原义:仅 Qdrant 写入失败
+- 新义:Qdrant 任何操作失败(read/write/delete/upsert/scroll),event name 保留
+- 理由:加新 event `qdrant_read_failed` 破坏 16 事件冻结;重命名 `qdrant_qdrant_operation_failed` 破坏已有 audit log 可读性;event payload 中 `operation: str` 字段可区分 read/write
+- handbook §16 同步更新说明
 
 **16 事件集冻结**(同 6A final review)。
+
+### D8: Sparse 格式转换(用户反馈点 1)
+Qdrant NamedVectors sparse 字段要求 `{"indices": [...], "values": [...]}` 格式,不是 `dict[int, float]`。**转换在 EmbeddingService 完成**,QdrantManager 不关心向量内部结构。
+
+```python
+# embedding_service.py
+def to_qdrant_sparse(self, sparse: dict[int, float]) -> dict:
+    """Convert {term_id: weight} dict to Qdrant sparse format.
+    Returns: {"indices": sorted(term_ids), "values": [matching_weights]}
+    """
+    if not sparse:
+        return {"indices": [], "values": []}
+    indices = sorted(sparse.keys())
+    values = [sparse[i] for i in indices]
+    return {"indices": indices, "values": values}
+```
+
+**QdrantManager 职责边界**:
+- EmbeddingService:encode + 内部格式转换(to_qdrant_sparse)
+- QdrantManager:仅存储 + 检索(upsert/query_points),输入是 NamedVectors dict
+- 这样 QdrantManager 不依赖任何 sparse 内部表示,未来换模型仅需替换 EmbeddingService
 
 ---
 
@@ -160,7 +206,8 @@ def retrieve(self, query, top_k, active_scope):
 | `rag/tests/unit/test_qdrant_client.py` | **重写**(原地,8 例,适配新 QdrantManager 签名 + EmbeddingService 注入) |
 | `pyproject.toml` (rag/) | 加 `FlagEmbedding` 依赖(需批准) |
 | `.gitignore` | 例外 `!rag/models/bge-m3/**`(允许 vendor 进仓) |
-| `ekrs-handbook.md` §7 | bge-m3 实现从"声明"改"已实现";§14 依赖清单加 FlagEmbedding |
+| `ekrs-handbook.md` §7 | bge-m3 实现从"声明"改"已实现";新增 §7.4 首次部署流程(用户反馈点 8);§16 qdrant_write_failed 语义更新;§14 依赖清单加 FlagEmbedding/onnxruntime/numpy(版本锁定) |
+| `.env.example` | 加 `AUTO_REINDEX=true` 注释说明(用户反馈点 8) |
 
 ### 数据流(检索 query)
 
@@ -209,15 +256,18 @@ QdrantManager.upsert_chunks(chunks)             QdrantManager.upsert_chunks(chun
 
 ### 单元测试(mock FlagEmbedding)
 
-`test_embedding_service.py`(6 例):
+`test_embedding_service.py`(9 例,新增 3 例):
 - `test_encode_returns_dense_and_sparse`
 - `test_encode_handles_empty_list`
 - `test_encode_normalizes_dense`
 - `test_is_dummy_when_model_missing`
 - `test_is_dummy_when_onnx_load_fails`
 - `test_dense_size_returns_1024`
+- `test_sha256_mismatch_raises_runtime_error`(用户反馈点 4 验证)
+- `test_to_qdrant_sparse_converts_dict_format`(用户反馈点 1 + D8 验证)
+- `test_to_qdrant_sparse_handles_empty_dict`
 
-`test_qdrant_client.py`(原地重写,8 例,合并 6A 旧测试内容):
+`test_qdrant_client.py`(原地重写,11 例,合并 6A 旧测试内容 + 用户反馈补充):
 - `test_ensure_collection_creates_dense_and_sparse`
 - `test_ensure_collection_recreates_on_dim_mismatch`(B2 验证)
 - `test_ensure_collection_no_recreate_when_dim_matches`
@@ -226,6 +276,8 @@ QdrantManager.upsert_chunks(chunks)             QdrantManager.upsert_chunks(chun
 - `test_search_calls_query_points`(B1 验证)
 - `test_search_encodes_query_text_via_service`
 - `test_search_passes_named_vectors_to_query_points`
+- `test_upsert_chunks_raises_when_embedding_service_dummy`(用户反馈点 2 验证)
+- `test_ensure_collection_handles_qdrant_unreachable`(用户反馈点 3 验证,模拟连接异常)
 
 `retriever.py` 修改后测试更新:
 - `test_retrieve_no_longer_takes_embedder`
@@ -277,8 +329,8 @@ jobs:
 ### 覆盖率目标
 
 - 6A 基线:86.63%(≥85% gate 满足)
-- 6B 新增模块:EmbeddingService + QdrantManager 重写部分,目标 100%
-- 删除 BGESmallEmbedder 后 denominator 减少,~ +1-2% 净覆盖率
+- 6B 新增模块:EmbeddingService(9 例) + QdrantManager 重写(11 例) + heavy 集成(2 例),目标 100%
+- 删除 BGESmallEmbedder 后 denominator 减少(~30 LOC test_embedder.py),~ +1-2% 净覆盖率
 - 末态预估:87-88%
 
 ---
@@ -308,13 +360,17 @@ jobs:
 
 `.env.example` 无新增(模型路径 hardcode 到 `rag/models/bge-m3/`)。
 
-`pyproject.toml` (rag/) 新增:
+`pyproject.toml` (rag/) 新增(用户反馈点 5,版本锁定):
 ```toml
 [dependencies]
-FlagEmbedding = ">=1.2.0"  # 提供 BGEM3FlagModel,支持 dense + sparse
+FlagEmbedding = "==1.2.13"     # 锁定 1.2.13,实测与 bge-m3 ONNX 兼容
+onnxruntime = ">=1.15.0,<1.18.0"  # 锁定 1.15-1.18,FlagEmbedding 兼容范围
+numpy = ">=1.24.0,<2.0.0"        # 锁定 <2.0,FlagEmbedding 内部使用 1.x API
 ```
 
-**此为 6A "no new external deps" 例外**,需 user 在 spec review 时显式批准。
+**此为 6A "no new external deps" 例外**,已由 user 在 6B spec review 中显式批准。
+
+**新依赖在 handbook §14 同步登记**(用户反馈点 5)。
 
 ### 后向兼容
 
@@ -341,11 +397,15 @@ FlagEmbedding = ">=1.2.0"  # 提供 BGEM3FlagModel,支持 dense + sparse
 | 风险 | 概率 | 影响 | 应对 |
 |------|------|------|------|
 | FlagEmbedding pip 安装慢/失败 | 中 | 中 | Dockerfile 层缓存 `pip install FlagEmbedding` 单独 step |
+| onnxruntime 版本不兼容 | 中 | 高 | 版本锁定 `>=1.15,<1.18`,handbook §14 记录(用户反馈点 5) |
 | bge-m3 ONNX 加载内存 ~2GB | 高 | 中 | lifespan startup 显式 warning;测试在 dummy 模式 |
-| Qdrant 集合重建丢失旧数据 | 高 | 中 | 部署前 backup;README 提示需要 parser 重推 |
-| 模型 vendor 增加仓库 2GB | 中 | 低 | 用户已批准,接受 clone 慢 |
+| 模型 vendor 增加仓库 2GB | 中 | 低 | 用户已批准,接受 clone 慢;CI 用 `--depth=1` |
+| Qdrant 集合重建丢失旧数据 | 高 | 中 | 部署前 backup;`AUTO_REINDEX=false` 可禁止;README + handbook §7.4 提示需要 parser 重推 |
+| Dummy 模式 upsert 写无效数据 | 中 | 中 | D1 强化:`is_dummy=True` 时 `upsert_chunks` raise `EmbeddingUnavailableError`(用户反馈点 2) |
 | FlagEmbedding 新增依赖 | 中 | 中 | user 显式批准(本 spec §7 决议) |
 | BGESmallEmbedder 删除破坏外部调用方 | 低 | 低 | 全仓 grep 验证无外部引用 |
+| 模型文件损坏 | 低 | 中 | D1 强化:SHA256 校验失败直接 raise,不允许 dummy 回退(用户反馈点 4) |
+| Qdrant 集合重建时收到请求 | 中 | 低 | D4 强化:lifespan 内 `asyncio.to_thread(ensure_collection)` 阻塞,服务 listen 前完成(用户反馈点 3) |
 
 ### 回滚
 
@@ -369,13 +429,13 @@ FlagEmbedding = ">=1.2.0"  # 提供 BGEM3FlagModel,支持 dense + sparse
 - ✅ 16 audit 事件不变,D1-D7 失败不入 audit — D7 锁定
 
 ### 待解(不阻塞 spec,实施时定或 user 确认)
-- ❓ **R1: FlagEmbedding 新增依赖需 user 批准** — 6A "no new external deps" 例外,user 在 spec review 时显式批准
+- ✅ **R1: FlagEmbedding 新增依赖** — user 在 6B spec review 中批准(含版本锁定)
 - ❓ **R2: bge-m3 ONNX 文件确切清单** — HF 上 BAAI/bge-m3 的 ONNX 导出含哪些文件?需在 T1 实施时下载验证
-- ❓ **R3: FlagEmbedding 版本约束** — pyproject.toml 写 `>=1.2.0` 是否合适?T2 实施时验证兼容矩阵
-- ❓ **R4: 集合重建触发 parser 重新推送的运维脚本** — 是否在 6B 范围内?实施时定
-- ❓ **R5: EmbeddingService 在 dummy 模式下 upsert 零向量是否会被新 query_points 拒?** — T3 测试验证
-- ❓ **R6: 是否保留 bge-small-en 作为轻量快速嵌入备选** — D2 已决定删除,如需未来再开
-- ❓ **R7: handbook §7 是否同步新增"模型路径 / vendor 决策 / dummy 回退"小节** — T6 决定
+- ✅ **R3: FlagEmbedding 版本约束** — 锁定 `FlagEmbedding==1.2.13` + `onnxruntime>=1.15,<1.18` + `numpy<2.0`(用户反馈点 5)
+- ❓ **R4: 集合重建触发 parser 重新推送的运维脚本** — 是否在 6B 范围内?倾向 6C+ 运维脚本,6B 仅补 README
+- ❓ **R5: EmbeddingService 在 dummy 模式下 upsert 零向量是否会被新 query_points 拒?** — 已由 D1 强化(禁止写入),无需此问题
+- ❓ **R6: 是否保留 bge-small-en 作为轻量快速嵌入备选** — D2 已决定删除,本 spec 不保留
+- ✅ **R7: handbook §7 同步更新** — T6 必须新增"模型路径 / vendor 决策 / dummy 回退 / AUTO_REINDEX"小节(用户反馈点 8)
 
 ---
 
@@ -388,7 +448,7 @@ FlagEmbedding = ">=1.2.0"  # 提供 BGEM3FlagModel,支持 dense + sparse
 3. **T3 — QdrantManager 重写**:B1/B2/B3 修复 + upsert_chunks 注入 EmbeddingService + search 改 query_points + ensure_collection 改 config.params.vectors。重写 `test_qdrant_bge_m3.py`(8 例 mock)。**重点 review**:3 bug 修复正确性 + named vectors 结构。
 4. **T4 — retriever + main.py**:retriever 移除 embedder 参数 + 调用改 `qdrant.search(query_text=...)`。main.py lifespan 注入 EmbeddingService + Depends 迁移。删除 `embedder.py` + `test_embedder.py`。**重点 review**:retriever 行为不变 + Depends 接线。
 5. **T5 — 测试分层**:新增 `test_embedding_heavy.py`(2 例,@pytest.mark.heavy)。`.github/workflows/heavy-tests.yml` 新增 nightly job。**重点 review**:mark 注册 + CI 配置。
-6. **T6 — 文档同步**:handbook §7 "bge-m3 实现" + §14 依赖清单加 FlagEmbedding。progress.md 更新 6B 状态。**重点 review**:文档与代码一致。
+6. **T6 — 文档同步**:handbook §7 "bge-m3 实现" + §14 依赖清单加 FlagEmbedding/onnxruntime/numpy + 新增"§7.4 首次部署流程"段(用户反馈点 8);handbook §16 qdrant_write_failed 语义更新(用户反馈点 6);.env.example 加 `AUTO_REINDEX` 注释;progress.md 更新 6B 状态。**重点 review**:文档与代码一致。
 7. **打 tag**:`phase6b-retrieval-layer`(在 master 上,本地)
 
 每步 commit + subagent task reviewer 闸门。T1 因 2GB 模型文件需特殊 review(代码变更 0,但文件大小 + 内容审查)。
