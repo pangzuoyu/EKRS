@@ -346,3 +346,158 @@ def test_search_logs_warning_when_dummy(
 
     assert results == []
     assert any("dummy mode" in rec.message for rec in caplog.records)
+
+
+# ---- Phase 6C T8 Finding #1: qdrant_write_failed audit emit ----
+
+class TestQdrantWriteFailedAuditEmit:
+    """Cover the 4 QdrantManager methods that perform real Qdrant operations.
+
+    Each failure path must emit exactly one qdrant_write_failed audit event
+    with the documented schema (collection + operation), then re-raise the
+    original exception so retry/caller behavior is unchanged.
+    """
+
+    def _assert_emit(self, mock_writer: MagicMock, *, operation: str) -> None:
+        """Verify qdrant_write_failed was emitted with the right operation."""
+        assert mock_writer.write.called, "writer.write was not called"
+        kwargs = mock_writer.write.call_args.kwargs
+        # First positional or kw arg is the event name
+        event = (
+            mock_writer.write.call_args.args[0]
+            if mock_writer.write.call_args.args
+            else kwargs.get("event_type")
+        )
+        # The AuditWriter.write signature is (event_type, **kwargs).
+        assert event == "qdrant_write_failed"
+        assert kwargs.get("collection") == "rag_documents"
+        assert kwargs.get("operation") == operation
+        assert "error" in kwargs and kwargs["error"]
+        assert "message" in kwargs
+
+    def test_ensure_collection_emits_audit_event_on_failure(
+        self, mock_embedding_service: EmbeddingService
+    ) -> None:
+        """ensure_collection emits qdrant_write_failed (operation=write) on Qdrant errors."""
+        from ekrs_rag.retrieval import qdrant_client as qc_mod
+
+        # get_collection is internally caught (treated as "not found"), so the
+        # failure must surface in create_collection for the retry path to fire.
+        client = MagicMock()
+        client.get_collection.side_effect = ConnectionError("Qdrant down")
+        client.create_collection.side_effect = ConnectionError("Qdrant down")
+
+        mock_writer = MagicMock()
+        with patch.object(qc_mod, "get_writer", return_value=mock_writer), \
+             patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+            mgr = QdrantManager(
+                host="localhost", port=6333,
+                embedding_service=mock_embedding_service,
+            )
+            with pytest.raises(ConnectionError):
+                mgr.ensure_collection(vector_size=1024)
+
+        # Tenacity retries 3x → at least one emit (we don't pin exact count
+        # to keep the test robust to retry-policy tweaks).
+        assert mock_writer.write.call_count >= 1
+        self._assert_emit(mock_writer, operation="write")
+
+    def test_upsert_chunks_emits_audit_event_on_failure(
+        self, mock_embedding_service: EmbeddingService
+    ) -> None:
+        """upsert_chunks emits qdrant_write_failed (operation=write) on Qdrant errors."""
+        from ekrs_rag.retrieval import qdrant_client as qc_mod
+        from ekrs_shared.models import Chunk
+
+        chunks = [
+            Chunk(text="hi", scope_path=[], source_block_ids=["b1"],
+                  token_count=1, doc_hash="d1", version=1, page_numbers=[]),
+        ]
+        client = _make_qdrant(existing_size=1024)
+        client.upsert.side_effect = ConnectionError("Qdrant down")
+
+        mock_writer = MagicMock()
+        with patch.object(qc_mod, "get_writer", return_value=mock_writer), \
+             patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+            mgr = QdrantManager(
+                host="localhost", port=6333,
+                embedding_service=mock_embedding_service,
+            )
+            with pytest.raises(ConnectionError):
+                mgr.upsert_chunks(chunks)
+
+        assert mock_writer.write.call_count >= 1
+        self._assert_emit(mock_writer, operation="write")
+
+    def test_search_emits_audit_event_on_failure(
+        self, mock_embedding_service: EmbeddingService
+    ) -> None:
+        """search emits qdrant_write_failed (operation=read) on Qdrant errors."""
+        from ekrs_rag.retrieval import qdrant_client as qc_mod
+
+        client = _make_qdrant(existing_size=1024)
+        client.query_points.side_effect = ConnectionError("Qdrant down")
+
+        mock_writer = MagicMock()
+        with patch.object(qc_mod, "get_writer", return_value=mock_writer), \
+             patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+            mgr = QdrantManager(
+                host="localhost", port=6333,
+                embedding_service=mock_embedding_service,
+            )
+            with pytest.raises(ConnectionError):
+                mgr.search(query_text="q", top_k=5)
+
+        # search() is NOT retry-wrapped → exactly 1 emit.
+        assert mock_writer.write.call_count == 1
+        self._assert_emit(mock_writer, operation="read")
+
+    def test_delete_old_versions_emits_audit_event_on_failure(
+        self, mock_embedding_service: EmbeddingService
+    ) -> None:
+        """delete_old_versions emits qdrant_write_failed (operation=delete) on errors."""
+        from ekrs_rag.retrieval import qdrant_client as qc_mod
+
+        client = _make_qdrant(existing_size=1024)
+        client.delete.side_effect = ConnectionError("Qdrant down")
+
+        mock_writer = MagicMock()
+        with patch.object(qc_mod, "get_writer", return_value=mock_writer), \
+             patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+            mgr = QdrantManager(
+                host="localhost", port=6333,
+                embedding_service=mock_embedding_service,
+            )
+            with pytest.raises(ConnectionError):
+                mgr.delete_old_versions(doc_hash="abc", keep_version=3)
+
+        assert mock_writer.write.call_count >= 1
+        self._assert_emit(mock_writer, operation="delete")
+
+    def test_successful_upsert_does_not_emit_qdrant_write_failed(
+        self, mock_embedding_service: EmbeddingService
+    ) -> None:
+        """Happy-path upsert does NOT emit qdrant_write_failed (negative case)."""
+        from ekrs_rag.retrieval import qdrant_client as qc_mod
+        from ekrs_shared.models import Chunk
+
+        chunks = [
+            Chunk(text="hi", scope_path=[], source_block_ids=["b1"],
+                  token_count=1, doc_hash="d1", version=1, page_numbers=[]),
+        ]
+        client = _make_qdrant(existing_size=1024)
+
+        mock_writer = MagicMock()
+        with patch.object(qc_mod, "get_writer", return_value=mock_writer), \
+             patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+            mgr = QdrantManager(
+                host="localhost", port=6333,
+                embedding_service=mock_embedding_service,
+            )
+            n = mgr.upsert_chunks(chunks)
+
+        assert n == 1
+        # No qdrant_write_failed emitted on success
+        for call in mock_writer.write.call_args_list:
+            event = call.args[0] if call.args else call.kwargs.get("event_type")
+            assert event != "qdrant_write_failed"

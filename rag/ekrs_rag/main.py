@@ -154,6 +154,7 @@ async def lifespan(app: FastAPI):
     try:
         logger.info("Starting EKRS RAG service (debug=%s)", settings.EKRS_DEBUG)
 
+        embedding_service = None
         try:
             # Phase 6B D5: EmbeddingService facade wraps bge-m3 ONNX;
             # QdrantManager consumes it (no embedder arg on retriever).
@@ -170,25 +171,36 @@ async def lifespan(app: FastAPI):
             await asyncio.to_thread(_qdrant.ensure_collection)
             logger.info("Qdrant collection ready: %s", settings.COLLECTION_NAME)
         except Exception as e:
-            logger.exception(
-                "RAG service startup failed during Qdrant/Embedding init: %s. "
-                "Check Qdrant reachability, model files, and AUTO_REINDEX setting.",
+            # Phase 6C T8 fix: make Qdrant/Embedding init non-fatal. The
+            # metrics exporter sidecar above is independent of Qdrant and
+            # must keep serving so Prometheus can scrape even when Qdrant
+            # is unreachable. Routes depending on qdrant/retriever/pipeline
+            # already 503 via get_retriever() (constraints.py:41).
+            logger.warning(
+                "Qdrant/Embedding init failed (%s) — service starts in "
+                "degraded mode. Routes depending on Qdrant/retriever/pipeline "
+                "will return 503 until Qdrant becomes reachable. Restart the "
+                "service after fixing Qdrant to fully restore.",
                 e,
             )
-            raise  # FastAPI lifespan will record startup failure
+            _qdrant = None
+            _retriever = None
+            _pipeline = None
+            embedding_service = None
 
         app.state.embedding_service = embedding_service
         app.state.qdrant_manager = _qdrant
 
         # Phase 2b: retriever (no longer takes embedder — qdrant.search
         # handles embedding internally via injected EmbeddingService).
-        _retriever = EKRSRetriever(qdrant=_qdrant)
-
-        # retriever wired to app.state below; get_retriever dep reads it
-        app.state.retriever = _retriever
-
-        _pipeline = IngestionPipeline(_qdrant, settings.SHARED_STORAGE_PATH)
-        app.state.pipeline = _pipeline
+        if _qdrant is not None:
+            _retriever = EKRSRetriever(qdrant=_qdrant)
+            app.state.retriever = _retriever
+            _pipeline = IngestionPipeline(_qdrant, settings.SHARED_STORAGE_PATH)
+            app.state.pipeline = _pipeline
+        else:
+            app.state.retriever = None
+            app.state.pipeline = None
 
         # Phase 4: redis, task_repo, lock, compensation
         _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)

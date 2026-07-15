@@ -25,10 +25,30 @@ from tenacity import (
 )
 
 from ekrs_shared.models import Chunk, IngestionStatus
+from ekrs_rag.observability.audit import get_writer
 from ekrs_rag.retrieval.embedding_service import (
     EmbeddingService,
     EmbeddingUnavailableError,
 )
+
+
+def _emit_qdrant_failure(operation: str, collection: str, exc: BaseException) -> None:
+    """Best-effort audit emit for Qdrant operation failures (Phase 6C T8 fix).
+
+    Never raises — writer.write() already swallows its own errors. Calling
+    sites re-raise the original exception so retry/caller behavior is
+    unchanged.
+    """
+    writer = get_writer()
+    if writer is None:
+        return
+    writer.write(
+        "qdrant_write_failed",
+        collection=collection,
+        operation=operation,
+        error=type(exc).__name__,
+        message=str(exc)[:200],
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -68,48 +88,52 @@ class QdrantManager:
         - True (default): delete and recreate (D4)
         - False: raise RuntimeError (production safety)
         """
-        existing_size = None
         try:
-            existing = self._client.get_collection(self._collection_name)
-            # B2 fix: 1.17.1 path is config.params.vectors["dense"].size
-            existing_size = existing.config.params.vectors["dense"].size
-        except Exception:
             existing_size = None
+            try:
+                existing = self._client.get_collection(self._collection_name)
+                # B2 fix: 1.17.1 path is config.params.vectors["dense"].size
+                existing_size = existing.config.params.vectors["dense"].size
+            except Exception:
+                existing_size = None
 
-        if existing_size is not None and existing_size != vector_size:
-            if not self._auto_reindex:
-                raise RuntimeError(
-                    f"Collection {self._collection_name} dim={existing_size} "
-                    f"does not match expected {vector_size}. "
-                    f"Recovery: set AUTO_REINDEX=true in .env to automatically "
-                    f"rebuild, OR manually delete and recreate via Qdrant UI/API."
+            if existing_size is not None and existing_size != vector_size:
+                if not self._auto_reindex:
+                    raise RuntimeError(
+                        f"Collection {self._collection_name} dim={existing_size} "
+                        f"does not match expected {vector_size}. "
+                        f"Recovery: set AUTO_REINDEX=true in .env to automatically "
+                        f"rebuild, OR manually delete and recreate via Qdrant UI/API."
+                    )
+                logger.warning(
+                    "Collection %s has dim=%d, need %d — recreating",
+                    self._collection_name, existing_size, vector_size,
                 )
-            logger.warning(
-                "Collection %s has dim=%d, need %d — recreating",
-                self._collection_name, existing_size, vector_size,
-            )
-            self._client.delete_collection(self._collection_name)
-            existing_size = None
+                self._client.delete_collection(self._collection_name)
+                existing_size = None
 
-        if existing_size is None:
-            self._client.create_collection(
-                collection_name=self._collection_name,
-                vectors_config={
-                    "dense": models.VectorParams(
-                        size=vector_size,
-                        distance=models.Distance.COSINE,
-                    ),
-                },
-                sparse_vectors_config={
-                    "sparse": models.SparseVectorParams(
-                        index=models.SparseIndexParams(on_disk=False),
-                    ),
-                },
-            )
-            logger.info(
-                "Created collection %s (dense=%dd + sparse)",
-                self._collection_name, vector_size,
-            )
+            if existing_size is None:
+                self._client.create_collection(
+                    collection_name=self._collection_name,
+                    vectors_config={
+                        "dense": models.VectorParams(
+                            size=vector_size,
+                            distance=models.Distance.COSINE,
+                        ),
+                    },
+                    sparse_vectors_config={
+                        "sparse": models.SparseVectorParams(
+                            index=models.SparseIndexParams(on_disk=False),
+                        ),
+                    },
+                )
+                logger.info(
+                    "Created collection %s (dense=%dd + sparse)",
+                    self._collection_name, vector_size,
+                )
+        except Exception as exc:
+            _emit_qdrant_failure("write", self._collection_name, exc)
+            raise
 
     @retry(
         reraise=True,
@@ -123,57 +147,65 @@ class QdrantManager:
         D1: Raises EmbeddingUnavailableError if embedding service is dummy.
         Returns number of points upserted.
         """
-        if not chunks:
-            return 0
+        try:
+            if not chunks:
+                return 0
 
-        if self._embedding_service.is_dummy:
-            raise EmbeddingUnavailableError(
-                "Cannot upsert: EmbeddingService is in dummy mode. "
-                "Model files missing or failed to load. "
-                "Check rag/models/bge-m3/ and audit log."
+            if self._embedding_service.is_dummy:
+                raise EmbeddingUnavailableError(
+                    "Cannot upsert: EmbeddingService is in dummy mode. "
+                    "Model files missing or failed to load. "
+                    "Check rag/models/bge-m3/ and audit log."
+                )
+
+            texts = [c.text for c in chunks]
+            encoded = self._embedding_service.encode(texts)
+
+            points = []
+            for chunk, vec in zip(chunks, encoded):
+                point_id = str(uuid.uuid5(
+                    uuid.NAMESPACE_DNS,
+                    f"{chunk.doc_hash}:{chunk.version}:{chunk.source_block_ids}",
+                ))
+                sparse_qdrant = self._embedding_service.to_qdrant_sparse(vec.sparse)
+                payload = {
+                    "text": chunk.text,
+                    "scope_path": chunk.scope_path,
+                    "source_block_ids": chunk.source_block_ids,
+                    "token_count": chunk.token_count,
+                    "doc_hash": chunk.doc_hash,
+                    "version": chunk.version,
+                    "page_numbers": chunk.page_numbers,
+                }
+                points.append(models.PointStruct(
+                    id=point_id,
+                    vector={
+                        "dense": vec.dense,
+                        "sparse": sparse_qdrant,
+                    },
+                    payload=payload,
+                ))
+
+            batch_size = 100
+            for i in range(0, len(points), batch_size):
+                batch = points[i:i + batch_size]
+                self._client.upsert(
+                    collection_name=self._collection_name,
+                    points=batch,
+                )
+
+            logger.info(
+                "Upserted %d chunks for doc %s v%d (bge-m3 dense+sparse)",
+                len(points), chunks[0].doc_hash, chunks[0].version,
             )
-
-        texts = [c.text for c in chunks]
-        encoded = self._embedding_service.encode(texts)
-
-        points = []
-        for chunk, vec in zip(chunks, encoded):
-            point_id = str(uuid.uuid5(
-                uuid.NAMESPACE_DNS,
-                f"{chunk.doc_hash}:{chunk.version}:{chunk.source_block_ids}",
-            ))
-            sparse_qdrant = self._embedding_service.to_qdrant_sparse(vec.sparse)
-            payload = {
-                "text": chunk.text,
-                "scope_path": chunk.scope_path,
-                "source_block_ids": chunk.source_block_ids,
-                "token_count": chunk.token_count,
-                "doc_hash": chunk.doc_hash,
-                "version": chunk.version,
-                "page_numbers": chunk.page_numbers,
-            }
-            points.append(models.PointStruct(
-                id=point_id,
-                vector={
-                    "dense": vec.dense,
-                    "sparse": sparse_qdrant,
-                },
-                payload=payload,
-            ))
-
-        batch_size = 100
-        for i in range(0, len(points), batch_size):
-            batch = points[i:i + batch_size]
-            self._client.upsert(
-                collection_name=self._collection_name,
-                points=batch,
-            )
-
-        logger.info(
-            "Upserted %d chunks for doc %s v%d (bge-m3 dense+sparse)",
-            len(points), chunks[0].doc_hash, chunks[0].version,
-        )
-        return len(points)
+            return len(points)
+        except EmbeddingUnavailableError:
+            # Phase 6A D1 contract: dummy-mode is a config error, not a
+            # Qdrant write failure — emit nothing, let caller handle.
+            raise
+        except Exception as exc:
+            _emit_qdrant_failure("write", self._collection_name, exc)
+            raise
 
     def get_ingestion_status(self, doc_hash: str) -> Optional[IngestionStatus]:
         """Query Qdrant for ingestion status of a document."""
@@ -241,37 +273,41 @@ class QdrantManager:
             )
             return []  # Safe degradation; no match possible
 
-        encoded = self._embedding_service.encode([query_text])[0]
-        sparse_qdrant = self._embedding_service.to_qdrant_sparse(encoded.sparse)
+        try:
+            encoded = self._embedding_service.encode([query_text])[0]
+            sparse_qdrant = self._embedding_service.to_qdrant_sparse(encoded.sparse)
 
-        results = self._client.query_points(
-            collection_name=self._collection_name,
-            prefetch=[
-                models.Prefetch(
-                    query=encoded.dense,
-                    using="dense",
-                    limit=top_k,
-                ),
-                models.Prefetch(
-                    query=models.SparseVector(
-                        indices=sparse_qdrant["indices"],
-                        values=sparse_qdrant["values"],
+            results = self._client.query_points(
+                collection_name=self._collection_name,
+                prefetch=[
+                    models.Prefetch(
+                        query=encoded.dense,
+                        using="dense",
+                        limit=top_k,
                     ),
-                    using="sparse",
-                    limit=top_k,
-                ),
-            ],
-            query=models.FusionQuery(fusion=models.Fusion.RRF),
-            limit=top_k,
-            with_payload=True,
-            with_vectors=False,
-            score_threshold=score_threshold,
-            # Preserve 6A Task 8 commit 033a8a3 HNSW quality optimization.
-            # hnsw_ef=128 raises HNSW search beam width for better recall
-            # at small perf cost. Inherited by both prefetches.
-            search_params=models.SearchParams(hnsw_ef=128),
-        )
-        return [(hit.payload, hit.score) for hit in results.points]
+                    models.Prefetch(
+                        query=models.SparseVector(
+                            indices=sparse_qdrant["indices"],
+                            values=sparse_qdrant["values"],
+                        ),
+                        using="sparse",
+                        limit=top_k,
+                    ),
+                ],
+                query=models.FusionQuery(fusion=models.Fusion.RRF),
+                limit=top_k,
+                with_payload=True,
+                with_vectors=False,
+                score_threshold=score_threshold,
+                # Preserve 6A Task 8 commit 033a8a3 HNSW quality optimization.
+                # hnsw_ef=128 raises HNSW search beam width for better recall
+                # at small perf cost. Inherited by both prefetches.
+                search_params=models.SearchParams(hnsw_ef=128),
+            )
+            return [(hit.payload, hit.score) for hit in results.points]
+        except Exception as exc:
+            _emit_qdrant_failure("read", self._collection_name, exc)
+            raise
 
     @retry(
         reraise=True,
@@ -280,23 +316,27 @@ class QdrantManager:
     )
     def delete_old_versions(self, doc_hash: str, keep_version: int) -> int:
         """Delete Qdrant points for old versions of a document."""
-        self._client.delete(
-            collection_name=self._collection_name,
-            points_selector=models.FilterSelector(
-                filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="doc_hash",
-                            match=models.MatchValue(value=doc_hash),
-                        ),
-                        models.FieldCondition(
-                            key="version",
-                            match=models.MatchValue(value=keep_version),
-                        ),
-                    ],
-                    must_not=[],
+        try:
+            self._client.delete(
+                collection_name=self._collection_name,
+                points_selector=models.FilterSelector(
+                    filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="doc_hash",
+                                match=models.MatchValue(value=doc_hash),
+                            ),
+                            models.FieldCondition(
+                                key="version",
+                                match=models.MatchValue(value=keep_version),
+                            ),
+                        ],
+                        must_not=[],
+                    ),
                 ),
-            ),
-        )
-        logger.info("Deleted old versions of %s keeping v%d", doc_hash, keep_version)
-        return 0
+            )
+            logger.info("Deleted old versions of %s keeping v%d", doc_hash, keep_version)
+            return 0
+        except Exception as exc:
+            _emit_qdrant_failure("delete", self._collection_name, exc)
+            raise
