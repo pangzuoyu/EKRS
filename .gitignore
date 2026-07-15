@@ -33,7 +33,10 @@ Thumbs.db
 .claude/
 
 # Models (downloaded, gitignored per spec)
-rag/models/
+rag/models/**
+# Phase 6B: vendor bge-m3 ONNX into repo per spec D3 (no Git LFS)
+!rag/models/bge-m3/
+!rag/models/bge-m3/**
 
 # Qdrant data
 qdrant_data/
