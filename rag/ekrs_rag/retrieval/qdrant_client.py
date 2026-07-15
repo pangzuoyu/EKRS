@@ -1,9 +1,15 @@
-"""Qdrant client wrapper for EKRS RAG.
+"""Qdrant client wrapper for EKRS RAG (Phase 6B rewrite).
 
-Handles collection creation, point upsert, status queries.
-Phase 1 uses dummy vectors (zeros). Phase 2 replaces with real embeddings.
+Phase 6B fixes 3 production bugs from 6A final review:
+- B1: search() uses query_points() (qdrant-client 1.17.1)
+- B2: ensure_collection reads config.params.vectors (1.17.1)
+- B3: upsert_chunks uses EmbeddingService for real dense+sparse
+
+EmbeddingService is injected at construction. D1: upsert raises
+EmbeddingUnavailableError when service is in dummy mode.
+D4: ensure_collection runs in lifespan; AUTO_REINDEX env controls
+whether dim mismatch triggers automatic delete+recreate.
 """
-
 from __future__ import annotations
 
 import logging
@@ -11,38 +17,73 @@ import uuid
 from typing import Optional
 
 from qdrant_client import QdrantClient, models
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import (
+    retry,
+    retry_if_not_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from ekrs_shared.models import Chunk, IngestionStatus
+from ekrs_rag.retrieval.embedding_service import (
+    EmbeddingService,
+    EmbeddingUnavailableError,
+)
 
 logger = logging.getLogger(__name__)
 
-DENSE_VECTOR_SIZE = 1024  # bge-m3 output dimension (Phase 1 default)
+DEFAULT_VECTOR_SIZE = 1024  # bge-m3 dense dimension
 
 
 class QdrantManager:
     """Manages Qdrant collection lifecycle and document operations."""
 
-    def __init__(self, host: str = "localhost", port: int = 6333,
-                 collection_name: str = "rag_documents", vector_size: int = 384):
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 6333,
+        collection_name: str = "rag_documents",
+        embedding_service: Optional[EmbeddingService] = None,
+        auto_reindex: bool = True,
+    ) -> None:
+        if embedding_service is None:
+            raise ValueError(
+                "embedding_service is required (Phase 6B B3 fix). "
+                "Pass EmbeddingService() instance."
+            )
         self._client = QdrantClient(host=host, port=port)
         self._collection_name = collection_name
-        self._vector_size = vector_size
+        self._embedding_service = embedding_service
+        self._auto_reindex = auto_reindex
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
-    def ensure_collection(self, vector_size: int = 384) -> None:
-        """Create collection if it doesn't exist or vector size mismatches.
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(min=2, max=10),
+    )
+    def ensure_collection(self, vector_size: int = DEFAULT_VECTOR_SIZE) -> None:
+        """Create collection if not exists. B2 fix: real 1.17.1 API path.
 
-        If collection exists with wrong vector size, delete and recreate.
-        Phase 1 used 1024d (bge-m3). Phase 2 uses 384d (bge-small).
+        If existing collection dim mismatches, behavior depends on auto_reindex:
+        - True (default): delete and recreate (D4)
+        - False: raise RuntimeError (production safety)
         """
+        existing_size = None
         try:
             existing = self._client.get_collection(self._collection_name)
-            existing_size = existing.vectors_config["dense"].size
+            # B2 fix: 1.17.1 path is config.params.vectors["dense"].size
+            existing_size = existing.config.params.vectors["dense"].size
         except Exception:
             existing_size = None
 
         if existing_size is not None and existing_size != vector_size:
+            if not self._auto_reindex:
+                raise RuntimeError(
+                    f"Collection {self._collection_name} dim={existing_size} "
+                    f"does not match expected {vector_size}. "
+                    f"Recovery: set AUTO_REINDEX=true in .env to automatically "
+                    f"rebuild, OR manually delete and recreate via Qdrant UI/API."
+                )
             logger.warning(
                 "Collection %s has dim=%d, need %d — recreating",
                 self._collection_name, existing_size, vector_size,
@@ -65,22 +106,43 @@ class QdrantManager:
                     ),
                 },
             )
-            logger.info("Created collection %s (dense=%dd)", self._collection_name, vector_size)
+            logger.info(
+                "Created collection %s (dense=%dd + sparse)",
+                self._collection_name, vector_size,
+            )
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    @retry(
+        reraise=True,
+        retry=retry_if_not_exception_type(EmbeddingUnavailableError),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(min=2, max=10),
+    )
     def upsert_chunks(self, chunks: list[Chunk]) -> int:
-        """Batch upsert chunks with dummy dense vectors (Phase 1).
+        """Batch upsert chunks with real bge-m3 embeddings (B3 fix).
 
-        Phase 2 replaces dummy vectors with real bge-m3 embeddings.
+        D1: Raises EmbeddingUnavailableError if embedding service is dummy.
         Returns number of points upserted.
         """
         if not chunks:
             return 0
 
-        points = []
-        for chunk in chunks:
-            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{chunk.doc_hash}:{chunk.version}:{chunk.source_block_ids}"))
+        if self._embedding_service.is_dummy:
+            raise EmbeddingUnavailableError(
+                "Cannot upsert: EmbeddingService is in dummy mode. "
+                "Model files missing or failed to load. "
+                "Check rag/models/bge-m3/ and audit log."
+            )
 
+        texts = [c.text for c in chunks]
+        encoded = self._embedding_service.encode(texts)
+
+        points = []
+        for chunk, vec in zip(chunks, encoded):
+            point_id = str(uuid.uuid5(
+                uuid.NAMESPACE_DNS,
+                f"{chunk.doc_hash}:{chunk.version}:{chunk.source_block_ids}",
+            ))
+            sparse_qdrant = self._embedding_service.to_qdrant_sparse(vec.sparse)
             payload = {
                 "text": chunk.text,
                 "scope_path": chunk.scope_path,
@@ -90,16 +152,15 @@ class QdrantManager:
                 "version": chunk.version,
                 "page_numbers": chunk.page_numbers,
             }
-
             points.append(models.PointStruct(
                 id=point_id,
                 vector={
-                    "dense": [0.0] * self._vector_size,  # Phase 1: dummy
+                    "dense": vec.dense,
+                    "sparse": sparse_qdrant,
                 },
                 payload=payload,
             ))
 
-        # Batch upsert in groups of 100
         batch_size = 100
         for i in range(0, len(points), batch_size):
             batch = points[i:i + batch_size]
@@ -108,8 +169,10 @@ class QdrantManager:
                 points=batch,
             )
 
-        logger.info("Upserted %d chunks for doc %s v%d",
-                     len(points), chunks[0].doc_hash, chunks[0].version)
+        logger.info(
+            "Upserted %d chunks for doc %s v%d (bge-m3 dense+sparse)",
+            len(points), chunks[0].doc_hash, chunks[0].version,
+        )
         return len(points)
 
     def get_ingestion_status(self, doc_hash: str) -> Optional[IngestionStatus]:
@@ -129,11 +192,8 @@ class QdrantManager:
                 with_payload=True,
                 with_vectors=False,
             )
-
             if not results:
                 return None
-
-            # Get count
             count_result = self._client.count(
                 collection_name=self._collection_name,
                 count_filter=models.Filter(
@@ -145,9 +205,7 @@ class QdrantManager:
                     ],
                 ),
             )
-
             version = results[0].payload.get("version", 0)
-
             return IngestionStatus(
                 status="success",
                 chunks_indexed=count_result.count,
@@ -163,40 +221,65 @@ class QdrantManager:
 
     def search(
         self,
-        query_vector: list[float],
+        query_text: str,
         top_k: int = 40,
         score_threshold: Optional[float] = None,
     ) -> list[tuple[dict, float]]:
-        """Search collection by dense vector.
+        """Hybrid search by query text. B1 fix: uses query_points (1.17.1).
 
-        Args:
-            query_vector: Dense vector to search with.
-            top_k: Number of results to return.
-            score_threshold: Minimum cosine similarity score.
-
-        Returns:
-            List of (payload_dict, score) tuples.
+        Encodes query via EmbeddingService, then query_points with
+        Prefetch (dense + sparse) + FusionQuery(RRF). Preserves 6A's
+        SearchParams(hnsw_ef=128) optimization for HNSW recall quality.
         """
-        from qdrant_client import models
+        if self._embedding_service.is_dummy:
+            # Critical gap fix: log WARN so operator sees silent empty results
+            # in dev/CI without confusing them with production empty queries.
+            logger.warning(
+                "search() returning []: EmbeddingService is in dummy mode. "
+                "Model files missing or failed to load. "
+                "Check rag/models/bge-m3/ and audit log."
+            )
+            return []  # Safe degradation; no match possible
 
-        search_params = models.SearchParams(hnsw_ef=128)
-        results = self._client.search(
+        encoded = self._embedding_service.encode([query_text])[0]
+        sparse_qdrant = self._embedding_service.to_qdrant_sparse(encoded.sparse)
+
+        results = self._client.query_points(
             collection_name=self._collection_name,
-            query_vector=("dense", query_vector),
+            prefetch=[
+                models.Prefetch(
+                    query=encoded.dense,
+                    using="dense",
+                    limit=top_k,
+                ),
+                models.Prefetch(
+                    query=models.SparseVector(
+                        indices=sparse_qdrant["indices"],
+                        values=sparse_qdrant["values"],
+                    ),
+                    using="sparse",
+                    limit=top_k,
+                ),
+            ],
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
             limit=top_k,
-            score_threshold=score_threshold,
-            search_params=search_params,
             with_payload=True,
             with_vectors=False,
+            score_threshold=score_threshold,
+            # Preserve 6A Task 8 commit 033a8a3 HNSW quality optimization.
+            # hnsw_ef=128 raises HNSW search beam width for better recall
+            # at small perf cost. Inherited by both prefetches.
+            search_params=models.SearchParams(hnsw_ef=128),
         )
-        return [(hit.payload, hit.score) for hit in results]
+        return [(hit.payload, hit.score) for hit in results.points]
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(min=2, max=10),
+    )
     def delete_old_versions(self, doc_hash: str, keep_version: int) -> int:
-        """Delete Qdrant points for old versions of a document.
-
-        Returns number of deleted points.
-        """
+        """Delete Qdrant points for old versions of a document."""
         self._client.delete(
             collection_name=self._collection_name,
             points_selector=models.FilterSelector(
@@ -216,4 +299,4 @@ class QdrantManager:
             ),
         )
         logger.info("Deleted old versions of %s keeping v%d", doc_hash, keep_version)
-        return 0  # Qdrant delete doesn't return count directly
+        return 0
