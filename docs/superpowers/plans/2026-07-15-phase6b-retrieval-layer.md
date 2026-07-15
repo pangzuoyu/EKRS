@@ -321,7 +321,14 @@ class EncodedVector:
 
 def _load_flag_model(model_dir: Path):
     """Load BGEM3FlagModel. Imported lazily to keep module importable without FlagEmbedding installed."""
-    from FlagEmbedding import BGEM3FlagModel  # type: ignore
+    try:
+        from FlagEmbedding import BGEM3FlagModel  # type: ignore
+    except ImportError as e:
+        raise ImportError(
+            "FlagEmbedding is required for EmbeddingService but not installed. "
+            "Run: pip install 'FlagEmbedding==1.2.13' "
+            "(also requires onnxruntime>=1.15,<1.18 and numpy<2.0)."
+        ) from e
     return BGEM3FlagModel(model_name_or_path=str(model_dir), use_fp16=False)
 
 
@@ -848,7 +855,8 @@ class QdrantManager:
                 raise RuntimeError(
                     f"Collection {self._collection_name} dim={existing_size} "
                     f"does not match expected {vector_size}. "
-                    f"Set AUTO_REINDEX=true to allow automatic recreation."
+                    f"Recovery: set AUTO_REINDEX=true in .env to automatically "
+                    f"rebuild, OR manually delete and recreate via Qdrant UI/API."
                 )
             logger.warning(
                 "Collection %s has dim=%d, need %d — recreating",
@@ -1581,18 +1589,30 @@ qdrant_manager = QdrantManager(host=settings.QDRANT_HOST, port=settings.QDRANT_G
 
 # 新:
 import asyncio
+import logging
 from ekrs_rag.retrieval.embedding_service import EmbeddingService
 from ekrs_rag.retrieval.qdrant_client import QdrantManager
 
-embedding_service = EmbeddingService()
-qdrant_manager = QdrantManager(
-    host=settings.QDRANT_HOST,
-    port=settings.QDRANT_GRPC_PORT,
-    embedding_service=embedding_service,
-    auto_reindex=settings.AUTO_REINDEX,
-)
-# D4: rebuild collection (if dim mismatch) in lifespan, before serve
-await asyncio.to_thread(qdrant_manager.ensure_collection)
+logger = logging.getLogger(__name__)
+
+try:
+    embedding_service = EmbeddingService()
+    qdrant_manager = QdrantManager(
+        host=settings.QDRANT_HOST,
+        port=settings.QDRANT_GRPC_PORT,
+        embedding_service=embedding_service,
+        auto_reindex=settings.AUTO_REINDEX,
+    )
+    # D4: rebuild collection (if dim mismatch) in lifespan, before serve
+    await asyncio.to_thread(qdrant_manager.ensure_collection)
+except Exception as e:
+    logger.exception(
+        "RAG service startup failed during Qdrant/Embedding init: %s. "
+        "Check Qdrant reachability, model files, and AUTO_REINDEX setting.",
+        e,
+    )
+    raise  # FastAPI lifespan will record startup failure
+
 app.state.embedding_service = embedding_service
 app.state.qdrant_manager = qdrant_manager
 ```
@@ -1607,7 +1627,18 @@ rm rag/ekrs_rag/retrieval/embedder.py
 rm rag/tests/unit/test_embedder.py
 ```
 
-**Step 4.5: 运行全测试套件**
+**Step 4.5: 验证 retriever 测试通过(必跑,用户反馈点 1)**
+
+```bash
+cd /home/pangzy/code_project/EKRS/rag
+pytest tests/unit/test_retriever.py -v
+```
+
+Expected: 全部 PASS(retriever 测试已 mock QdrantManager,新签名兼容)。
+
+**若失败**:retriever 测试的 mock 可能依赖旧 `qdrant.search(query_vector=...)` 签名,需同步更新为 `qdrant.search(query_text=...)`,调整 mock 返回值为 `query_points` 格式(SimpleNamespace(points=[SimpleNamespace(payload={...}, score=...)]))。这是 T4 范围内的小改动,无需新增任务。
+
+**Step 4.6: 运行全测试套件**
 
 ```bash
 cd /home/pangzy/code_project/EKRS/rag
@@ -1615,16 +1646,6 @@ pytest tests/ --cov=ekrs_rag --cov-fail-under=85 -q 2>&1 | tail -15
 ```
 
 Expected: 531 + (T2 9 + T3 11) - (旧 test_embedder.py 6 例) = ~545 passed;≥85% coverage
-
-**Step 4.6: 验证 retriever 测试通过**
-
-`rag/tests/unit/test_retriever.py`(已存在,自动适配):
-```bash
-cd /home/pangzy/code_project/EKRS/rag
-pytest tests/unit/test_retriever.py -v
-```
-
-Expected: PASS(retriever 测试已 mock QdrantManager,新签名兼容)
 
 **Step 4.7: Commit**
 
@@ -1676,14 +1697,19 @@ Requires rag/models/bge-m3/ files (T1 vendored).
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 import pytest
 
-from ekrs_rag.retrieval.embedding_service import EmbeddingService
+from ekrs_rag.retrieval.embedding_service import (
+    DEFAULT_MODEL_DIR,
+    EmbeddingService,
+)
 
 
-MODEL_DIR = Path(__file__).parent.parent.parent / "models" / "bge-m3"
+# BGE_M3_MODEL_DIR env var overrides default for CI flexibility
+MODEL_DIR = Path(os.environ.get("BGE_M3_MODEL_DIR", str(DEFAULT_MODEL_DIR)))
 
 
 @pytest.mark.heavy
@@ -1889,6 +1915,13 @@ Phase 6B 起,嵌入从 bge-small-en (384d) 切换到 bge-m3 (1024d + sparse),Qdr
 4. **监控**:首 24h 关注 `qdrant_write_failed` 审计事件(语义已放宽,见 §16)。
 
 **生产部署**:`AUTO_REINDEX=false` 显式禁止 dim 自动重建,要求 operator 手动确认数据迁移窗口。
+
+**AUTO_REINDEX=false 时的恢复步骤**(用户反馈点 3):
+- 启动时 lifespan 抛 `RuntimeError: Collection ... dim=N does not match expected 1024.`
+- 日志同时输出:`Set AUTO_REINDEX=true in .env to automatically rebuild the collection, OR manually delete and recreate it via Qdrant UI/API.`
+- 运维人员选择:
+  - (a) 临时方案:设 `AUTO_REINDEX=true`,重启服务(lifespan 重建)
+  - (b) 永久方案:经业务方确认数据可重建后,通过 Qdrant REST API `DELETE /collections/rag_documents` + `POST /collections/rag_documents`(用 bge-m3 config)
 ```
 
 **Step 6.6: 更新 handbook §14(依赖清单)**
@@ -1904,7 +1937,10 @@ numpy (>=1.24.0,<2.0.0) — FlagEmbedding 依赖(锁定 1.x API)
 
 `ekrs-handbook.md` §16 审计日志段,修改为:
 ```markdown
-**16 个事件名/schema 不可变更**:...(省略)... `qdrant_write_failed` (语义 Phase 6B 起放宽:覆盖 Qdrant 任何操作失败 read/write/delete/upsert/scroll,payload 含 `operation: str` 区分)。...
+**16 个事件名/schema 不可变更**:...(省略)... `qdrant_write_failed` (语义 Phase 6B 起放宽:覆盖 Qdrant 任何操作失败 read/write/delete/upsert/scroll,payload 含 `operation: str` 字段区分 read/write)。**back-compat 提示**:现有审计消费者(如监控脚本)需兼容 `operation` 字段缺失的情况——Phase 6A 之前的事件无此字段,Phase 6B 起的失败事件携带。监控脚本应:
+- 处理新事件时优先用 `operation` 字段(若存在)
+- 处理老事件时默认 `operation="write"`(Phase 6A 之前只有写入失败)
+- 不要硬要求 `operation` 字段存在(用 `.get("operation", "write")`)
 ```
 
 **Step 6.8: 更新 progress.md 加 6B 状态**
