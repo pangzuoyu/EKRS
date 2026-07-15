@@ -31,10 +31,12 @@
 
 ### 新增文件
 - `rag/ekrs_rag/retrieval/embedding_service.py` — `EmbeddingService` + `EncodedVector` + `EmbeddingUnavailableError`
-- `rag/models/bge-m3/model_optimized.onnx` — vendor(~2GB)
-- `rag/models/bge-m3/sentencepiece.bpe.model` — vendor(1MB)
+- `rag/models/bge-m3/model.onnx` — vendor graph header (708KB; ONNX 2GB limit 强制 split 格式)
+- `rag/models/bge-m3/model.onnx_data` — vendor external weights (2.11 GiB)
+- `rag/models/bge-m3/sentencepiece.bpe.model` — vendor(5MB)
+- `rag/models/bge-m3/tokenizer.json` — vendor(17MB,HF Fast tokenizer)
 - `rag/models/bge-m3/config.json` — vendor(2KB)
-- `rag/models/bge-m3/bge-m3.sha256` — 校验文件
+- `rag/models/bge-m3/bge-m3.sha256` — 校验文件(8 行)
 - `rag/tests/unit/test_embedding_service.py` — 9 例单元测试
 - `rag/tests/integration/test_embedding_heavy.py` — 2 例 heavy 集成测试
 - `.github/workflows/heavy-tests.yml` — nightly heavy job
@@ -345,7 +347,7 @@ class EmbeddingService:
 
     def _load(self) -> None:
         """Load model or fall back to dummy mode."""
-        onnx_path = self._model_dir / "model_optimized.onnx"
+        onnx_path = self._model_dir / "model.onnx"
         sha_path = self._model_dir / "bge-m3.sha256"
         if not onnx_path.exists():
             logger.warning("ONNX model not found at %s, using dummy embedder", onnx_path)
@@ -535,9 +537,9 @@ Expected: 5/5 PASS
 ```python
 def test_sha256_mismatch_raises_runtime_error(tmp_path: Path) -> None:
     """SHA256 mismatch raises RuntimeError, does NOT fall back to dummy (D1)."""
-    (tmp_path / "model_optimized.onnx").write_bytes(b"fake model")
+    (tmp_path / "model.onnx").write_bytes(b"fake model")
     (tmp_path / "bge-m3.sha256").write_text(
-        "0000000000000000000000000000000000000000000000000000000000000000  model_optimized.onnx\n"
+        "0000000000000000000000000000000000000000000000000000000000000000  model.onnx\n"
     )
 
     with pytest.raises(RuntimeError, match="SHA256 mismatch"):
@@ -601,7 +603,7 @@ Expected: 8/8 PASS
 ```python
 def test_is_dummy_when_onnx_load_fails(tmp_path: Path) -> None:
     """If FlagEmbedding load raises, is_dummy=True (graceful fallback)."""
-    (tmp_path / "model_optimized.onnx").write_bytes(b"x")
+    (tmp_path / "model.onnx").write_bytes(b"x")
     # No sha256 file = skip check; load will fail
     with patch(
         "ekrs_rag.retrieval.embedding_service._load_flag_model",
@@ -997,9 +999,17 @@ class QdrantManager:
         """Hybrid search by query text. B1 fix: uses query_points (1.17.1).
 
         Encodes query via EmbeddingService, then query_points with
-        Prefetch (dense + sparse) + FusionQuery(RRF).
+        Prefetch (dense + sparse) + FusionQuery(RRF). Preserves 6A's
+        SearchParams(hnsw_ef=128) optimization for HNSW recall quality.
         """
         if self._embedding_service.is_dummy:
+            # Critical gap fix: log WARN so operator sees silent empty results
+            # in dev/CI without confusing them with production empty queries.
+            logger.warning(
+                "search() returning []: EmbeddingService is in dummy mode. "
+                "Model files missing or failed to load. "
+                "Check rag/models/bge-m3/ and audit log."
+            )
             return []  # Safe degradation; no match possible
 
         encoded = self._embedding_service.encode([query_text])[0]
@@ -1027,6 +1037,10 @@ class QdrantManager:
             with_payload=True,
             with_vectors=False,
             score_threshold=score_threshold,
+            # Preserve 6A Task 8 commit 033a8a3 HNSW quality optimization.
+            # hnsw_ef=128 raises HNSW search beam width for better recall
+            # at small perf cost. Inherited by both prefetches.
+            search_params=models.SearchParams(hnsw_ef=128),
         )
         return [(hit.payload, hit.score) for hit in results.points]
 
@@ -1366,17 +1380,123 @@ pytest tests/unit/test_qdrant_client.py -v
 
 Expected: 10/10 PASS
 
-**Step 3.23: 写失败测试 11 — 验证旧 BGESmallEmbedder 测试已被删除**
+**Step 3.23: 写失败测试 11 — `test_search_passes_search_params_hnsw_ef`**
 
-```bash
-cd /home/pangzy/code_project/EKRS
-test -f rag/ekrs_rag/retrieval/embedder.py && echo "FAIL: old embedder.py still exists" || echo "OK: embedder.py removed"
-test -f rag/tests/unit/test_embedder.py && echo "FAIL: old test_embedder.py still exists" || echo "OK: test_embedder.py removed"
+(经 gstack-plan-eng-review P1 fix:原 Step 3.23 误排在 T3 但实际是 T4 删除验证,移到 T4 Step 4.4a;此处替换为 6A SearchParams(hnsw_ef=128) 优化保留验证)
+
+```python
+def test_search_passes_search_params_hnsw_ef(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """B1 fix: search uses query_points with SearchParams(hnsw_ef=128) for HNSW quality (6A Task 8)."""
+    client = _make_qdrant(existing_size=1024)
+    client.query_points.return_value = SimpleNamespace(points=[])
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        mgr.search(query_text="q", top_k=3)
+
+    call_kwargs = client.query_points.call_args.kwargs
+    # Preserve 6A Task 8 commit 033a8a3 optimization
+    assert call_kwargs["search_params"].hnsw_ef == 128
 ```
 
-Expected: `OK: embedder.py removed` + `OK: test_embedder.py removed`(实际 T4 才删,T3 暂留)
+**Step 3.24: 运行测试 11 验证通过**
 
-**Step 3.24: 验证完整套件不破**
+```bash
+cd /home/pangzy/code_project/EKRS/rag
+pytest tests/unit/test_qdrant_client.py::test_search_passes_search_params_hnsw_ef -v
+```
+
+Expected: PASS
+
+**Step 3.25: 写失败测试 12 — `test_get_ingestion_status_returns_indexed_count`**
+
+(经 gstack-plan-eng-review P1 fix:原 6A 测试覆盖的方法被 rewrite 丢失,补回)
+
+```python
+def test_get_ingestion_status_returns_indexed_count(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """get_ingestion_status returns chunks_indexed count for a doc_hash."""
+    client = _make_qdrant(existing_size=1024)
+    # Mock scroll returning one match
+    client.scroll.return_value = (
+        [SimpleNamespace(payload={"version": 2})],
+        None,  # next_page_offset
+    )
+    # Mock count returning N
+    client.count.return_value = SimpleNamespace(count=42)
+
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        status = mgr.get_ingestion_status(doc_hash="abc123")
+
+    assert status.status == "success"
+    assert status.chunks_indexed == 42
+    assert status.version == 2
+```
+
+**Step 3.26: 写失败测试 13 — `test_delete_old_versions_calls_delete`**
+
+```python
+def test_delete_old_versions_calls_delete(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """delete_old_versions issues a FilterSelector delete for keep_version."""
+    client = _make_qdrant(existing_size=1024)
+
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        mgr.delete_old_versions(doc_hash="abc", keep_version=3)
+
+    client.delete.assert_called_once()
+    selector = client.delete.call_args.kwargs["points_selector"]
+    # Filter has must-not version != keep_version
+    must = selector.filter.must
+    keys = [c.key for c in must]
+    assert "doc_hash" in keys
+    assert "version" in keys
+```
+
+**Step 3.27: 写失败测试 14 — `test_search_logs_warning_when_dummy`**
+
+(经 gstack-plan-eng-review critical gap fix: dummy-mode search silently returns []; add WARN log + test)
+
+```python
+import logging
+
+def test_search_logs_warning_when_dummy(
+    dummy_embedding_service: EmbeddingService, caplog: pytest.LogCaptureFixture
+) -> None:
+    """search() in dummy mode logs WARN so operators see silent empty results."""
+    client = _make_qdrant(existing_size=1024)
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=dummy_embedding_service
+        )
+        with caplog.at_level(logging.WARNING, logger="ekrs_rag.retrieval.qdrant_client"):
+            results = mgr.search(query_text="q", top_k=5)
+
+    assert results == []
+    assert any("dummy mode" in rec.message for rec in caplog.records)
+```
+
+**Step 3.28: 运行全部 14 测试**
+
+```bash
+cd /home/pangzy/code_project/EKRS/rag
+pytest tests/unit/test_qdrant_client.py -v
+```
+
+Expected: 14/14 PASS
+
+**Step 3.29: 验证完整套件不破**
 
 ```bash
 cd /home/pangzy/code_project/EKRS/rag
@@ -1385,7 +1505,7 @@ pytest tests/ --cov=ekrs_rag -q 2>&1 | tail -10
 
 Expected: 现有 531 测试可能因 BGESmallEmbedder 删除而失败(retriever.py 还在 import)— 接受失败,继续 T4。
 
-**Step 3.25: Commit**
+**Step 3.30: Commit**
 
 ```bash
 cd /home/pangzy/code_project/EKRS
@@ -1394,7 +1514,8 @@ git -c user.email=pangzy@anthropic.local -c user.name=pangzy commit -m "fix(retr
 
 B1: search() now uses query_points() — QdrantClient.search was REMOVED
     in qdrant-client 1.17.1. query_points supports hybrid search via
-    Prefetch (dense + sparse) + FusionQuery(RRF).
+    Prefetch (dense + sparse) + FusionQuery(RRF). Preserves 6A Task 8
+    SearchParams(hnsw_ef=128) optimization for HNSW recall quality.
 
 B2: ensure_collection reads existing.config.params.vectors[\"dense\"].size
     (1.17.1 path); old vectors_config[\"dense\"].size no longer exists.
@@ -1405,7 +1526,8 @@ B3: upsert_chunks now takes injected EmbeddingService; encodes chunk.text
 
 D1 hardening: upsert_chunks raises EmbeddingUnavailableError when
 EmbeddingService is in dummy mode (prevents silent data corruption).
-Search degrades gracefully to empty results in dummy mode (read-only safe).
+Search degrades gracefully to empty results + WARN log in dummy mode
+(operators see silent empty results during dev/CI).
 
 D4: ensure_collection honors auto_reindex=True/False (AUTO_REINDEX env).
 False (production) raises on dim mismatch instead of silent recreate.
@@ -1413,11 +1535,11 @@ False (production) raises on dim mismatch instead of silent recreate.
 D7: query failures now log operation type to qdrant_write_failed event
 (semantic broadened per 6B spec D7).
 
-11 unit tests cover: ensure_collection (3), upsert_chunks (4), search (3),
-error handling (1)."
+14 unit tests cover: ensure_collection (4), upsert_chunks (4), search (4),
+get_ingestion_status (1), delete_old_versions (1)."
 ```
 
-Expected: 1 commit, ~350 LOC.
+Expected: 1 commit, ~400 LOC.
 
 ---
 
@@ -1566,19 +1688,13 @@ class EKRSRetriever:
         return chunk_scope[: len(active_scope)] == active_scope
 ```
 
-**Step 4.2: 修改 dependencies.py — 加 `get_embedding_service`**
+**Step 4.2: YAGNI — 不添加 `get_embedding_service` Depends**
 
-`rag/ekrs_rag/api/dependencies.py`(在文件末尾追加):
-```python
-def get_embedding_service() -> "EmbeddingService":
-    """Get the EmbeddingService from app state. Strict 503 if uninitialized."""
-    from fastapi import HTTPException, Request
-    from ekrs_rag.retrieval.embedding_service import EmbeddingService
-    # The actual app.state lookup happens in route handler via request.app
-    raise NotImplementedError("Use request.app.state.embedding_service directly")
-```
+经 Phase 6B gstack-plan-eng-review 评审(P1 finding):Phase 6A 中 `get_retriever`/`get_audit_index`/`get_pipeline`/`get_redis_lock`/`get_task_repo` 5 个 Depends 都有真正的 `app.state` 查找逻辑;EmbeddingService 的实际使用方是 `QdrantManager.__init__`(构造期注入,不是 per-request 获取)。route handlers 仅在 lifespan 一次性 set,无 per-request 获取需求。
 
-(实际是 import 即可,具体使用见 main.py 4.5)
+**结论**:删除 `get_embedding_service` Depends。Callers 仍可 `request.app.state.embedding_service` 直接访问(FastAPI 标准模式),无需 Depends 包装。
+
+`rag/ekrs_rag/api/dependencies.py` 在 6B 中**不做修改**。
 
 **Step 4.3: 修改 main.py — lifespan 注入**
 
@@ -1626,6 +1742,39 @@ cd /home/pangzy/code_project/EKRS
 rm rag/ekrs_rag/retrieval/embedder.py
 rm rag/tests/unit/test_embedder.py
 ```
+
+**Step 4.4a: 验证旧 BGESmallEmbedder 测试已删除**(gstack-plan-eng-review P1 fix)
+
+```bash
+cd /home/pangzy/code_project/EKRS
+test -f rag/ekrs_rag/retrieval/embedder.py && echo "FAIL: old embedder.py still exists" || echo "OK: embedder.py removed"
+test -f rag/tests/unit/test_embedder.py && echo "FAIL: old test_embedder.py still exists" || echo "OK: test_embedder.py removed"
+```
+
+Expected: `OK: embedder.py removed` + `OK: test_embedder.py removed`
+
+**Step 4.4b: 全仓 grep 旧 mock 签名**(gstack-plan-eng-review P1 fix)
+
+T3 改 `qdrant.search(query_text=...)`,但其他测试文件可能 mock 旧 `query_vector=` 签名。在 T4 提交前 grep 全部潜在受影响位置:
+
+```bash
+cd /home/pangzy/code_project/EKRS
+echo "=== Files mocking qdrant.search() ==="
+grep -rn "qdrant.search\|qdrant_manager.search\|_qdrant.search" rag/tests/ rag/ekrs_rag/ | grep -v ".pyc"
+echo "=== Files using query_vector (old signature) ==="
+grep -rn "query_vector" rag/tests/ rag/ekrs_rag/ | grep -v ".pyc"
+echo "=== Files importing BGESmallEmbedder or embedder module ==="
+grep -rn "BGESmallEmbedder\|from .embedder\|from ekrs_rag.retrieval.embedder" rag/tests/ rag/ekrs_rag/ | grep -v ".pyc"
+```
+
+Expected output:
+- 第 1 段: 仅 `retriever.py` 与 `test_retriever.py`(已知)+ `test_qdrant_client.py` mock
+- 第 2 段: 0 hits(全部迁移到 query_text)
+- 第 3 段: 0 hits(embedder.py 已删除)
+
+**若第 1 段有未预期文件**:在 T4 范围内同步更新 mock 返回值为 `SimpleNamespace(points=[SimpleNamespace(payload={...}, score=...)])`,无新增任务。
+
+**Step 4.5: 验证 retriever 测试通过(必跑,用户反馈点 1)**
 
 **Step 4.5: 验证 retriever 测试通过(必跑,用户反馈点 1)**
 
@@ -2090,7 +2239,7 @@ Expected: 1 tag pointing at HEAD(T6 commit)
 
 6. **Coverage gate**:
    - T2: 9 新单测 100% 覆盖 EmbeddingService
-   - T3: 11 新单测 100% 覆盖 QdrantManager 重写部分
+   - T3: 14 新单测 100% 覆盖 QdrantManager 重写部分 (经 gstack-plan-eng-review P1 fix:从 11 增至 14,补 SearchParams + 2 inherited methods + WARN log test)
    - T4: 删除 6 个旧测试(test_embedder.py)→ denominator 减
    - 末态预估:87-88% ≥ 85% gate ✓
 
@@ -2110,3 +2259,49 @@ Two execution options:
 
 1. **Subagent-Driven (recommended)** — I dispatch a fresh subagent per task (T1-T6), review between tasks, fast iteration. T1 is special (binary vendor, no TDD).
 2. **Inline Execution** — Execute tasks in this session using executing-plans, batch execution with checkpoints.
+
+---
+
+## GSTACK REVIEW REPORT
+
+**Reviewer:** gstack-plan-eng-review (2026-07-15)
+**Plan commit base:** `8fc1393`
+**Verdict:** REVIEWED — 5 P1 findings + 1 critical gap addressed inline
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | not run (backend-only refactor + embedder upgrade) |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | skipped (plan already user-reviewed 8+6 points) |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | issues_open | 14 issues, 1 critical gap |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | not run (no UI changes; backend retrieval only) |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | not run (DX impact minimal; mock+heavy strategy acceptable) |
+
+- **CROSS-MODEL:** n/a (Codex skipped)
+- **UNRESOLVED:** 0 (all P1s fixed inline per user decision; 1 critical gap fixed inline)
+- **VERDICT:** ENG CLEARED (after 5 P1 + 1 critical-gap fixes) — ready to implement
+
+### Findings summary (14 issues, 1 critical gap)
+
+**P1 (5) — all fixed inline:**
+1. ~~`get_embedding_service` NotImplementedError stub (T4.2)~~ → deleted (YAGNI; callers use `request.app.state.embedding_service`)
+2. ~~T3 Step 3.23 misordered (tested removal before T4)~~ → moved to T4 Step 4.4a
+3. ~~Drop of 6A `SearchParams(hnsw_ef=128)`~~ → restored in T3.3 + test added (T3.23)
+4. ~~`get_ingestion_status` / `delete_old_versions` no tests~~ → 2 tests added (T3.25, T3.26)
+5. ~~Hidden mock risk across test files~~ → grep step added (T4.4b)
+
+**P2 (4) — documented for awareness, not fixed in plan:**
+- `except Exception` in ensure_collection masks network errors → fix in code, not plan
+- Multi-worker uvicorn 2GB×N model loading → fix in code with singleton or doc warning
+- Lifespan integration test missing → Phase 6C follow-up (requires docker-compose fixture)
+- Audit back-compat (old events without `operation`) documented but not tested → consumer-side responsibility
+
+**P3 (2) — accepted as-is:**
+- `DEFAULT_MODEL_DIR` fragile path → minor; tests override via env var
+- SHA256 verify 5-10s on startup → acceptable trade-off for safety
+
+**Critical gap (1) — fixed inline:**
+- ~~Silent empty search in dummy mode~~ → WARN log added (T3.3 search method) + test added (T3.27)
+
+### Lake Score: 9/10 chose complete option
+
+One batch edit closed all blockers. Plan is ready for Subagent-Driven execution.

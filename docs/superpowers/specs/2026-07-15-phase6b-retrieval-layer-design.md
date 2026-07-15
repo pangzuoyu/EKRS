@@ -77,7 +77,7 @@ class EmbeddingService:
 ```
 
 **加载流程**:
-1. 校验 `model_dir/model_optimized.onnx` 与 `bge-m3.sha256` 一致(SHA256 校验),**校验失败直接 raise RuntimeError,不允许进入 dummy 模式**(用户反馈点 4)
+1. 校验 `model_dir/model.onnx` 与 `bge-m3.sha256` 一致(ONNX 2GB 限制强制 split 格式;header + `_data` 文件均需存在,SHA256 校验失败直接 raise RuntimeError,不允许进入 dummy 模式**(用户反馈点 4)
 2. 加载 ONNX session;FlagEmbedding 框架初始化
 3. 失败 → 标记 `is_dummy=True`,日志 WARN
 
@@ -99,7 +99,7 @@ class EmbeddingService:
 
 ### D3: 模型供给(已决)
 **预下载 vendor 进仓**,路径 `rag/models/bge-m3/`:
-- `model_optimized.onnx`(bge-m3 ONNX,~2GB)
+- `model.onnx` + `model.onnx_data`(bge-m3 ONNX,708KB header + 2.11 GiB weights;split 格式因 ONNX 2GB 文件大小限制)
 - `sentencepiece.bpe.model`(tokenizer,1MB)
 - `config.json`(模型配置,~2KB)
 - `bge-m3.sha256`(校验文件)
@@ -185,7 +185,7 @@ def to_qdrant_sparse(self, sparse: dict[int, float]) -> dict:
 | 路径 | 用途 |
 |------|------|
 | `rag/ekrs_rag/retrieval/embedding_service.py` | `EmbeddingService` facade + `EncodedVector` dataclass |
-| `rag/models/bge-m3/model_optimized.onnx` | bge-m3 ONNX 模型(~2GB,vendor) |
+| `rag/models/bge-m3/model.onnx` + `model.onnx_data` | bge-m3 ONNX 图节点(708KB)+ 外部权重(2.11 GiB;vendor,因 ONNX 2GB 文件大小限制拆 split) |
 | `rag/models/bge-m3/sentencepiece.bpe.model` | bge-m3 tokenizer(1MB,vendor) |
 | `rag/models/bge-m3/config.json` | 模型配置(2KB,vendor) |
 | `rag/models/bge-m3/bge-m3.sha256` | 校验文件 |
@@ -340,11 +340,11 @@ jobs:
 ### 模型 vendor 步骤(T1)
 
 1. 在 HF 下载 `BAAI/bge-m3` 的 ONNX 导出:
-   - `model_optimized.onnx`(2GB)
+   - `model.onnx` + `model.onnx_data`(2.11 GiB;因 ONNX 2GB 文件大小限制拆 split)
    - `sentencepiece.bpe.model`
    - `config.json`
 2. 计算 sha256,写入 `bge-m3.sha256`
-3. 验证 ONNX 可用:`python -c "import onnxruntime as ort; ort.InferenceSession('rag/models/bge-m3/model_optimized.onnx', providers=['CPUExecutionProvider'])"` 加载成功
+3. 验证 ONNX 可用:`python -c "import onnxruntime as ort; ort.InferenceSession('rag/models/bge-m3/model.onnx', providers=['CPUExecutionProvider'])"` 加载成功
 4. 复制到 `rag/models/bge-m3/`
 5. 更新 `.gitignore`(移除例外排除,确认 `rag/models/bge-m3/` 不被 ignore)
 6. **单独 commit**(模型二进制与代码分离审查,便于后续 reviewer 评估是否需要 LFS 迁移)
