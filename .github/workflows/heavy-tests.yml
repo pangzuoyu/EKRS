@@ -22,8 +22,11 @@ jobs:
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-heavy-${{ hashFiles('rag/pyproject.toml') }}
-      - run: python -m pip install -e shared/ -e 'rag[dev]'
-      - run: pip install "FlagEmbedding==1.2.13" "onnxruntime>=1.15.0,<1.18.0" "numpy>=1.24.0,<2.0.0"
+      - run: |
+          python -m pip install -e shared/ -e 'rag[dev]' \
+            "FlagEmbedding==1.2.13" \
+            "onnxruntime>=1.15.0,<1.18.0" \
+            "numpy>=1.24.0,<2.0.0"
       - name: Run heavy tests (real bge-m3)
         run: |
           cd rag

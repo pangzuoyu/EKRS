@@ -14,10 +14,22 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import httpx
 from qdrant_client import models
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from ekrs_rag.retrieval.embedding_service import EmbeddingService
 from ekrs_rag.retrieval.qdrant_client import QdrantManager
+
+
+def _qdrant_not_found_exc() -> UnexpectedResponse:
+    """Mimic the exception Qdrant raises for a missing collection (HTTP 404)."""
+    return UnexpectedResponse(
+        status_code=404,
+        reason_phrase="Not Found",
+        content=b"",
+        headers=httpx.Headers(),
+    )
 
 
 @pytest.fixture
@@ -44,7 +56,11 @@ def _make_qdrant(existing_size: int | None = None) -> MagicMock:
     """Build mock QdrantClient that returns CollectionInfo with given size."""
     client = MagicMock()
     if existing_size is None:
-        client.get_collection.side_effect = Exception("not found")
+        # 6C-minor Finding 3: ensure_collection now narrows the inner except
+        # to UnexpectedResponse/ApiException/ValueError/KeyError/AttributeError,
+        # so the mock must raise UnexpectedResponse (the real 404 path) rather
+        # than a bare Exception.
+        client.get_collection.side_effect = _qdrant_not_found_exc()
     else:
         # B2 fix: real path is config.params.vectors["dense"].size
         info = SimpleNamespace(
@@ -324,11 +340,36 @@ def test_delete_old_versions_calls_delete(
 
     client.delete.assert_called_once()
     selector = client.delete.call_args.kwargs["points_selector"]
-    # Filter has must-not version != keep_version
-    must = selector.filter.must
-    keys = [c.key for c in must]
-    assert "doc_hash" in keys
-    assert "version" in keys
+    # 6C-minor Finding 2: filter inverted bug fix — must pins doc_hash,
+    # must_not excludes the kept version.
+    must_keys = [c.key for c in selector.filter.must]
+    must_not_keys = [c.key for c in selector.filter.must_not]
+    assert "doc_hash" in must_keys
+    assert "version" not in must_keys
+    assert "version" in must_not_keys
+
+
+def test_delete_old_versions_filter_excludes_keep_version(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """6C-minor Finding 2: must_not pins version != keep_version for the doc_hash."""
+    client = _make_qdrant(existing_size=1024)
+
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service
+        )
+        mgr.delete_old_versions(doc_hash="doc-xyz", keep_version=2)
+
+    selector = client.delete.call_args.kwargs["points_selector"]
+    must_conditions = list(selector.filter.must)
+    must_not_conditions = list(selector.filter.must_not)
+    # doc_hash condition lives in must with the value passed in
+    doc_hash_cond = next(c for c in must_conditions if c.key == "doc_hash")
+    assert doc_hash_cond.match.value == "doc-xyz"
+    # keep_version condition lives in must_not with the value passed in
+    version_cond = next(c for c in must_not_conditions if c.key == "version")
+    assert version_cond.match.value == 2
 
 
 def test_search_logs_warning_when_dummy(

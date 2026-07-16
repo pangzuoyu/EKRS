@@ -17,6 +17,7 @@ import uuid
 from typing import Optional
 
 from qdrant_client import QdrantClient, models
+from qdrant_client.http.exceptions import ApiException, UnexpectedResponse
 from tenacity import (
     retry,
     retry_if_not_exception_type,
@@ -94,7 +95,11 @@ class QdrantManager:
                 existing = self._client.get_collection(self._collection_name)
                 # B2 fix: 1.17.1 path is config.params.vectors["dense"].size
                 existing_size = existing.config.params.vectors["dense"].size
-            except Exception:
+            except (UnexpectedResponse, ApiException, ValueError, KeyError, AttributeError):
+                # Collection missing (UnexpectedResponse 404) or response shape
+                # changed; treat as "no existing collection". Other exceptions
+                # (e.g. ConnectionError) bubble up so the outer except can emit
+                # qdrant_write_failed and tenacity can retry.
                 existing_size = None
 
             if existing_size is not None and existing_size != vector_size:
@@ -326,12 +331,13 @@ class QdrantManager:
                                 key="doc_hash",
                                 match=models.MatchValue(value=doc_hash),
                             ),
+                        ],
+                        must_not=[
                             models.FieldCondition(
                                 key="version",
                                 match=models.MatchValue(value=keep_version),
                             ),
                         ],
-                        must_not=[],
                     ),
                 ),
             )
