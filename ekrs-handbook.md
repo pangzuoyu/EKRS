@@ -327,7 +327,7 @@ if strict:
 9. 测试策略
 单元测试：覆盖率 > 85%
 
-黄金集测试：≥20 用例（Phase 6A 实测 42 cases: 13 legacy + 29 Phase 6A from `golden.md`），必须包含：
+黄金集测试：≥20 用例（Phase 6A 实测 42 cases: 13 legacy + 29 Phase 6A，详见 §9.1 用例清单），必须包含：
 
 草案 vs 正式 (is_binding 过滤)
 
@@ -342,6 +342,49 @@ strict 模式拒绝 inferred
 集成测试：Docker Compose 端到端
 
 性能测试：单次求解 <2s，并发 10 P99 <3s
+
+### 9.1 黄金集用例清单（Phase 6A 参考）
+
+**设计原则**
+
+- 覆盖核心铁律：每条铁律（R1‑R8）至少有一个正向和负向用例。
+- 穷举边界：区间开闭、单位换算、时间穿越、状态组合。
+- 可自动化：每个用例提供明确的输入（Hint/文档元数据/API 参数）和期望输出（IR 字段或引擎响应码/区间）。
+- 规模：不少于 25 个用例，覆盖提取（Builder）、过滤、求解、冲突、覆盖层、错误处理六大类。
+
+**用例清单**
+
+| ID | 类别 | 描述 | 输入（关键字段） | 期望输出 |
+|----|------|------|------------------|----------|
+| TC‑BUILDER‑01 | 区间提取 | 闭区间 50 ≤ T ≤ 80 | text: "温度应在50℃至80℃之间" | interval.lower=50, upper=80, lower_inclusive=True, upper_inclusive=True |
+| TC‑BUILDER‑02 | 区间提取 | 开区间 > 50 | text: "温度需大于50℃" | lower=50, upper=None, lower_inclusive=False, upper_inclusive=False |
+| TC‑BUILDER‑03 | 区间提取 | 上界 ≤ 100 | text: "不得超过100 MPa" | lower=None, upper=100, lower_inclusive=False, upper_inclusive=True |
+| TC‑BUILDER‑04 | 区间提取 | 下界 ≥ 60 | text: "至少60 MPa" | lower=60, upper=None, lower_inclusive=True, upper_inclusive=False |
+| TC‑BUILDER‑05 | 区间提取 | 标量值 | text: "压力为1.5 MPa" | lower=1.5, upper=1.5, lower_inclusive=True, upper_inclusive=True |
+| TC‑BUILDER‑06 | 单位换算 | 开尔文 → 摄氏度 | text: "温度 ≤ 300 K"，unit: "K" | interval.upper=26.85, unit="C" （换算后） |
+| TC‑BUILDER‑07 | 单位换算 | MPa → Pa | text: "压力 ≥ 2.5 MPa"，目标单位 "Pa" | interval.lower=2_500_000, unit="Pa" |
+| TC‑BUILDER‑08 | 生命周期 | 征求意见稿（draft） | text: "温度不超过80℃（征求意见稿）"，doc_type="standard" | lifecycle.status="draft", is_binding=False |
+| TC‑BUILDER‑09 | 生命周期 | 审阅意见（review） | text: "建议将温度上限调至70℃"，doc_type="review" | lifecycle.status="review", is_binding=False |
+| TC‑BUILDER‑10 | 生命周期 | 正式标准（active） | doc_meta.status="active"，无特殊文本 | lifecycle.status="active", is_binding=True |
+| TC‑BUILDER‑11 | 生命周期 | 过渡期标准（transitional） | doc_meta.status="transitional"，文本无特殊 | lifecycle.status="transitional", is_binding=True |
+| TC‑BUILDER‑12 | 生命周期 | 已被替代（deprecated） | doc_meta.status="deprecated" | lifecycle.status="deprecated", is_binding=False |
+| TC‑BUILDER‑13 | 条件提取 | 作用域识别 | text: "在高温环境下，温度≤80℃" | conditions=[{"field":"environment","operator":"=","value":"高温"}] |
+| TC‑FILTER‑01 | 过滤 | 只保留 binding 约束 | constraints: 2 条，一条 binding=True，一条 False | 引擎返回仅包含 binding=True 的那条 |
+| TC‑FILTER‑02 | 过滤 | 按状态过滤 active + transitional | filters: {"lifecycle.status": ["active","transitional"]} | 返回仅含这两种状态 |
+| TC‑PRIORITY‑01 | 优先级 | 显式文档约束覆盖推断 | 同一参数，一条 Explicit_Doc (level=80)，一条 Inferred (60) | 使用 Explicit_Doc 的区间，标注来源为文档 |
+| TC‑PRIORITY‑02 | 优先级 | 较新版本覆盖旧版本 | 同一参数，两个文档，有效日期不同 | 选择有效日期更近的（recency_score 更高） |
+| TC‑SCOPE‑01 | 作用域 | 不同作用域独立求解 | 同参数但条件不同（如"高温"vs"低温"） | 各自返回独立区间，不混合 |
+| TC‑OVERLAY‑01 | 覆盖层 | 用户覆盖叠加 | base 区间 [50,80]，overlay [70,90]，mode="intersect" | 最终 [70,80]（交集） |
+| TC‑OVERLAY‑02 | 覆盖层 | 覆盖层替换 | base [50,80]，overlay [70,90]，mode="replace" | 最终 [70,90] |
+| TC‑CONFLICT‑01 | 硬冲突 | 两个 binding 区间无交集 | [0,50] 和 [60,100] | 返回 409，conflict_details 包含双方 provision_id |
+| TC‑CONFLICT‑02 | 软冲突 | binding 与 non‑binding 冲突 | binding [50,80]，non‑binding [70,90] | 取交集 [70,80]，warnings 提示忽略 soft 超出部分 |
+| TC‑STRICT‑01 | 严格模式 | 拒绝 inferred | strict=True，约束中含 inferred=True | 返回 400 missing_context |
+| TC‑STRICT‑02 | 严格模式 | 允许显式约束 | strict=True，所有约束 inferred=False | 正常返回结果 |
+| TC‑EMPTY‑01 | 空结果 | 无匹配约束 | 查询无任何约束召回 | 返回 404 no_constraints_extracted |
+| TC‑RECALL‑01 | 召回不足 | 召回 chunk 数低于 MIN_RECALL_CHUNKS | 仅召回 2 个 chunks（阈值为 5） | 返回 404 insufficient_recall |
+| TC‑TRACE‑01 | 追溯 | 条款历史演变 | provision_id 存在多个版本 | 返回列表，包含每个版本的区间、状态、日期 |
+| TC‑REPLAY‑01 | Replay | 基于 trace_id 重复计算 | 提供历史 trace_id，输入相同 | 结果与历史完全一致（确定性） |
+| TC‑UNIT‑EDGE‑01 | 单位边界 | 开尔文零度以下转换 | text: "温度 ≥ 0 K" | 转换后 lower=-273.15，仍支持（不报错） |
 
 10. 风险与应对
 风险	概率	影响	应对措施
