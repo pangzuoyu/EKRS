@@ -45,6 +45,18 @@ class AuditIndex:
 
     def build(self) -> None:
         """Scan audit.log once, populate index."""
+        self._scan_and_populate()
+
+    def rebuild(self) -> int:
+        """Re-scan audit.log from scratch. Admin endpoint entrypoint.
+
+        Returns the number of unique trace_ids indexed after the rebuild.
+        Use after audit.log rotation or after a manual truncation.
+        """
+        self._scan_and_populate()
+        return self.size
+
+    def _scan_and_populate(self) -> None:
         import time
         start = time.monotonic()
         self._index.clear()
