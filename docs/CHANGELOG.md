@@ -117,20 +117,76 @@ Audit infrastructure (`AuditLogger` base + `AuditWriter` + `AuditIndex`), Promet
 
 ## Iron Rules (invariants preserved across all phases)
 
-From `ekrs-handbook.md`. Review at every phase boundary, never relaxed:
+Defined in `ekrs-handbook.md` §Iron Rules — single source of truth.
+Eight invariants govern ingestion, retrieval, solving, and conflict
+semantics. Reviewed at every phase boundary, never relaxed.
 
-| ID | Rule |
-|----|------|
-| R1 | Every `numeric_hint` carries `source_span`, `block_id`, `context_window`. |
-| R2 | Solver is a pure function — no I/O, no state, no side effects. |
-| R3 | Three-gate pipeline: recall → extract → solve; any failure blocks the result. |
-| R4 | Context priority: User > Explicit_Doc > Inferred_Doc > Default. |
-| R5 | Only entity-overlap scoring for KG; no graph DB, no multi-hop. |
-| R6 | `strict=true` forbids inference; missing context returns 400. |
-| R7 | Every hint carries `scope_path`; queries can filter by scope. |
-| R8 | Index layer only filters illegal status; never trims authority. |
+> **Why no table here:** R1–R8 are listed verbatim in `ekrs-handbook.md`.
+> Mirroring them in this file creates a DRY violation: a future rule
+> edit could land in only one of the two. If you find yourself
+> copy-pasting the table back, edit the handbook instead.
 
-Audit event count is also frozen (16 schemas) — broadening semantics is allowed, adding a new event name is not.
+The audit event registry is also frozen (16 schemas in handbook §16) —
+broadening an existing event's semantic is allowed; adding a new event
+name is not.
+
+---
+
+## Rollback strategy
+
+Production deployments should plan for two rollback paths.
+
+### 1. Application-only rollback (safe)
+
+If the issue is in the RAG application code (not the embedding dim), a
+standard `git tag` revert is sufficient:
+
+```bash
+# Identify the last-known-good phase tag
+git tag --list 'phase*' --sort=-creatordate | head -5
+
+# Roll back to it
+git checkout phase6c-minor        # or whatever phase is the safe baseline
+make install
+make dev                          # rebuilds containers
+```
+
+**Compatibility notes for application-only rollback:**
+
+| Rollback direction | Safe? | Notes |
+|--------------------|-------|-------|
+| Forward (e.g., 6c-minor → 6c-audit-emit) | ✅ | Pure additive |
+| Backward within same dim (e.g., 6c-audit-emit → 6b-retrieval-layer) | ✅ | Audit events and Qdrant payloads remain forward-compatible |
+| Backward across dim migration (6b → 6a) | ❌ | See below |
+
+### 2. Embedding-dim rollback (NOT safe across the 6a → 6b boundary)
+
+Phase 6B switched from bge-small-en-v1.5 (**384d**) to BAAI/bge-m3
+(**1024d dense + sparse**). The two embedding spaces are incompatible:
+
+- **Going forward (384d → 1024d)** requires re-ingestion of every chunk.
+  See `docs/DEPLOYMENT.md` §Embedding dim migration for the full
+  procedure (snapshot → delete collection → re-ingest → verify).
+- **Going backward (1024d → 384d)** is **not supported** without wiping
+  Qdrant and re-ingesting from scratch. Phase 6A code does not understand
+  1024d payloads; Phase 6B code does not produce 384d payloads. There is
+  no in-place conversion path.
+
+If a downgrade to pre-6b code is required:
+
+1. Snapshot the current (1024d) Qdrant collection for forensic retention.
+2. `curl -X DELETE` the collection.
+3. Roll back the application code to the pre-6b tag.
+4. Re-trigger the parser for every `doc_hash` to re-ingest under bge-small.
+5. Run `make golden-test` to verify recall still holds.
+
+### Recommended rollback tags
+
+| Phase tag | Last-known-good for |
+|-----------|---------------------|
+| `phase6c-minor` | Current tip; default |
+| `phase6b-retrieval-layer` | Last pure-app rollback point (same dim) |
+| `phase6a-spec-closure` | Pre-embedding-migration; requires full re-ingest |
 
 [phase6c-minor]: https://github.com/REPO/compare/phase6c-audit-emit...phase6c-minor
 [phase6c-audit-emit]: https://github.com/REPO/compare/phase6b-retrieval-layer...phase6c-audit-emit
