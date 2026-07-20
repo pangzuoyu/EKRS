@@ -34,12 +34,9 @@ def client(mock_qdrant, tmp_path, monkeypatch):
     # T3 moved auth to Depends(require_parser_token) which reads the env var;
     # without this, missing/invalid-token tests return 202 instead of 403.
     monkeypatch.setenv("PARSER_TOKEN", "change-me-to-a-secure-random-string-32chars")
-    # T1: redirect SHARED_STORAGE_PATH to a tmpdir so lifespan's existence
-    # check does not depend on the prod default /parsed_lib being mounted.
-    # The module-level `settings` singleton was instantiated at import time,
-    # so re-point the attribute directly (env-only patching wouldn't reach it).
-    from ekrs_rag.core.config import settings as _settings
-    monkeypatch.setattr(_settings, "SHARED_STORAGE_PATH", tmp_path)
+    # SHARED_STORAGE_PATH is redirected to tmp_path by the integration-level
+    # autouse fixture in tests/integration/conftest.py — no need to repeat it
+    # here.
     mock_task_repo = MagicMock()
     mock_task_repo.init.return_value = None
     mock_task_repo.try_insert.return_value = True

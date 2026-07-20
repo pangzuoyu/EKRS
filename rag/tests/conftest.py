@@ -8,23 +8,6 @@ import pytest
 from prometheus_client import REGISTRY
 
 
-@pytest.fixture(autouse=True)
-def _redirect_shared_storage_path(tmp_path, monkeypatch):
-    """T1: redirect SHARED_STORAGE_PATH to a per-test tmpdir.
-
-    The integration-fix lifespan check (main.py startup) refuses to boot
-    if SHARED_STORAGE_PATH does not exist on disk. Production defaults to
-    /parsed_lib, but that path is not mounted in the test environment and
-    must not be created system-wide. Redirecting to a per-test tmp_path
-    keeps tests hermetic and lets every existing TestClient-based test
-    exercise lifespan without modification.
-    """
-    from ekrs_rag.core.config import settings as _settings
-
-    monkeypatch.setattr(_settings, "SHARED_STORAGE_PATH", tmp_path)
-    yield
-
-
 @pytest.fixture(autouse=True, scope="session")
 def _isolate_prometheus_registry():
     """Clear non-default Prometheus collectors at end of session.
