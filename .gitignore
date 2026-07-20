@@ -48,3 +48,4 @@ rag/audit.log.*.gz
 # Logs
 *.log
 .claude/skills/gstack/
+rag/models/
