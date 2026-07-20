@@ -154,6 +154,14 @@ async def lifespan(app: FastAPI):
     try:
         logger.info("Starting EKRS RAG service (debug=%s)", settings.EKRS_DEBUG)
 
+        storage_root = settings.SHARED_STORAGE_PATH
+        if not storage_root.is_dir():
+            raise RuntimeError(
+                f"SHARED_STORAGE_PATH={storage_root} does not exist; "
+                "create the directory or fix the config before starting."
+            )
+        app.state.shared_storage_root = storage_root.resolve()
+
         embedding_service = None
         try:
             # Phase 6B D5: EmbeddingService facade wraps bge-m3 ONNX;

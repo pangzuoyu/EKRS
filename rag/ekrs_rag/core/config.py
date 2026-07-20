@@ -71,6 +71,13 @@ class Settings(BaseSettings):
             raise ValueError("PARSER_TOKEN must be >= 32 characters")
         return v
 
+    @field_validator("SHARED_STORAGE_PATH")
+    @classmethod
+    def storage_must_be_absolute(cls, v: Path) -> Path:
+        if not v.is_absolute():
+            raise ValueError("SHARED_STORAGE_PATH must be an absolute path")
+        return v
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
