@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import portion  # type: ignore[import]
 
@@ -252,7 +252,7 @@ class IntervalSolver:
 
     def solve_with_fallback(
         self,
-        constraints: list[ConstraintV2 | ConstraintV1],
+        constraints: Sequence[ConstraintV2 | ConstraintV1],
         active_scope: Optional[list[str]] = None,
         *,
         allow_soft_fallback: bool = True,

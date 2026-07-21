@@ -7,13 +7,13 @@ A2: lineage_snapshot / conflict_details are optional; old traces return null.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from ekrs_rag.api.auth import require_parser_token
-from ekrs_rag.observability.audit_index import AuditIndex
+from ekrs_rag.observability.audit_index import AuditIndex, AuditLine
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["trace"])
@@ -25,7 +25,10 @@ class TraceRequest(BaseModel):
 
 
 def _get_audit_index(request: Request) -> AuditIndex | None:
-    return getattr(request.app.state, "audit_index", None)
+    # getattr on app.state (generic State) loses the AuditIndex type, so cast
+    # it back. main.py lifespan sets app.state.audit_index = _audit_index.
+    idx = getattr(request.app.state, "audit_index", None)
+    return cast("AuditIndex | None", idx)
 
 
 @router.post("/constraints/trace")
@@ -44,12 +47,12 @@ def constraints_trace(
             "conflict_details": None,
         }
 
-    lines = idx.seek(body.trace_id) or []
+    lines: list[AuditLine] = idx.seek(body.trace_id) or []
     if body.scope_filter:
         prefix = body.scope_filter
         lines = [l for l in lines if (l.raw.get("scope_path") or "").startswith(prefix)]
 
-    events = [
+    events: list[dict[str, Any]] = [
         {"event": l.event, "trace_id": l.trace_id, "offset": l.offset, "raw": l.raw}
         for l in lines
     ]
@@ -59,7 +62,7 @@ def constraints_trace(
     # Fallback to first event for pre-6A traces that lack a solve_started event.
     snapshot: str | None = None
     details: list | None = None
-    start_event = next(
+    start_event: dict[str, Any] | None = next(
         (e["raw"] for e in events if e["event"] == "constraint_solve_started"),
         None,
     )

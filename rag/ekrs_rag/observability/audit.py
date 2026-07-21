@@ -15,8 +15,10 @@ from ekrs_rag.observability.audit_handler import RebuildingRotatingFileHandler
 from ekrs_rag.observability.trace import get_skip_audit
 
 
-# Module-level writer, set by main.py at startup
-_writer: AuditLogger | None = None
+# Module-level writer, set by main.py at startup.
+# Typed as AuditWriter (not the AuditLogger base) so callers using
+# `get_writer().write(...)` type-check cleanly across all route handlers.
+_writer: "AuditWriter | None" = None
 # Module-level AuditIndex, set by main.py at startup (Issue 5: runtime writes
 # must be indexable for replay without rescan)
 _index = None
@@ -83,13 +85,13 @@ class AuditWriter(AuditLogger):
             return 0
 
 
-def set_writer(writer: AuditLogger) -> None:
+def set_writer(writer: "AuditWriter") -> None:
     """Set module-level writer (called at startup)."""
     global _writer
     _writer = writer
 
 
-def get_writer() -> AuditLogger | None:
+def get_writer() -> "AuditWriter | None":
     return _writer
 
 

@@ -11,6 +11,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger("ekrs.observability.audit_index")
 
@@ -23,7 +24,7 @@ class AuditLine:
     event: str
     trace_id: str
     offset: int
-    raw: dict
+    raw: dict[str, Any]
 
 
 class AuditIndex:

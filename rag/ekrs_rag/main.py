@@ -300,10 +300,12 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         # Always release the exporter, even when later startup work fails.
-        httpd = getattr(app.state, "metrics_httpd", None)
-        if httpd is not None:
-            httpd.shutdown()
-            httpd.server_close()
+        # Use a new local name (not `httpd`) so mypy doesn't infer
+        # WSGIServer from the earlier `start_http_server(...)` return.
+        metrics_httpd = getattr(app.state, "metrics_httpd", None)
+        if metrics_httpd is not None:
+            metrics_httpd.shutdown()
+            metrics_httpd.server_close()
         logger.info("Metrics exporter stopped")
         logger.info("Shutting down EKRS RAG service")
 
