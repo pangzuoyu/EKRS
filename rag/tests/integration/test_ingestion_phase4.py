@@ -92,21 +92,34 @@ def client():
                 app.dependency_overrides.clear()
 
 
-def _notify_payload(doc_hash: str, trace_id: str = "t", version: int = 1) -> dict:
+def _notify_payload(
+    doc_hash: str,
+    output_path: str,
+    trace_id: str = "t",
+    version: int = 1,
+) -> dict:
+    """Build a notify payload with the given absolute output_path.
+
+    Phase 6A (T2): output_path must resolve to a subdirectory of
+    SHARED_STORAGE_PATH; the test calls pass tmp_path-resolved paths
+    so the boundary check accepts them.
+    """
     return {
         "trace_id": trace_id,
         "doc_hash": doc_hash,
         "version": version,
-        "output_path": "/tmp/x.jsonl",
+        "output_path": output_path,
         "callback_url": "",
     }
 
 
-def test_duplicate_request_id_is_idempotent(client):
+def test_duplicate_request_id_is_idempotent(client, tmp_path):
     """Same (trace_id, doc_hash, version) twice → second call returns 'duplicate'."""
     c, _repo, _lock, _pipeline = client
     headers = {"X-Parser-Token": PARSER_TOKEN}
-    payload = _notify_payload(doc_hash="doc_a", trace_id="t1")
+    payload = _notify_payload(
+        doc_hash="doc_a", trace_id="t1", output_path=str(tmp_path / "x.jsonl")
+    )
 
     r1 = c.post("/v1/ingestion/notify", json=payload, headers=headers)
     r2 = c.post("/v1/ingestion/notify", json=payload, headers=headers)
@@ -119,7 +132,7 @@ def test_duplicate_request_id_is_idempotent(client):
     assert r2.json()["doc_hash"] == "doc_a"
 
 
-def test_lock_prevents_concurrent_ingest(client):
+def test_lock_prevents_concurrent_ingest(client, tmp_path):
     """Pre-acquired lock on doc_hash → POST returns 'in_flight'."""
     c, _repo, lock, _pipeline = client
 
@@ -127,7 +140,9 @@ def test_lock_prevents_concurrent_ingest(client):
     assert token is not None  # sanity: lock was actually acquired
 
     headers = {"X-Parser-Token": PARSER_TOKEN}
-    payload = _notify_payload(doc_hash="doc_b", trace_id="t2")
+    payload = _notify_payload(
+        doc_hash="doc_b", trace_id="t2", output_path=str(tmp_path / "x.jsonl")
+    )
 
     r = c.post("/v1/ingestion/notify", json=payload, headers=headers)
     assert r.status_code == 202
@@ -167,7 +182,7 @@ def test_compensation_picks_up_old_failed(client):
     assert final["attempts"] == 3
 
 
-def test_lock_acquire_none_skips_try_insert(client):
+def test_lock_acquire_none_skips_try_insert(client, tmp_path):
     """回归测试 (I1): 当 Redis 锁已被持有时, /notify 必须直接返回 in_flight,
     不能在 tasks 表里留下未完成的 PENDING 行."""
     c, repo, lock, _pipeline = client
@@ -176,7 +191,9 @@ def test_lock_acquire_none_skips_try_insert(client):
     assert token is not None  # sanity: lock was actually acquired
 
     headers = {"X-Parser-Token": PARSER_TOKEN}
-    payload = _notify_payload(doc_hash="doc_d", trace_id="t_d")
+    payload = _notify_payload(
+        doc_hash="doc_d", trace_id="t_d", output_path=str(tmp_path / "x.jsonl")
+    )
 
     r = c.post("/v1/ingestion/notify", json=payload, headers=headers)
     assert r.status_code == 202

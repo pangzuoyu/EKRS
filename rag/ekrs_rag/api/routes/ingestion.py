@@ -80,6 +80,17 @@ async def notify(
         notification.trace_id or "", doc_hash, version
     )
 
+    # P0.2: reject output_path that escapes SHARED_STORAGE_PATH
+    storage_root: Path = request.app.state.shared_storage_root
+    try:
+        candidate = Path(notification.output_path).resolve(strict=False)
+        candidate.relative_to(storage_root)
+    except (ValueError, OSError):
+        raise HTTPException(
+            status_code=400,
+            detail="output_path must be an absolute subdirectory of SHARED_STORAGE_PATH",
+        )
+
     # Distributed lock FIRST: if another pod is processing this doc_hash,
     # return "in_flight" without touching the tasks table (no PENDING row
     # left stranded for the local compensation scanner to clean up).

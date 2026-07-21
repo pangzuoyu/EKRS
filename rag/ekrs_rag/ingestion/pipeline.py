@@ -23,9 +23,18 @@ logger = logging.getLogger(__name__)
 class IngestionPipeline:
     """Orchestrates: read JSONL → parse → chunk → write Qdrant → callback."""
 
-    def __init__(self, qdrant: QdrantManager, storage_path: Path):
+    def __init__(
+        self,
+        qdrant: QdrantManager,
+        storage_path: Path,
+        parser_token: str,
+        audit_writer: object | None = None,
+    ) -> None:
         self._qdrant = qdrant
-        self._storage_path = storage_path
+        self._shared_storage_root = Path(storage_path).resolve()
+        self._parser_token = parser_token
+        # D5: optional injection; if None, audit emits are skipped (test fixtures).
+        self._audit_writer = audit_writer
 
     async def ingest(self, notification: IngestionNotification) -> None:
         """Run full ingestion pipeline for a parser notification.
@@ -41,6 +50,22 @@ class IngestionPipeline:
         doc_hash = notification.doc_hash
         version = notification.version
         output_path = Path(notification.output_path)
+
+        # P0.2: defense-in-depth check (route already enforces this; pipeline re-checks)
+        try:
+            output_path.resolve(strict=False).relative_to(self._shared_storage_root)
+        except (ValueError, OSError) as e:
+            logger.error(
+                "output_path_out_of_scope: doc=%s v=%d path=%s root=%s",
+                doc_hash,
+                version,
+                output_path,
+                self._shared_storage_root,
+            )
+            raise ValueError(
+                f"output_path {output_path} is outside SHARED_STORAGE_PATH "
+                f"root {self._shared_storage_root}"
+            ) from e
 
         logger.info("Starting ingestion: doc=%s v=%d path=%s",
                      doc_hash, version, output_path)

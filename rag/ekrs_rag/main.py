@@ -204,7 +204,12 @@ async def lifespan(app: FastAPI):
         if _qdrant is not None:
             _retriever = EKRSRetriever(qdrant=_qdrant)
             app.state.retriever = _retriever
-            _pipeline = IngestionPipeline(_qdrant, settings.SHARED_STORAGE_PATH)
+            _pipeline = IngestionPipeline(
+                _qdrant,
+                storage_path=app.state.shared_storage_root,
+                parser_token=settings.PARSER_TOKEN,
+                audit_writer=_audit_writer,  # D5: pass the lifespan-managed writer
+            )
             app.state.pipeline = _pipeline
         else:
             app.state.retriever = None

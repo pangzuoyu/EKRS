@@ -14,6 +14,9 @@ from fastapi.testclient import TestClient
 from ekrs_shared.models import IngestionStatus
 
 
+PARSER_TOKEN = "change-me-to-a-secure-random-string-32chars"
+
+
 @pytest.fixture
 def mock_qdrant():
     """Mock QdrantManager for all tests."""
@@ -59,7 +62,11 @@ def client(mock_qdrant, tmp_path, monkeypatch):
         # Re-init pipeline with mock
         from ekrs_rag.ingestion.pipeline import IngestionPipeline
         from ekrs_rag.core.config import settings
-        pipeline = IngestionPipeline(mock_qdrant, settings.SHARED_STORAGE_PATH)
+        pipeline = IngestionPipeline(
+            mock_qdrant,
+            settings.SHARED_STORAGE_PATH,
+            parser_token="x" * 32,
+        )
         from ekrs_rag.api.routes.ingestion import (
             get_pipeline, get_redis_lock, get_task_repo,
         )
@@ -72,7 +79,7 @@ def client(mock_qdrant, tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def sample_jsonl():
+def sample_jsonl(tmp_path):
     """Create a temporary JSONL file with sample data."""
     blocks = [
         {
@@ -84,7 +91,7 @@ def sample_jsonl():
         }
         for i in range(3)
     ]
-    tmpdir = tempfile.mkdtemp()
+    tmpdir = tempfile.mkdtemp(dir=tmp_path)
     output_dir = os.path.join(tmpdir, "data")
     os.makedirs(output_dir, exist_ok=True)
     jsonl_path = os.path.join(output_dir, "data.jsonl")
@@ -163,3 +170,39 @@ class TestIngestionStatus:
         mock_qdrant.get_ingestion_status.return_value = None
         resp = client.get("/v1/ingestion/status/nonexistent")
         assert resp.status_code == 404
+
+
+@pytest.mark.integration
+def test_notify_rejects_output_path_outside_storage_root(client, tmp_path):
+    """An output_path that escapes SHARED_STORAGE_PATH must 400."""
+    outside = tmp_path.parent / "evil.txt"
+    resp = client.post(
+        "/v1/ingestion/notify",
+        headers={"X-Parser-Token": PARSER_TOKEN},
+        json={
+            "doc_hash": "abc123",
+            "version": 1,
+            "output_path": str(outside),
+            "callback_url": "",
+        },
+    )
+    assert resp.status_code == 400
+    assert "SHARED_STORAGE_PATH" in resp.json()["detail"]
+
+
+@pytest.mark.integration
+def test_notify_rejects_relative_traversal(client, tmp_path):
+    """output_path with .. segments must 400."""
+    base = tmp_path.resolve()
+    rel = f"{base}/../../../etc"
+    resp = client.post(
+        "/v1/ingestion/notify",
+        headers={"X-Parser-Token": PARSER_TOKEN},
+        json={
+            "doc_hash": "abc123",
+            "version": 1,
+            "output_path": rel,
+            "callback_url": "",
+        },
+    )
+    assert resp.status_code == 400
