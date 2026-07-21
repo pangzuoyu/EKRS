@@ -1,0 +1,433 @@
+# Review package: d62e18ad13dd8aa42ca6f0c552ab498175ec8b63..c092be1
+
+## Commits
+c092be1 feat(security): enforce SHARED_STORAGE_PATH boundary on output_path
+
+## Files changed
+ rag/ekrs_rag/api/routes/ingestion.py           | 11 ++++++
+ rag/ekrs_rag/ingestion/pipeline.py             | 29 +++++++++++++--
+ rag/ekrs_rag/main.py                           |  7 +++-
+ rag/tests/integration/test_ingestion.py        | 49 ++++++++++++++++++++++++--
+ rag/tests/integration/test_ingestion_phase4.py | 33 ++++++++++++-----
+ rag/tests/unit/test_pipeline_path.py           | 28 +++++++++++++++
+ 6 files changed, 143 insertions(+), 14 deletions(-)
+
+## Diff
+diff --git a/rag/ekrs_rag/api/routes/ingestion.py b/rag/ekrs_rag/api/routes/ingestion.py
+index 1c54694..de22735 100644
+--- a/rag/ekrs_rag/api/routes/ingestion.py
++++ b/rag/ekrs_rag/api/routes/ingestion.py
+@@ -73,20 +73,31 @@ async def notify(
+ 
+     Idempotency: same (trace_id, doc_hash, version) → 202 duplicate.
+     Distributed lock: same doc_hash in-flight elsewhere → 202 in_flight.
+     """
+     doc_hash = notification.doc_hash
+     version = notification.version
+     request_id = request_id_from_trace(
+         notification.trace_id or "", doc_hash, version
+     )
+ 
++    # P0.2: reject output_path that escapes SHARED_STORAGE_PATH
++    storage_root: Path = request.app.state.shared_storage_root
++    try:
++        candidate = Path(notification.output_path).resolve(strict=False)
++        candidate.relative_to(storage_root)
++    except (ValueError, OSError):
++        raise HTTPException(
++            status_code=400,
++            detail="output_path must be an absolute subdirectory of SHARED_STORAGE_PATH",
++        )
++
+     # Distributed lock FIRST: if another pod is processing this doc_hash,
+     # return "in_flight" without touching the tasks table (no PENDING row
+     # left stranded for the local compensation scanner to clean up).
+     lock_key = f"lock:ingest:{doc_hash}"
+     token = await lock.acquire(lock_key, ttl_sec=settings.LOCK_TTL_SEC)
+     if token is None:
+         logger.info("Lock held for %s; another pod is processing", doc_hash)
+         return {"status": "in_flight", "doc_hash": doc_hash, "version": version}
+ 
+     try:
+diff --git a/rag/ekrs_rag/ingestion/pipeline.py b/rag/ekrs_rag/ingestion/pipeline.py
+index 20cebde..3995c12 100644
+--- a/rag/ekrs_rag/ingestion/pipeline.py
++++ b/rag/ekrs_rag/ingestion/pipeline.py
+@@ -16,39 +16,64 @@ from ekrs_shared.models import IngestionNotification
+ from ..retrieval.qdrant_client import QdrantManager
+ from .chunker import chunk_blocks
+ from .ir_parser import IRParseError, parse_jsonl_file
+ 
+ logger = logging.getLogger(__name__)
+ 
+ 
+ class IngestionPipeline:
+     """Orchestrates: read JSONL → parse → chunk → write Qdrant → callback."""
+ 
+-    def __init__(self, qdrant: QdrantManager, storage_path: Path):
++    def __init__(
++        self,
++        qdrant: QdrantManager,
++        storage_path: Path,
++        parser_token: str,
++        audit_writer: object | None = None,
++    ) -> None:
+         self._qdrant = qdrant
+-        self._storage_path = storage_path
++        self._shared_storage_root = Path(storage_path).resolve()
++        self._parser_token = parser_token
++        # D5: optional injection; if None, audit emits are skipped (test fixtures).
++        self._audit_writer = audit_writer
+ 
+     async def ingest(self, notification: IngestionNotification) -> None:
+         """Run full ingestion pipeline for a parser notification.
+ 
+         Steps:
+         1. Check idempotency (already indexed → skip)
+         2. Read JSONL from shared volume
+         3. Parse DocumentBlock IR
+         4. Chunk blocks
+         5. Upsert to Qdrant
+         6. Send callback to parser
+         """
+         doc_hash = notification.doc_hash
+         version = notification.version
+         output_path = Path(notification.output_path)
+ 
++        # P0.2: defense-in-depth check (route already enforces this; pipeline re-checks)
++        try:
++            output_path.resolve(strict=False).relative_to(self._shared_storage_root)
++        except (ValueError, OSError) as e:
++            logger.error(
++                "output_path_out_of_scope: doc=%s v=%d path=%s root=%s",
++                doc_hash,
++                version,
++                output_path,
++                self._shared_storage_root,
++            )
++            raise ValueError(
++                f"output_path {output_path} is outside SHARED_STORAGE_PATH "
++                f"root {self._shared_storage_root}"
++            ) from e
++
+         logger.info("Starting ingestion: doc=%s v=%d path=%s",
+                      doc_hash, version, output_path)
+ 
+         # Step 1: Idempotency check
+         existing = self._qdrant.get_ingestion_status(doc_hash)
+         if existing and existing.status == "success" and existing.version == version:
+             logger.info("Already indexed: doc=%s v=%d (%d chunks), skipping",
+                          doc_hash, version, existing.chunks_indexed)
+             await self._send_callback(notification, "success")
+             return
+diff --git a/rag/ekrs_rag/main.py b/rag/ekrs_rag/main.py
+index f0aa5bf..768c49f 100644
+--- a/rag/ekrs_rag/main.py
++++ b/rag/ekrs_rag/main.py
+@@ -197,21 +197,26 @@ async def lifespan(app: FastAPI):
+             embedding_service = None
+ 
+         app.state.embedding_service = embedding_service
+         app.state.qdrant_manager = _qdrant
+ 
+         # Phase 2b: retriever (no longer takes embedder — qdrant.search
+         # handles embedding internally via injected EmbeddingService).
+         if _qdrant is not None:
+             _retriever = EKRSRetriever(qdrant=_qdrant)
+             app.state.retriever = _retriever
+-            _pipeline = IngestionPipeline(_qdrant, settings.SHARED_STORAGE_PATH)
++            _pipeline = IngestionPipeline(
++                _qdrant,
++                storage_path=app.state.shared_storage_root,
++                parser_token=settings.PARSER_TOKEN,
++                audit_writer=_audit_writer,  # D5: pass the lifespan-managed writer
++            )
+             app.state.pipeline = _pipeline
+         else:
+             app.state.retriever = None
+             app.state.pipeline = None
+ 
+         # Phase 4: redis, task_repo, lock, compensation
+         _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+         _redis_lock = RedisLock(_redis)
+         _task_repo = TaskRepo(db_path=settings.TASK_DB_PATH)
+         _task_repo.init()
+diff --git a/rag/tests/integration/test_ingestion.py b/rag/tests/integration/test_ingestion.py
+index bb74007..d8550fc 100644
+--- a/rag/tests/integration/test_ingestion.py
++++ b/rag/tests/integration/test_ingestion.py
+@@ -7,20 +7,23 @@ import json
+ import os
+ import tempfile
+ from unittest.mock import AsyncMock, MagicMock, patch
+ 
+ import pytest
+ from fastapi.testclient import TestClient
+ 
+ from ekrs_shared.models import IngestionStatus
+ 
+ 
++PARSER_TOKEN = "change-me-to-a-secure-random-string-32chars"
++
++
+ @pytest.fixture
+ def mock_qdrant():
+     """Mock QdrantManager for all tests."""
+     mock = MagicMock()
+     mock.ensure_collection.return_value = None
+     mock.upsert_chunks.return_value = 5
+     mock.get_ingestion_status.return_value = IngestionStatus(
+         status="success", chunks_indexed=5, version=1,
+     )
+     mock.delete_old_versions.return_value = 0
+@@ -52,46 +55,50 @@ def client(mock_qdrant, tmp_path, monkeypatch):
+          patch("ekrs_rag.main.setup_logging"), \
+          patch("ekrs_rag.main.TaskRepo", return_value=mock_task_repo), \
+          patch("ekrs_rag.main.DocumentRepo", return_value=mock_doc_repo), \
+          patch("ekrs_rag.main.aioredis.from_url", return_value=mock_redis), \
+          patch("ekrs_rag.main.RedisLock", return_value=mock_redis_lock), \
+          patch("ekrs_rag.main.CompensationScanner", return_value=mock_scanner):
+         from ekrs_rag.main import app
+         # Re-init pipeline with mock
+         from ekrs_rag.ingestion.pipeline import IngestionPipeline
+         from ekrs_rag.core.config import settings
+-        pipeline = IngestionPipeline(mock_qdrant, settings.SHARED_STORAGE_PATH)
++        pipeline = IngestionPipeline(
++            mock_qdrant,
++            settings.SHARED_STORAGE_PATH,
++            parser_token="x" * 32,
++        )
+         from ekrs_rag.api.routes.ingestion import (
+             get_pipeline, get_redis_lock, get_task_repo,
+         )
+         app.dependency_overrides[get_pipeline] = lambda: pipeline
+         app.dependency_overrides[get_redis_lock] = lambda: mock_redis_lock
+         app.dependency_overrides[get_task_repo] = lambda: mock_task_repo
+ 
+         with TestClient(app) as c:
+             yield c
+ 
+ 
+ @pytest.fixture
+-def sample_jsonl():
++def sample_jsonl(tmp_path):
+     """Create a temporary JSONL file with sample data."""
+     blocks = [
+         {
+             "doc_id": "test_doc",
+             "block_id": f"b{i:03d}",
+             "type": "text",
+             "content": {"md_preview": f"text block {i}", "raw": f"raw {i}"},
+             "metadata": {"page_number": 1},
+         }
+         for i in range(3)
+     ]
+-    tmpdir = tempfile.mkdtemp()
++    tmpdir = tempfile.mkdtemp(dir=tmp_path)
+     output_dir = os.path.join(tmpdir, "data")
+     os.makedirs(output_dir, exist_ok=True)
+     jsonl_path = os.path.join(output_dir, "data.jsonl")
+ 
+     with open(jsonl_path, "w") as f:
+         for block in blocks:
+             f.write(json.dumps(block, ensure_ascii=False) + "\n")
+ 
+     return output_dir
+ 
+@@ -156,10 +163,46 @@ class TestIngestionStatus:
+         resp = client.get("/v1/ingestion/status/test_doc_hash")
+         assert resp.status_code == 200
+         data = resp.json()
+         assert data["status"] == "success"
+         assert data["chunks_indexed"] == 5
+ 
+     def test_unknown_doc(self, client, mock_qdrant):
+         mock_qdrant.get_ingestion_status.return_value = None
+         resp = client.get("/v1/ingestion/status/nonexistent")
+         assert resp.status_code == 404
++
++
++@pytest.mark.integration
++def test_notify_rejects_output_path_outside_storage_root(client, tmp_path):
++    """An output_path that escapes SHARED_STORAGE_PATH must 400."""
++    outside = tmp_path.parent / "evil.txt"
++    resp = client.post(
++        "/v1/ingestion/notify",
++        headers={"X-Parser-Token": PARSER_TOKEN},
++        json={
++            "doc_hash": "abc123",
++            "version": 1,
++            "output_path": str(outside),
++            "callback_url": "",
++        },
++    )
++    assert resp.status_code == 400
++    assert "SHARED_STORAGE_PATH" in resp.json()["detail"]
++
++
++@pytest.mark.integration
++def test_notify_rejects_relative_traversal(client, tmp_path):
++    """output_path with .. segments must 400."""
++    base = tmp_path.resolve()
++    rel = f"{base}/../../../etc"
++    resp = client.post(
++        "/v1/ingestion/notify",
++        headers={"X-Parser-Token": PARSER_TOKEN},
++        json={
++            "doc_hash": "abc123",
++            "version": 1,
++            "output_path": rel,
++            "callback_url": "",
++        },
++    )
++    assert resp.status_code == 400
+diff --git a/rag/tests/integration/test_ingestion_phase4.py b/rag/tests/integration/test_ingestion_phase4.py
+index 1e94258..6a0e13a 100644
+--- a/rag/tests/integration/test_ingestion_phase4.py
++++ b/rag/tests/integration/test_ingestion_phase4.py
+@@ -85,56 +85,71 @@ def client():
+ 
+             try:
+                 with TestClient(app) as c:
+                     yield c, repo, lock, mock_pipeline
+             finally:
+                 # Clear overrides so subsequent tests don't inherit leaked repos
+                 # whose db_path is in a TemporaryDirectory that pytest has cleaned.
+                 app.dependency_overrides.clear()
+ 
+ 
+-def _notify_payload(doc_hash: str, trace_id: str = "t", version: int = 1) -> dict:
++def _notify_payload(
++    doc_hash: str,
++    output_path: str,
++    trace_id: str = "t",
++    version: int = 1,
++) -> dict:
++    """Build a notify payload with the given absolute output_path.
++
++    Phase 6A (T2): output_path must resolve to a subdirectory of
++    SHARED_STORAGE_PATH; the test calls pass tmp_path-resolved paths
++    so the boundary check accepts them.
++    """
+     return {
+         "trace_id": trace_id,
+         "doc_hash": doc_hash,
+         "version": version,
+-        "output_path": "/tmp/x.jsonl",
++        "output_path": output_path,
+         "callback_url": "",
+     }
+ 
+ 
+-def test_duplicate_request_id_is_idempotent(client):
++def test_duplicate_request_id_is_idempotent(client, tmp_path):
+     """Same (trace_id, doc_hash, version) twice → second call returns 'duplicate'."""
+     c, _repo, _lock, _pipeline = client
+     headers = {"X-Parser-Token": PARSER_TOKEN}
+-    payload = _notify_payload(doc_hash="doc_a", trace_id="t1")
++    payload = _notify_payload(
++        doc_hash="doc_a", trace_id="t1", output_path=str(tmp_path / "x.jsonl")
++    )
+ 
+     r1 = c.post("/v1/ingestion/notify", json=payload, headers=headers)
+     r2 = c.post("/v1/ingestion/notify", json=payload, headers=headers)
+ 
+     assert r1.status_code == 202
+     assert r2.status_code == 202
+     assert r1.json()["status"] == "queued"
+     assert r2.json()["status"] == "duplicate"
+     assert r1.json()["doc_hash"] == "doc_a"
+     assert r2.json()["doc_hash"] == "doc_a"
+ 
+ 
+-def test_lock_prevents_concurrent_ingest(client):
++def test_lock_prevents_concurrent_ingest(client, tmp_path):
+     """Pre-acquired lock on doc_hash → POST returns 'in_flight'."""
+     c, _repo, lock, _pipeline = client
+ 
+     token = asyncio.run(lock.acquire("lock:ingest:doc_b", ttl_sec=10))
+     assert token is not None  # sanity: lock was actually acquired
+ 
+     headers = {"X-Parser-Token": PARSER_TOKEN}
+-    payload = _notify_payload(doc_hash="doc_b", trace_id="t2")
++    payload = _notify_payload(
++        doc_hash="doc_b", trace_id="t2", output_path=str(tmp_path / "x.jsonl")
++    )
+ 
+     r = c.post("/v1/ingestion/notify", json=payload, headers=headers)
+     assert r.status_code == 202
+     assert r.json()["status"] == "in_flight"
+ 
+ 
+ def test_compensation_picks_up_old_failed(client):
+     """Manually-inserted old FAILED task (attempts < max_attempts) is retried by scan()."""
+     _c, repo, _lock, _pipeline = client
+ 
+@@ -160,28 +175,30 @@ def test_compensation_picks_up_old_failed(client):
+     n = asyncio.run(scanner.scan())
+ 
+     assert n == 1
+     assert counter["n"] == 1
+     final = repo.get("old_req")
+     assert final is not None
+     assert final["status"] == "COMPLETED"
+     assert final["attempts"] == 3
+ 
+ 
+-def test_lock_acquire_none_skips_try_insert(client):
++def test_lock_acquire_none_skips_try_insert(client, tmp_path):
+     """回归测试 (I1): 当 Redis 锁已被持有时, /notify 必须直接返回 in_flight,
+     不能在 tasks 表里留下未完成的 PENDING 行."""
+     c, repo, lock, _pipeline = client
+ 
+     token = asyncio.run(lock.acquire("lock:ingest:doc_d", ttl_sec=10))
+     assert token is not None  # sanity: lock was actually acquired
+ 
+     headers = {"X-Parser-Token": PARSER_TOKEN}
+-    payload = _notify_payload(doc_hash="doc_d", trace_id="t_d")
++    payload = _notify_payload(
++        doc_hash="doc_d", trace_id="t_d", output_path=str(tmp_path / "x.jsonl")
++    )
+ 
+     r = c.post("/v1/ingestion/notify", json=payload, headers=headers)
+     assert r.status_code == 202
+     assert r.json()["status"] == "in_flight"
+ 
+     # 关键断言: tasks 表不应被本次 notify 写入任何行
+     rows = repo._conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()
+     assert rows["n"] == 0
+\ No newline at end of file
+diff --git a/rag/tests/unit/test_pipeline_path.py b/rag/tests/unit/test_pipeline_path.py
+new file mode 100644
+index 0000000..6b14397
+--- /dev/null
++++ b/rag/tests/unit/test_pipeline_path.py
+@@ -0,0 +1,28 @@
++from pathlib import Path
++from unittest.mock import MagicMock
++
++import pytest
++
++from ekrs_rag.ingestion.pipeline import IngestionPipeline
++
++
++@pytest.mark.unit
++@pytest.mark.asyncio
++async def test_pipeline_ingest_rejects_output_outside_root(tmp_path: Path) -> None:
++    storage_root = tmp_path / "root"
++    storage_root.mkdir()
++    pipeline = IngestionPipeline(
++        qdrant=MagicMock(),
++        storage_path=storage_root,
++        parser_token="x" * 32,
++    )
++    outside = (tmp_path / "outside").resolve()
++    outside.mkdir()
++    notification = MagicMock()
++    notification.doc_hash = "abc"
++    notification.version = 1
++    notification.output_path = str(outside)
++    notification.callback_url = ""
++
++    with pytest.raises(ValueError, match="SHARED_STORAGE_PATH"):
++        await pipeline.ingest(notification)

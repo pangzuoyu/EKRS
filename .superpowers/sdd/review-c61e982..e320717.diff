@@ -1,0 +1,244 @@
+# Review package: c61e982..e320717
+
+## Commits
+e320717 fix(retrieval): T8 minor cleanups (delete_old_versions filter, narrow except, pip consolidate)
+
+## Files changed
+ .github/workflows/heavy-tests.yml       |  7 +++--
+ rag/ekrs_rag/retrieval/qdrant_client.py | 10 +++++--
+ rag/tests/unit/test_qdrant_client.py    | 53 +++++++++++++++++++++++++++++----
+ 3 files changed, 60 insertions(+), 10 deletions(-)
+
+## Diff
+diff --git a/.github/workflows/heavy-tests.yml b/.github/workflows/heavy-tests.yml
+index e418f85..0160a88 100644
+--- a/.github/workflows/heavy-tests.yml
++++ b/.github/workflows/heavy-tests.yml
+@@ -15,16 +15,19 @@ jobs:
+           lfs: false
+           fetch-depth: 1  # avoid full history download (2GB model already in tree)
+       - uses: actions/setup-python@v5
+         with:
+           python-version: "3.11"
+       - name: Cache pip
+         uses: actions/cache@v4
+         with:
+           path: ~/.cache/pip
+           key: ${{ runner.os }}-pip-heavy-${{ hashFiles('rag/pyproject.toml') }}
+-      - run: python -m pip install -e shared/ -e 'rag[dev]'
+-      - run: pip install "FlagEmbedding==1.2.13" "onnxruntime>=1.15.0,<1.18.0" "numpy>=1.24.0,<2.0.0"
++      - run: |
++          python -m pip install -e shared/ -e 'rag[dev]' \
++            "FlagEmbedding==1.2.13" \
++            "onnxruntime>=1.15.0,<1.18.0" \
++            "numpy>=1.24.0,<2.0.0"
+       - name: Run heavy tests (real bge-m3)
+         run: |
+           cd rag
+           pytest tests/integration/test_embedding_heavy.py -v -m heavy
+diff --git a/rag/ekrs_rag/retrieval/qdrant_client.py b/rag/ekrs_rag/retrieval/qdrant_client.py
+index 218def6..087d181 100644
+--- a/rag/ekrs_rag/retrieval/qdrant_client.py
++++ b/rag/ekrs_rag/retrieval/qdrant_client.py
+@@ -10,20 +10,21 @@ EmbeddingUnavailableError when service is in dummy mode.
+ D4: ensure_collection runs in lifespan; AUTO_REINDEX env controls
+ whether dim mismatch triggers automatic delete+recreate.
+ """
+ from __future__ import annotations
+ 
+ import logging
+ import uuid
+ from typing import Optional
+ 
+ from qdrant_client import QdrantClient, models
++from qdrant_client.http.exceptions import ApiException, UnexpectedResponse
+ from tenacity import (
+     retry,
+     retry_if_not_exception_type,
+     stop_after_attempt,
+     wait_exponential,
+ )
+ 
+ from ekrs_shared.models import Chunk, IngestionStatus
+ from ekrs_rag.observability.audit import get_writer
+ from ekrs_rag.retrieval.embedding_service import (
+@@ -87,21 +88,25 @@ class QdrantManager:
+         If existing collection dim mismatches, behavior depends on auto_reindex:
+         - True (default): delete and recreate (D4)
+         - False: raise RuntimeError (production safety)
+         """
+         try:
+             existing_size = None
+             try:
+                 existing = self._client.get_collection(self._collection_name)
+                 # B2 fix: 1.17.1 path is config.params.vectors["dense"].size
+                 existing_size = existing.config.params.vectors["dense"].size
+-            except Exception:
++            except (UnexpectedResponse, ApiException, ValueError, KeyError, AttributeError):
++                # Collection missing (UnexpectedResponse 404) or response shape
++                # changed; treat as "no existing collection". Other exceptions
++                # (e.g. ConnectionError) bubble up so the outer except can emit
++                # qdrant_write_failed and tenacity can retry.
+                 existing_size = None
+ 
+             if existing_size is not None and existing_size != vector_size:
+                 if not self._auto_reindex:
+                     raise RuntimeError(
+                         f"Collection {self._collection_name} dim={existing_size} "
+                         f"does not match expected {vector_size}. "
+                         f"Recovery: set AUTO_REINDEX=true in .env to automatically "
+                         f"rebuild, OR manually delete and recreate via Qdrant UI/API."
+                     )
+@@ -319,24 +324,25 @@ class QdrantManager:
+         try:
+             self._client.delete(
+                 collection_name=self._collection_name,
+                 points_selector=models.FilterSelector(
+                     filter=models.Filter(
+                         must=[
+                             models.FieldCondition(
+                                 key="doc_hash",
+                                 match=models.MatchValue(value=doc_hash),
+                             ),
++                        ],
++                        must_not=[
+                             models.FieldCondition(
+                                 key="version",
+                                 match=models.MatchValue(value=keep_version),
+                             ),
+                         ],
+-                        must_not=[],
+                     ),
+                 ),
+             )
+             logger.info("Deleted old versions of %s keeping v%d", doc_hash, keep_version)
+             return 0
+         except Exception as exc:
+             _emit_qdrant_failure("delete", self._collection_name, exc)
+             raise
+diff --git a/rag/tests/unit/test_qdrant_client.py b/rag/tests/unit/test_qdrant_client.py
+index d1bd7d6..2b9a852 100644
+--- a/rag/tests/unit/test_qdrant_client.py
++++ b/rag/tests/unit/test_qdrant_client.py
+@@ -7,26 +7,38 @@ Fixes 3 production bugs from 6A final review:
+ 
+ Mock FlagEmbedding via EmbeddingService; mock QdrantClient.
+ """
+ from __future__ import annotations
+ 
+ from pathlib import Path
+ from types import SimpleNamespace
+ from unittest.mock import MagicMock, patch
+ 
+ import pytest
++import httpx
+ from qdrant_client import models
++from qdrant_client.http.exceptions import UnexpectedResponse
+ 
+ from ekrs_rag.retrieval.embedding_service import EmbeddingService
+ from ekrs_rag.retrieval.qdrant_client import QdrantManager
+ 
+ 
++def _qdrant_not_found_exc() -> UnexpectedResponse:
++    """Mimic the exception Qdrant raises for a missing collection (HTTP 404)."""
++    return UnexpectedResponse(
++        status_code=404,
++        reason_phrase="Not Found",
++        content=b"",
++        headers=httpx.Headers(),
++    )
++
++
+ @pytest.fixture
+ def mock_embedding_service() -> EmbeddingService:
+     """EmbeddingService in real mode (not dummy), with fixed vectors."""
+     svc = EmbeddingService(model_dir=Path("/fake/path"))
+     svc._is_dummy = False  # Force real mode
+     svc._model = MagicMock()
+     # Real encode returns 1024d dense + sparse
+     svc._model.encode.return_value = {
+         "dense_vecs": [[0.1] * 1024, [0.2] * 1024],
+         "lexical_weights": [{1: 0.5, 2: 0.3}, {3: 0.4}],
+@@ -37,21 +49,25 @@ def mock_embedding_service() -> EmbeddingService:
+ @pytest.fixture
+ def dummy_embedding_service() -> EmbeddingService:
+     """EmbeddingService in dummy mode (no model)."""
+     return EmbeddingService(model_dir=Path("/nonexistent"))  # is_dummy=True
+ 
+ 
+ def _make_qdrant(existing_size: int | None = None) -> MagicMock:
+     """Build mock QdrantClient that returns CollectionInfo with given size."""
+     client = MagicMock()
+     if existing_size is None:
+-        client.get_collection.side_effect = Exception("not found")
++        # 6C-minor Finding 3: ensure_collection now narrows the inner except
++        # to UnexpectedResponse/ApiException/ValueError/KeyError/AttributeError,
++        # so the mock must raise UnexpectedResponse (the real 404 path) rather
++        # than a bare Exception.
++        client.get_collection.side_effect = _qdrant_not_found_exc()
+     else:
+         # B2 fix: real path is config.params.vectors["dense"].size
+         info = SimpleNamespace(
+             config=SimpleNamespace(
+                 params=SimpleNamespace(
+                     vectors={"dense": SimpleNamespace(size=existing_size)}
+                 )
+             )
+         )
+         client.get_collection.return_value = info
+@@ -317,25 +333,50 @@ def test_delete_old_versions_calls_delete(
+     client = _make_qdrant(existing_size=1024)
+ 
+     with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+         mgr = QdrantManager(
+             host="localhost", port=6333, embedding_service=mock_embedding_service
+         )
+         mgr.delete_old_versions(doc_hash="abc", keep_version=3)
+ 
+     client.delete.assert_called_once()
+     selector = client.delete.call_args.kwargs["points_selector"]
+-    # Filter has must-not version != keep_version
+-    must = selector.filter.must
+-    keys = [c.key for c in must]
+-    assert "doc_hash" in keys
+-    assert "version" in keys
++    # 6C-minor Finding 2: filter inverted bug fix — must pins doc_hash,
++    # must_not excludes the kept version.
++    must_keys = [c.key for c in selector.filter.must]
++    must_not_keys = [c.key for c in selector.filter.must_not]
++    assert "doc_hash" in must_keys
++    assert "version" not in must_keys
++    assert "version" in must_not_keys
++
++
++def test_delete_old_versions_filter_excludes_keep_version(
++    mock_embedding_service: EmbeddingService,
++) -> None:
++    """6C-minor Finding 2: must_not pins version != keep_version for the doc_hash."""
++    client = _make_qdrant(existing_size=1024)
++
++    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
++        mgr = QdrantManager(
++            host="localhost", port=6333, embedding_service=mock_embedding_service
++        )
++        mgr.delete_old_versions(doc_hash="doc-xyz", keep_version=2)
++
++    selector = client.delete.call_args.kwargs["points_selector"]
++    must_conditions = list(selector.filter.must)
++    must_not_conditions = list(selector.filter.must_not)
++    # doc_hash condition lives in must with the value passed in
++    doc_hash_cond = next(c for c in must_conditions if c.key == "doc_hash")
++    assert doc_hash_cond.match.value == "doc-xyz"
++    # keep_version condition lives in must_not with the value passed in
++    version_cond = next(c for c in must_not_conditions if c.key == "version")
++    assert version_cond.match.value == 2
+ 
+ 
+ def test_search_logs_warning_when_dummy(
+     dummy_embedding_service: EmbeddingService, caplog: pytest.LogCaptureFixture
+ ) -> None:
+     """search() in dummy mode logs WARN so operators see silent empty results."""
+     import logging
+     client = _make_qdrant(existing_size=1024)
+     with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+         mgr = QdrantManager(

@@ -1,0 +1,160 @@
+# Review package: 09191fc..196fc0e
+
+## Commits
+196fc0e test(retrieval): heavy integration tests + nightly CI + AUTO_REINDEX (D4/D6)
+
+## Files changed
+ .github/workflows/heavy-tests.yml             | 30 ++++++++++++++
+ rag/ekrs_rag/core/config.py                   |  3 ++
+ rag/pyproject.toml                            |  3 ++
+ rag/tests/integration/test_embedding_heavy.py | 58 +++++++++++++++++++++++++++
+ 4 files changed, 94 insertions(+)
+
+## Diff
+diff --git a/.github/workflows/heavy-tests.yml b/.github/workflows/heavy-tests.yml
+new file mode 100644
+index 0000000..e418f85
+--- /dev/null
++++ b/.github/workflows/heavy-tests.yml
+@@ -0,0 +1,30 @@
++name: heavy-tests
++
++on:
++  schedule:
++    - cron: '0 3 * * *'  # nightly 03:00 UTC
++  workflow_dispatch:
++
++jobs:
++  heavy:
++    runs-on: ubuntu-latest
++    timeout-minutes: 30
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          lfs: false
++          fetch-depth: 1  # avoid full history download (2GB model already in tree)
++      - uses: actions/setup-python@v5
++        with:
++          python-version: "3.11"
++      - name: Cache pip
++        uses: actions/cache@v4
++        with:
++          path: ~/.cache/pip
++          key: ${{ runner.os }}-pip-heavy-${{ hashFiles('rag/pyproject.toml') }}
++      - run: python -m pip install -e shared/ -e 'rag[dev]'
++      - run: pip install "FlagEmbedding==1.2.13" "onnxruntime>=1.15.0,<1.18.0" "numpy>=1.24.0,<2.0.0"
++      - name: Run heavy tests (real bge-m3)
++        run: |
++          cd rag
++          pytest tests/integration/test_embedding_heavy.py -v -m heavy
+diff --git a/rag/ekrs_rag/core/config.py b/rag/ekrs_rag/core/config.py
+index 46cedf1..5114f98 100644
+--- a/rag/ekrs_rag/core/config.py
++++ b/rag/ekrs_rag/core/config.py
+@@ -31,20 +31,23 @@ class Settings(BaseSettings):
+ 
+     # Chunking
+     MAX_CHUNK_TOKENS: int = 500
+ 
+     # Recall gate threshold
+     MIN_RECALL_CHUNKS: int = 1
+ 
+     # Embedding model
+     EMBEDDING_MODEL: str = "bge-small-en-v1.5"
+ 
++    # Phase 6B: auto-rebuild Qdrant collection on dim mismatch (D4)
++    AUTO_REINDEX: bool = True
++
+     # Distributed lock
+     INGESTION_LOCK_TIMEOUT: int = 300  # seconds
+ 
+     # Phase 4: 分布式锁 & 任务表
+     LOCK_TTL_SEC: int = 300
+     MAX_ATTEMPTS: int = 3
+     TASK_DB_PATH: str = "/var/lib/ekrs/tasks.db"
+ 
+     # Phase 5: observability
+     AUDIT_LOG_PATH: str = "audit.log"
+diff --git a/rag/pyproject.toml b/rag/pyproject.toml
+index f1a4752..1ae640c 100644
+--- a/rag/pyproject.toml
++++ b/rag/pyproject.toml
+@@ -33,10 +33,13 @@ dev = [
+     "pytest>=8.0",
+     "pytest-asyncio>=0.23",
+     "pytest-cov",
+     "httpx",  # for TestClient async
+     "fakeredis>=2.20",
+ ]
+ 
+ [tool.pytest.ini_options]
+ asyncio_mode = "auto"
+ testpaths = ["tests"]
++markers = [
++    "heavy: marks tests as heavy (require real bge-m3 model, run in nightly job only)",
++]
+diff --git a/rag/tests/integration/test_embedding_heavy.py b/rag/tests/integration/test_embedding_heavy.py
+new file mode 100644
+index 0000000..b1cfa52
+--- /dev/null
++++ b/rag/tests/integration/test_embedding_heavy.py
+@@ -0,0 +1,58 @@
++"""Heavy integration tests for EmbeddingService (real bge-m3 model).
++
++Marked @pytest.mark.heavy; skipped in default CI, run in nightly job.
++Requires rag/models/bge-m3/ files (T1 vendored).
++"""
++from __future__ import annotations
++
++import math
++import os
++from pathlib import Path
++
++import pytest
++
++from ekrs_rag.retrieval.embedding_service import (
++    DEFAULT_MODEL_DIR,
++    EmbeddingService,
++)
++
++
++# BGE_M3_MODEL_DIR env var overrides default for CI flexibility
++MODEL_DIR = Path(os.environ.get("BGE_M3_MODEL_DIR", str(DEFAULT_MODEL_DIR)))
++
++
++@pytest.mark.heavy
++def test_real_bge_m3_encodes_english_text() -> None:
++    """Real bge-m3 encodes English text to 1024d L2-normalized dense + sparse."""
++    if not MODEL_DIR.exists():
++        pytest.skip(f"Model dir {MODEL_DIR} not found; run T1 first")
++    svc = EmbeddingService(model_dir=MODEL_DIR)
++    if svc.is_dummy:
++        pytest.skip("EmbeddingService in dummy mode (model load failed)")
++
++    result = svc.encode(["hello world"])
++
++    assert len(result) == 1
++    assert len(result[0].dense) == 1024
++    # L2 norm should be 1.0
++    norm = math.sqrt(sum(v * v for v in result[0].dense))
++    assert abs(norm - 1.0) < 1e-3
++    # Sparse should have common English tokens
++    assert len(result[0].sparse) > 0
++
++
++@pytest.mark.heavy
++def test_real_bge_m3_handles_chinese() -> None:
++    """Real bge-m3 handles Chinese text with sparse containing Chinese tokens."""
++    if not MODEL_DIR.exists():
++        pytest.skip(f"Model dir {MODEL_DIR} not found; run T1 first")
++    svc = EmbeddingService(model_dir=MODEL_DIR)
++    if svc.is_dummy:
++        pytest.skip("EmbeddingService in dummy mode (model load failed)")
++
++    result = svc.encode(["高温合金材料"])
++
++    assert len(result) == 1
++    assert len(result[0].dense) == 1024
++    # Chinese token IDs are typically in the thousands range
++    assert any(tid > 1000 for tid in result[0].sparse.keys())
+\ No newline at end of file

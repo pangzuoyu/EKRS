@@ -305,3 +305,154 @@ Task 6: complete (commit TBD, controller-executed after implementer fabrication)
 5/5 findings resolved across Phase 6C + Phase 6C-minor:
 - Finding #1 (Important, qdrant_write_failed emit) → Phase 6C c61e982
 - Findings #2-5 (Minor: orphan file, filter, except, pip) → Phase 6C-minor e320717 (4 of 4; orphan skipped per T1 decision)
+
+---
+
+## Phase 6A — Doc-to-MD Integration Fixes (2026-07-21)
+
+Branch: feat/ekrs-doc-to-md-integration-fixes
+Plan: docs/superpowers/plans/2026-07-21-ekrs-integration-fixes.md (14 TDD tasks)
+Started: 2026-07-21
+BASE: 97a7c63 (master @ phase5.5-f-audit-rotation)
+
+E1/E4 review fixes pre-applied to plan (T9 helper-based, T13 grep-by-content).
+Do-Not-Repeat watchlist for this phase:
+- [cerebrum 2026-07-13] Starlette lifespan_context is async-only
+- [cerebrum 2026-07-13] prometheus_client.start_http_server() returns (httpd, thread)
+- [cerebrum 2026-07-20] tenacity stop_after_attempt(N) = N total attempts (1 + N-1 retries)
+- [cerebrum 2026-07-20] 不要推断 content_hash 存在；核实 IngestionNotification/Qdrant payload
+- [cerebrum 2026-07-20] 给出"取消鉴权"建议前先读 receiver 实际行为
+
+## Tasks
+
+- [x] Task 1: SHARED_STORAGE_PATH validator + lifespan check
+- [x] Task 2: path-boundary enforcement (route + pipeline)
+- [x] Task 3: PARSER_TOKEN startup fail-fast
+- [/] Task 4: callback URL validation helper (impl committed 7abca0c; awaiting review)
+- [ ] Task 5: parser token helper (build_callback_headers)
+- [ ] Task 6: wire X-Parser-Token into _send_callback
+- [ ] Task 7: 4xx-not-retryable in _send_callback
+- [ ] Task 8: IngestionOutcome frozen dataclass
+- [ ] Task 9: pipeline.ingest() returns IngestionOutcome (E1)
+- [ ] Task 10: _run_locked_ingest → TaskRepo status mapping
+- [ ] Task 11: delete_old_versions Range(lt=keep_version)
+- [ ] Task 12: pipeline.ingest calls delete_old_versions after success
+- [ ] Task 13: documentation cleanup (.ready) (E4)
+- [ ] Task 14: end-to-end verification
+
+---
+
+## Task 1: SHARED_STORAGE_PATH validator + lifespan check — DONE
+
+- Commits: fb7ca93 (impl) + d62e18a (fix)
+- Review: round 0 → 2 Important findings; fix round 1 → approved
+- BASE 97a7c63 → HEAD d62e18a
+- Test delta: 548 → 549 (+1 lifespan-abort test)
+
+### Minor roll-up (do not block T1; final-review will triage)
+- Missing trailing newlines in `tests/integration/conftest.py` + `tests/unit/test_main_lifespan.py`
+- Unused `tmp_path` param in `tests/integration/test_ingestion.py:29` (fixer acknowledged)
+- Lifespan test does NOT assert post-check init steps were skipped (gap noted for T2+)
+- Hard-coded error string in `tests/unit/test_main_lifespan.py:194-196` (cosmetic; intentional)
+
+---
+
+## T2 dispatch attempt #1 — failed (API 429 Token Plan 上限)
+
+- Agent `a204b0e640a30bdca` returned early after printing the high-level plan only; no code/test/report written.
+- Re-dispatching same task.
+
+## T2 dispatch attempt #2 — DONE_WITH_CONCERNS
+
+- Agent returned with full implementation, tests, and commit.
+- Commit: c092be1 — `feat(security): enforce SHARED_STORAGE_PATH boundary on output_path`
+- BASE 97a7c63 → HEAD c092be1 (T2)
+- Test delta: 549 → 552 (+3 tests: 1 unit + 2 integration)
+- Files: 6 modified/created (3 source + 3 tests; pipeline.py, ingestion.py, main.py, test_pipeline_path.py NEW, test_ingestion.py, test_ingestion_phase4.py)
+- Boundary check at route layer (HTTP 400) + pipeline layer (ValueError, defense-in-depth)
+- Existing phase-4 test helper updated to use tmp_path-resolved output_path (was hard-coded `/tmp/x.jsonl` which correctly fails new check)
+
+## Status
+
+- T1: ✅ approved (commits fb7ca93 + d62e18a, 549 passing)
+- T2: ✅ DONE_WITH_CONCERNS (commit c092be1, 552 passing) — 3 minor concerns logged in task-2-report.md
+
+---
+
+## Task 2: path-boundary enforcement — DONE
+
+- Commit: c092be1 (single impl commit; first dispatch attempt failed API 429, second dispatch verified on-disk code from prior attempt)
+- Review: approved (no Critical/Important; 4 Minor)
+- BASE d62e18a → HEAD c092be1
+- Test delta: 549 → 552 (+3)
+
+### Minor roll-up
+- `tests/integration/test_ingestion.py:178-204` — `test_notify_rejects_relative_traversal` lacks the `"SHARED_STORAGE_PATH"` substring assertion present in the first test (cosmetic symmetry)
+- `ingestion/pipeline.py:62-64` — `Path` object passed as `%s` works but explicit `str(...)` would make JSON-logger output stable
+- Same logging concern for `_shared_storage_root` (Path) at line 62-70
+
+---
+
+## Task 3: PARSER_TOKEN startup fail-fast — DONE
+
+- Commits: a6b5d54 (impl) + 9c9edab (fix @ markers)
+- Review: round 0 → Approved with 1 Important (missing @pytest.mark.unit); fix round 1 → Approved
+- Architectural deviation: `model_construct` fallback at module-import — judged **Necessary, sound, not a blocker** by reviewer (brief's two reqs in latent conflict; fallback forces `PARSER_TOKEN=""` which lifespan `len<32` check catches)
+- BASE c092be1 → HEAD 9c9edab
+- Test delta: 552 → 554 (+2)
+
+### Minor roll-up
+- `PytestUnknownMarkWarning` for `@pytest.mark.unit` AND `@pytest.mark.integration` (pre-existing; both markers used across T1's lifespan test + T3 tests; `pyproject.toml` markers list missing). Final review will triage.
+- Pre-existing `os.environ["PARSER_TOKEN"] = ""` direct mutation in `test_ingestion_replay.py` + `test_query_replay.py` (test-isolation hazard). Pre-existing, not introduced by T3.
+- Lifespan assertion checks `len < 32` only, not placeholder literal — adequate given validator catches placeholder first (defense in depth works through validator, not lifespan).
+
+### Operational signal (carry to T14)
+- Module-import emits WARNING log when `model_construct` fallback fires; useful for prod deploy diagnosis but noisy in dev.
+
+---
+
+## doc-to-md contract alignment (2026-07-21) — cross-system confirmation
+
+Source: `/home/pangzy/code_project/doc-to-md/docs/solutions/integration-issues/ekrs-interface-audit-2026-07-20.md` (audit v2_deep_with_verification)
+
+### doc-to-md 已交付 (PR1 + PR2, 6 commits on their side)
+
+| Commit | Sprint | Implementation |
+|---|---|---|
+| `76d4fa6` | PR1 feat | JSONL rename `blocks.jsonl` → `data.jsonl`; `.ready` semantic clarification |
+| `7234eb4` | PR1 fix | PR1 改名回归修复 + CLAUDE.md 真理源 section |
+| `338d10a` | PR2 / #4 | RAGClient.notify 加 `metadata.doc_metadata` 字段映射 |
+| `dbc845e` | PR2 / #5 | CALLBACK 鉴权双重门 (`CALLBACK_BYPASS_AUTH` + `ENVIRONMENT` + 401/403/404 JSON) |
+| `34bd5df` | PR2 / #3 | callback `rag_status=failed` → 本地 `status=failed` + `error_message` 透传 |
+| `da04594` | PR2 / #2 | `version_cleanup` 撤回 RAG 联动 (test-only) |
+
+### 对齐我方 plan 的 14 个 task
+
+| EKRS-side 5 项 action items | 对应我方 task | 状态 |
+|---|---|---|
+| EKRS-1 (P0): `_send_callback` 发送 `X-Parser-Token` 头 | T6 | 待实施 |
+| EKRS-2 (P0): `_send_callback` 4xx 划出重试集合 | T7 | 待实施 |
+| EKRS-3 (P1): TaskRepo.status 与 callback.rag_status 强一致 | T8-T10 | 待实施 |
+| EKRS-4 (P0): ingestion 入口校验 `SHARED_STORAGE_PATH` 越界 | T1 + T2 | ✅ DONE |
+| EKRS-5 (P1): 旧版本删除 helper 改 `version < keep_version` + 分布式锁 | T11 + T12 | 待实施 |
+
+### 跨确认后的契约 (用于 T5+ 任务 brief)
+
+1. **JSONL 文件名冻结为 `data.jsonl`** — 接收侧路径就是 `<output_path>/data.jsonl`（不含版本子目录）。T9 已经有此假设。✓
+2. **`.ready` 仅作 parser 内部信号，RAG 不读取** — T13 docs cleanup 已覆盖。✓
+3. **`metadata.doc_metadata` 走 notify body 字段，不是独立 `meta.json`** — Phase 6A T4 已注册 `document_metadata_failed` audit 事件；T9 pipeline.ingest 无需知道此字段，只需透传。
+4. **版本目录 `v<N>` 本期未实施** — 不假设 `<output>/v<N>/data.jsonl` 结构。EKRS 只按 `notification.output_path` 精确读取。✓
+5. **CALLBACK 鉴权双重门在 doc-to-md 侧** — 我方发送 `X-Parser-Token` 即可；不需关心对方 dev/prod bypass 开关。
+6. **doc-to-md 在 `rag_status=failed` 时会把本地 `status` 也置 `failed`** — 我方必须对所有业务失败（JSONL 缺失、IR 解析错误、Qdrant 失败）统一发 `rag_status=failed`，不要发 `success`。T8+T9+T10 已经一致。✓
+7. **callback 4xx 含义**：401 token 失效 / 403 invalid token / 404 doc_hash+version not found in parse_tasks。doc-to-md 已用 `hmac.compare_digest` 强制校验，`CALLBACK_BYPASS_AUTH=true` 时 dev 旁路。我方 4xx 不重试（T7）。✓
+8. **doc-to-md `heartbeat.py` 轮询已用 `get_status`** — 不需我方额外改动。
+
+### 仍待我方处理的 5 项
+T6 (X-Parser-Token) + T7 (4xx no-retry) + T8-T10 (state machine) + T11-T12 (old-version cleanup) + T13 (.ready docs) + T14 (e2e verification)
+
+### 跨系统端到端测试 (建议 T14 末段 + 下 sprint)
+完整链路 mock：mock RAG (FastAPI + ingest handler + callback 接收) → 真实 task_lifecycle → 验证 mock RAG 收到 notify + Qdrant mock payload 含 numeric_hints (P0-3 实施后) + parse_tasks 表 `rag_status='success'`。需要 doc-to-md P0-3 Numeric Hint 实施后才能跑完整黄金集 BUILDER 用例 (本期至少 13 个)。
+
+---
+
+## Phase 6A — Doc-to-MD Integration Fixes (2026-07-21)

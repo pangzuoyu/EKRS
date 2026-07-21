@@ -1,0 +1,387 @@
+# Review package: 9c9edab..HEAD
+
+## Commits
+7abca0c feat(security): callback URL allowlist with SSRF mitigation
+
+## Files changed
+ rag/ekrs_rag/core/config.py                      |  14 +++
+ rag/ekrs_rag/security/__init__.py                |  28 +++++
+ rag/ekrs_rag/security/callback_url.py            | 137 +++++++++++++++++++++++
+ rag/ekrs_rag/{security.py => security_legacy.py} |   0
+ rag/tests/unit/test_callback_url.py              | 126 +++++++++++++++++++++
+ 5 files changed, 305 insertions(+)
+
+## Diff
+diff --git a/rag/ekrs_rag/core/config.py b/rag/ekrs_rag/core/config.py
+index d63f341..d0d1288 100644
+--- a/rag/ekrs_rag/core/config.py
++++ b/rag/ekrs_rag/core/config.py
+@@ -66,20 +66,24 @@ class Settings(BaseSettings):
+     HOST: str = "0.0.0.0"
+     PORT: int = 8000
+ 
+     # Phase 6A: admin auth + parser callback
+     ADMIN_KEY: str = ""  # empty = /calculate returns 503
+     ENGINE_URL: str = "http://localhost:8000"
+     # D8: independent DB path for spec §4 documents table trio
+     # (decoupled from TASK_DB_PATH so the two repos can run on separate disks).
+     DOCUMENTS_DB_PATH: str = "/var/lib/ekrs/documents.db"
+ 
++    # Phase 6B: callback URL allowlist (T4 — SSRF mitigation)
++    CALLBACK_ALLOWED_SCHEMES: str = "https"  # comma-separated
++    CALLBACK_ALLOWED_HOSTS: str = ""  # comma-separated; "*" disables pinning
++
+     @field_validator("PARSER_TOKEN")
+     @classmethod
+     def token_min_length(cls, v: str) -> str:
+         if not v:
+             raise ValueError(
+                 "PARSER_TOKEN is empty; set a 32+ character secret in .env"
+             )
+         if v == "change-me-to-a-secure-random-string-32chars":
+             raise ValueError(
+                 "PARSER_TOKEN is the example default; replace with a real secret"
+@@ -88,20 +92,30 @@ class Settings(BaseSettings):
+             raise ValueError("PARSER_TOKEN must be >= 32 characters")
+         return v
+ 
+     @field_validator("SHARED_STORAGE_PATH")
+     @classmethod
+     def storage_must_be_absolute(cls, v: Path) -> Path:
+         if not v.is_absolute():
+             raise ValueError("SHARED_STORAGE_PATH must be an absolute path")
+         return v
+ 
++    @field_validator("CALLBACK_ALLOWED_SCHEMES")
++    @classmethod
++    def validate_callback_schemes(cls, v: str) -> str:
++        schemes = {s.strip().lower() for s in v.split(",") if s.strip()}
++        if not schemes:
++            raise ValueError("CALLBACK_ALLOWED_SCHEMES must contain at least one scheme")
++        if not schemes.issubset({"http", "https"}):
++            raise ValueError("CALLBACK_ALLOWED_SCHEMES only supports http and https")
++        return v
++
+     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+ 
+ 
+ def _fallback_settings() -> Settings:
+     """Build a Settings via model_construct, bypassing validators.
+ 
+     Used when a fresh Settings() raises (e.g., the PARSER_TOKEN placeholder
+     default is invalid and no real .env was loaded). Values match the
+     declared class defaults so attribute access is safe for modules that
+     import `settings`. PARSER_TOKEN is forced to "" so the lifespan
+diff --git a/rag/ekrs_rag/security/__init__.py b/rag/ekrs_rag/security/__init__.py
+new file mode 100644
+index 0000000..9fdf860
+--- /dev/null
++++ b/rag/ekrs_rag/security/__init__.py
+@@ -0,0 +1,28 @@
++"""Security helpers for outbound callbacks and token handling.
++
++Re-exports the legacy X-Admin-Key authentication symbols from
++`ekrs_rag.security_legacy` and the new SSRF-mitigation callback URL
++validation from `ekrs_rag.security.callback_url`. Consumers should
++import from `ekrs_rag.security` only — the package directory shadows
++the flat `security_legacy` module at import time, so the symbols
++must be re-exported here to remain reachable.
++"""
++from __future__ import annotations
++
++from ekrs_rag.security.callback_url import (
++    CallbackURLBlockedError,
++    ParsedCallback,
++    validate_callback_url,
++)
++from ekrs_rag.security_legacy import (
++    require_admin_key,
++    verify_admin_key,
++)
++
++__all__ = [
++    "CallbackURLBlockedError",
++    "ParsedCallback",
++    "require_admin_key",
++    "validate_callback_url",
++    "verify_admin_key",
++]
+diff --git a/rag/ekrs_rag/security/callback_url.py b/rag/ekrs_rag/security/callback_url.py
+new file mode 100644
+index 0000000..fd7fbf3
+--- /dev/null
++++ b/rag/ekrs_rag/security/callback_url.py
+@@ -0,0 +1,137 @@
++"""Callback URL allowlist with SSRF mitigation.
++
++Validation gates (in order):
++  1. Scheme allowlist (env: CALLBACK_ALLOWED_SCHEMES; default `{"https"}`).
++  2. IP literal rejection (IPv4 + IPv6).
++  3. DNS resolution: any resolved address in
++     private / loopback / link-local / multicast / reserved / unspecified
++     causes the URL to be blocked.
++  4. Host allowlist (env: CALLBACK_ALLOWED_HOSTS; unset = no host filter,
++     `*` = wildcard; otherwise exact-match comparison on lowercased host).
++
++KNOWN LIMITATION — DNS rebinding (P3):
++  Validation resolves DNS at call time. The subsequent HTTP call (in
++  callers, e.g. T5 parser_token.py / T6 caller code) must re-resolve
++  the host and use the resulting IP to make the connection, OR
++  re-validate immediately before connect, to close the rebind window.
++  This helper is best-effort at validation time; the caller owns the
++  connect-time check.
++"""
++from __future__ import annotations
++
++import ipaddress
++import os
++import socket
++from dataclasses import dataclass
++from typing import Iterable
++from urllib.parse import urlsplit
++
++
++class CallbackURLBlockedError(ValueError):
++    """Raised when a callback URL fails allowlist checks."""
++
++
++@dataclass(frozen=True)
++class ParsedCallback:
++    scheme: str
++    host: str
++    port: int | None
++    raw: str
++
++
++def _allowed_schemes() -> frozenset[str]:
++    raw = os.environ.get("CALLBACK_ALLOWED_SCHEMES", "https")
++    return frozenset(s.strip().lower() for s in raw.split(",") if s.strip())
++
++
++def _resolve_is_dangerous(host: str) -> tuple[bool, str]:
++    """Resolve host and return (is_dangerous, reason)."""
++    try:
++        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
++    except socket.gaierror:
++        return True, "dns_unresolvable"
++    for family, _type, _proto, _canon, sockaddr in infos:
++        try:
++            ip = ipaddress.ip_address(sockaddr[0])
++        except ValueError:
++            continue
++        if (
++            ip.is_private
++            or ip.is_loopback
++            or ip.is_link_local
++            or ip.is_multicast
++            or ip.is_reserved
++            or ip.is_unspecified
++        ):
++            return True, f"resolved_to_{ip}"
++    return False, ""
++
++
++def _allowed_hosts() -> tuple[frozenset[str], bool]:
++    """Read CALLBACK_ALLOWED_HOSTS env var.
++
++    Returns (allowed_hosts, wildcard_enabled). When wildcard is enabled,
++    no host-level filter applies (allowed_hosts is irrelevant). When the
++    var is unset, allowed_hosts is empty and wildcard is False — which
++    the caller treats as "no host filter".
++    """
++    raw = os.environ.get("CALLBACK_ALLOWED_HOSTS", "").strip()
++    if not raw:
++        return frozenset(), False
++    parts = frozenset(h.strip().lower() for h in raw.split(",") if h.strip())
++    if "*" in parts:
++        return parts, True
++    return parts, False
++
++
++def validate_callback_url(
++    url: str,
++    allowed_schemes: Iterable[str] | None = None,
++) -> ParsedCallback:
++    """Validate a callback URL against the SSRF mitigation allowlist.
++
++    Raises CallbackURLBlockedError on any failed gate. Returns a
++    ParsedCallback snapshot on success.
++    """
++    if not url:
++        raise CallbackURLBlockedError("empty url")
++
++    parts = urlsplit(url)
++    scheme = (parts.scheme or "").lower()
++    schemes = frozenset(s.lower() for s in (allowed_schemes or _allowed_schemes()))
++    if scheme not in schemes:
++        raise CallbackURLBlockedError(
++            f"scheme '{scheme}' not in {sorted(schemes)}"
++        )
++
++    host = parts.hostname.rstrip(".") if parts.hostname else ""
++    # Strip trailing-dot (RFC 1035 root label) so DNS allows normalization
++    # matches allowlist without parser-side cooperation.
++    if not host:
++        raise CallbackURLBlockedError("missing host")
++
++    # Reject IP literals explicitly
++    try:
++        ip = ipaddress.ip_address(host)
++        raise CallbackURLBlockedError(f"ip literal rejected: {ip}")
++    except ValueError:
++        pass  # not an IP literal — proceed to DNS resolution
++
++    dangerous, reason = _resolve_is_dangerous(host)
++    if dangerous:
++        raise CallbackURLBlockedError(f"host {host} blocked: {reason}")
++
++    # Optional host allowlist (CALLBACK_ALLOWED_HOSTS). When unset, no
++    # host-level filter applies; when set and '*' included, any host passes.
++    allowed_hosts, wildcard = _allowed_hosts()
++    if allowed_hosts and not wildcard and host not in allowed_hosts:
++        raise CallbackURLBlockedError(
++            f"host {host} not in allowlist {sorted(allowed_hosts)}"
++        )
++
++    return ParsedCallback(
++        scheme=scheme,
++        host=host,
++        port=parts.port,
++        raw=url,
++    )
+diff --git a/rag/ekrs_rag/security.py b/rag/ekrs_rag/security_legacy.py
+similarity index 100%
+rename from rag/ekrs_rag/security.py
+rename to rag/ekrs_rag/security_legacy.py
+diff --git a/rag/tests/unit/test_callback_url.py b/rag/tests/unit/test_callback_url.py
+new file mode 100644
+index 0000000..4db0941
+--- /dev/null
++++ b/rag/tests/unit/test_callback_url.py
+@@ -0,0 +1,126 @@
++"""Tests for callback URL allowlist with SSRF mitigation.
++
++NOTE on test hostnames: The brief used `parser.example.com` / `attacker.example.com`
++etc. — RFC 2606 reserved subdomains that do not resolve. The SSRF helper correctly
++blocks unresolvable hosts (security default), so those hostnames would always be
++rejected. We substitute real resolvable public domains here to keep the test
++focused on the validation gates, not DNS availability. The validation logic
++tested is identical to what the brief specified.
++"""
++from __future__ import annotations
++
++import pytest
++
++from ekrs_rag.security.callback_url import (
++    CallbackURLBlockedError,
++    validate_callback_url,
++)
++
++
++# Real resolvable public domains used in place of the brief's reserved subdomains.
++_PUBLIC_HOST = "example.com"  # resolves to public IPv4 + IPv6
++_OTHER_PUBLIC_HOST = "one.one.one.one"  # resolves to 1.0.0.1/1.1.1.1 (public)
++
++
++@pytest.mark.unit
++def test_allows_https_public_domain(monkeypatch):
++    monkeypatch.setenv("CALLBACK_ALLOWED_SCHEMES", "https")
++    parsed = validate_callback_url(f"https://{_PUBLIC_HOST}/cb")
++    assert parsed.scheme == "https"
++    assert parsed.host == _PUBLIC_HOST
++
++
++@pytest.mark.unit
++@pytest.mark.parametrize(
++    "url",
++    [
++        "http://127.0.0.1:8000/cb",
++        "http://[::1]/cb",
++        "http://169.254.169.254/latest/meta-data/",
++        "http://10.0.0.5/cb",
++        "http://192.168.1.1/cb",
++        "ftp://example.com/cb",
++        "file:///etc/passwd",
++        "gopher://example.com/",
++    ],
++)
++def test_blocks_dangerous_urls(monkeypatch, url):
++    monkeypatch.setenv("CALLBACK_ALLOWED_SCHEMES", "https,http")
++    with pytest.raises(CallbackURLBlockedError):
++        validate_callback_url(url)
++
++
++@pytest.mark.unit
++def test_dns_resolution_to_private_ip_blocks(monkeypatch):
++    monkeypatch.setenv("CALLBACK_ALLOWED_SCHEMES", "https,http")
++    # localhost resolves to 127.0.0.1, which is in the loopback range
++    with pytest.raises(CallbackURLBlockedError):
++        validate_callback_url("http://localhost:9001/cb")
++
++
++@pytest.mark.unit
++def test_host_allowlist_blocks_when_set_and_mismatch(monkeypatch):
++    """When CALLBACK_ALLOWED_HOSTS is set, only listed hosts may callback.
++
++    Defense-in-depth above scheme/IP checks: prevents token exfiltration to
++    attacker-controlled hosts if the parser's callback_url is compromised.
++    """
++    monkeypatch.setenv("CALLBACK_ALLOWED_SCHEMES", "https")
++    monkeypatch.setenv("CALLBACK_ALLOWED_HOSTS", _PUBLIC_HOST)
++    with pytest.raises(CallbackURLBlockedError, match="not in allowlist"):
++        validate_callback_url(f"https://{_OTHER_PUBLIC_HOST}/cb")
++
++
++@pytest.mark.unit
++def test_host_allowlist_accepts_known_host(monkeypatch):
++    monkeypatch.setenv("CALLBACK_ALLOWED_SCHEMES", "https")
++    monkeypatch.setenv(
++        "CALLBACK_ALLOWED_HOSTS", f"{_PUBLIC_HOST},parser.dev",
++    )
++    parsed = validate_callback_url(f"https://{_PUBLIC_HOST}/cb")
++    assert parsed.host == _PUBLIC_HOST
++
++
++@pytest.mark.unit
++def test_host_allowlist_wildcard_allows_any(monkeypatch):
++    """'*' in CALLBACK_ALLOWED_HOSTS disables host pinning (dev-only)."""
++    monkeypatch.setenv("CALLBACK_ALLOWED_SCHEMES", "https")
++    monkeypatch.setenv("CALLBACK_ALLOWED_HOSTS", "*")
++    parsed = validate_callback_url(f"https://{_PUBLIC_HOST}/cb")
++    assert parsed.host == _PUBLIC_HOST
++
++
++@pytest.mark.unit
++def test_host_allowlist_unset_keeps_current_behavior(monkeypatch):
++    """Without CALLBACK_ALLOWED_HOSTS, no host-level filter applies."""
++    monkeypatch.delenv("CALLBACK_ALLOWED_HOSTS", raising=False)
++    monkeypatch.setenv("CALLBACK_ALLOWED_SCHEMES", "https")
++    parsed = validate_callback_url(f"https://{_PUBLIC_HOST}/cb")
++    assert parsed.host == _PUBLIC_HOST
++
++
++@pytest.mark.unit
++def test_trailing_dot_host_normalized(monkeypatch):
++    """RFC 1035 root label (trailing .) should be stripped before allowlist match.
++
++    D3 fix: `https://example.com./cb` host is "example.com."
++    which would mismatch the allowlist "example.com" without this fix.
++    """
++    monkeypatch.setenv("CALLBACK_ALLOWED_SCHEMES", "https")
++    monkeypatch.setenv(
++        "CALLBACK_ALLOWED_HOSTS", _PUBLIC_HOST,
++    )
++    parsed = validate_callback_url(f"https://{_PUBLIC_HOST}./cb")
++    assert parsed.host == _PUBLIC_HOST  # stripped
++
++
++@pytest.mark.unit
++def test_documents_dns_rebinding_known_risk():
++    """Caller must resolve and use IP for actual connection; this helper
++    checks at validation time only. The module docstring calls this out
++    as a known P3 limitation.
++    """
++    import inspect
++    from ekrs_rag.security import callback_url
++    src = inspect.getsource(callback_url)
++    assert "DNS rebinding" in src, "module must document DNS rebinding limitation"

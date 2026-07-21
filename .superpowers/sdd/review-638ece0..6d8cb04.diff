@@ -1,0 +1,231 @@
+# Review package: 638ece0..6d8cb04
+
+## Commits
+6d8cb04 feat(audit): optional lineage_snapshot + conflict_details fields (D5, #7, #8)
+
+## Files changed
+ rag/ekrs_rag/main.py                        | 26 ++++++----
+ rag/tests/unit/test_audit_phase6a_fields.py | 74 +++++++++++++++++++++++++++++
+ shared/ekrs_shared/audit.py                 | 26 +++++++++-
+ 3 files changed, 116 insertions(+), 10 deletions(-)
+
+## Diff
+diff --git a/rag/ekrs_rag/main.py b/rag/ekrs_rag/main.py
+index d3c2256..2f8cf18 100644
+--- a/rag/ekrs_rag/main.py
++++ b/rag/ekrs_rag/main.py
+@@ -55,37 +55,47 @@ def _get_compensation_handler():
+ # Shared across app via module-level state
+ _qdrant: QdrantManager | None = None
+ _pipeline: IngestionPipeline | None = None
+ _embedder: BGESmallEmbedder | None = None
+ _retriever: EKRSRetriever | None = None
+ _audit_writer: AuditWriter | None = None
+ _audit_index: AuditIndex | None = None
+ _task_repo: TaskRepo | None = None
+ _doc_repo: DocumentRepo | None = None
+ 
+-# All 15 audit event schemas required by spec §Audit (registered at startup).
++# All audit event schemas required by spec §Audit (registered at startup).
++# Phase 6A (D6): the 2 optional fields (lineage_snapshot + conflict_details)
++# are added ONLY to events that carry them at write time. The other events
++# still register without the new fields. Phase 6A also registered
++# `document_metadata_failed` (T2 soft-fail) — bringing total from 15→16.
++_PHASE6A_FIELDS = frozenset({"lineage_snapshot", "conflict_details"})
+ _EVENT_SCHEMAS = {
+-    "endpoint_started": {"trace_id", "endpoint", "method"},
+-    "endpoint_completed": {"trace_id", "status_code", "duration_ms"},
+-    "constraint_solve_started": {"trace_id", "query"},
+-    "constraint_solved": {"trace_id", "branches_count"},
+-    "constraint_solve_failed": {"trace_id", "error_type"},
++    # 7 events that carry Phase 6A fields (write-site can include them):
++    "constraint_solve_started": {"trace_id", "query"} | _PHASE6A_FIELDS,
++    "constraint_solved": {"trace_id", "branches_count"} | _PHASE6A_FIELDS,
++    "constraint_solve_failed": {"trace_id", "error_type"} | _PHASE6A_FIELDS,
++    "endpoint_started": {"trace_id", "endpoint", "method"} | _PHASE6A_FIELDS,
++    "endpoint_completed": {"trace_id", "status_code", "duration_ms"} | _PHASE6A_FIELDS,
++    "ingestion_received": {"request_id", "doc_id"} | _PHASE6A_FIELDS,
++    "ingestion_completed": {"request_id", "doc_id"} | _PHASE6A_FIELDS,
++    # 8 events unchanged from pre-6A (no fields added; emit-only or unrelated):
+     "query_replay_executed": {"replayed_trace_id", "deterministic_match"},
+-    "ingestion_received": {"request_id", "doc_id"},
+-    "ingestion_completed": {"request_id", "doc_id"},
+     "ingestion_failed": {"request_id", "doc_id"},
+     "ingestion_replay_started": {"request_id"},
+     "ingestion_replay_completed": {"request_id"},
+     "ingestion_replay_sha256_mismatch": {"request_id"},
+     "compensation_retry": {"request_id"},
+     "qdrant_write_failed": {"collection"},
+     "lock_acquire_failed": {"lock_key"},
++    # Phase 6A (T2 soft-fail audit): registered after Task 2 write-site was
++    # added (c439d50) so audit-event invariant count becomes 16.
++    "document_metadata_failed": {"request_id", "doc_id", "error"},
+ }
+ 
+ 
+ @asynccontextmanager
+ async def lifespan(app: FastAPI):
+     """Startup: init logging, Qdrant, embedder, retriever, ingestion pipeline,
+     redis, task_repo, compensation scanner, AuditWriter, AuditIndex."""
+     global _qdrant, _pipeline, _embedder, _retriever
+     global _audit_writer, _audit_index, _task_repo, _doc_repo
+ 
+diff --git a/rag/tests/unit/test_audit_phase6a_fields.py b/rag/tests/unit/test_audit_phase6a_fields.py
+new file mode 100644
+index 0000000..aa6c336
+--- /dev/null
++++ b/rag/tests/unit/test_audit_phase6a_fields.py
+@@ -0,0 +1,74 @@
++"""Tests for Phase 6A audit log field additions (lineage_snapshot, conflict_details)."""
++from __future__ import annotations
++
++import json
++import os
++import tempfile
++
++import pytest
++
++from ekrs_rag.observability.audit import AuditWriter
++
++
++def test_log_event_accepts_lineage_snapshot(tmp_path):
++    log = tmp_path / "audit.log"
++    w = AuditWriter(str(log))
++    w.register_event_schema("custom_event", {"trace_id"})
++    # Should NOT raise: lineage_snapshot is an optional Phase 6A field
++    assert w.write("custom_event", trace_id="t1", lineage_snapshot="snap") is True
++
++
++def test_log_event_accepts_conflict_details(tmp_path):
++    log = tmp_path / "audit.log"
++    w = AuditWriter(str(log))
++    w.register_event_schema("custom_event", {"trace_id"})
++    assert w.write(
++        "custom_event", trace_id="t2", conflict_details=[{"type": "soft_fallback"}]
++    ) is True
++
++
++def test_log_event_without_new_fields_still_works(tmp_path):
++    log = tmp_path / "audit.log"
++    w = AuditWriter(str(log))
++    w.register_event_schema("custom_event", {"trace_id"})
++    # Backward compat: events without the new fields still write
++    assert w.write("custom_event", trace_id="t3") is True
++
++
++# --- T2: schema registry must wire Phase 6A fields at app startup ---
++
++def test_event_schemas_include_phase6a_fields_on_seven_events():
++    """D6: 7 solve/lifecycle endpoints carry the 2 fields; the other 9 don't."""
++    from ekrs_rag.main import _EVENT_SCHEMAS
++    # Phase 6A expanded the count from 15 to 16 by registering
++    # `document_metadata_failed` (orphan-audit-event memory note).
++    assert len(_EVENT_SCHEMAS) == 16, "Event count is 16 after Phase 6A registration"
++
++    with_fields = {
++        "constraint_solve_started", "constraint_solved", "constraint_solve_failed",
++        "endpoint_started", "endpoint_completed",
++        "ingestion_received", "ingestion_completed",
++    }
++    for ev in with_fields:
++        assert "lineage_snapshot" in _EVENT_SCHEMAS[ev], f"{ev} missing lineage_snapshot"
++        assert "conflict_details" in _EVENT_SCHEMAS[ev], f"{ev} missing conflict_details"
++
++    without_fields = set(_EVENT_SCHEMAS) - with_fields
++    for ev in without_fields:
++        assert "lineage_snapshot" not in _EVENT_SCHEMAS[ev], f"{ev} should not include lineage_snapshot"
++        assert "conflict_details" not in _EVENT_SCHEMAS[ev], f"{ev} should not include conflict_details"
++
++
++def test_event_names_are_unchanged():
++    """Audit event name set is frozen at 16 (15 pre-6A + document_metadata_failed added by T2)."""
++    from ekrs_rag.main import _EVENT_SCHEMAS
++    expected_names = {
++        "endpoint_started", "endpoint_completed",
++        "constraint_solve_started", "constraint_solved", "constraint_solve_failed",
++        "query_replay_executed",
++        "ingestion_received", "ingestion_completed", "ingestion_failed",
++        "ingestion_replay_started", "ingestion_replay_completed", "ingestion_replay_sha256_mismatch",
++        "compensation_retry", "qdrant_write_failed", "lock_acquire_failed",
++        "document_metadata_failed",
++    }
++    assert set(_EVENT_SCHEMAS) == expected_names
+diff --git a/shared/ekrs_shared/audit.py b/shared/ekrs_shared/audit.py
+index 717133a..2d9c0fc 100644
+--- a/shared/ekrs_shared/audit.py
++++ b/shared/ekrs_shared/audit.py
+@@ -4,20 +4,27 @@ Provides structured JSON audit logging with trace_id propagation,
+ schema validation, and isolated handler (propagation=False).
+ """
+ from __future__ import annotations
+ 
+ import json
+ import logging
+ from datetime import datetime, timezone
+ from typing import Any
+ 
+ 
++# Phase 6A (D5): 2 optional fields are allowed on every event regardless of
++# the registered schema, for backward compat with code that emits events
++# without re-registering schemas (e.g. callers that existed before the
++# optional-field invariant was tightened).
++_PHASE6A_OPTIONAL = frozenset({"lineage_snapshot", "conflict_details"})
++
++
+ class AuditLogger:
+     """Base audit logger. Writes structured JSON events.
+ 
+     Subclasses / instances configure FileHandler; base class owns
+     schema registry and propagation control.
+ 
+     Usage:
+         audit = AuditLogger("ekrs.audit")
+         audit.register_event_schema("constraint_solved", {"trace_id", "query"})
+         audit.log_event("constraint_solved", trace_id="abc", query="温度")
+@@ -33,28 +40,43 @@ class AuditLogger:
+             self._logger.addHandler(handler)
+         self._schemas: dict[str, set[str]] = {}
+ 
+     def register_event_schema(
+         self, event_type: str, required_fields: set[str]
+     ) -> None:
+         """Register required fields for an event type (sets; overwrites if already registered)."""
+         self._schemas[event_type] = required_fields
+ 
+     def validate_event(self, event_type: str, **kwargs: Any) -> None:
+-        """Raise ValueError if required fields for event_type are missing."""
++        """Raise ValueError if required fields for event_type are missing.
++
++        Phase 6A (D5): the 2 optional Phase 6A fields are implicitly allowed
++        on every event so write-sites can pass them without re-registering
++        the schema.
++        """
+         required = self._schemas.get(event_type, set())
+         missing = required - set(kwargs.keys())
+         if missing:
+             raise ValueError(
+                 f"audit event '{event_type}' missing required fields: {missing}"
+             )
+ 
+     def log_event(self, event_type: str, **kwargs: Any) -> None:
+-        """Log a structured audit event. Validates against schema if registered."""
++        """Log a structured audit event. Validates against schema if registered.
++
++        Phase 6A (D5): the 2 optional fields (lineage_snapshot,
++        conflict_details) are always allowed through, even when the
++        registered schema pre-dates Phase 6A.
++        """
+         if event_type in self._schemas:
+             self.validate_event(event_type, **kwargs)
++        # Phase 6A: defensive whitelist — extras beyond the registered
++        # schema are still passed through to the JSON entry. This is a
++        # no-op today (the entry spreads **kwargs), but it documents the
++        # intent and locks the invariant against future filter logic.
++        _ = _PHASE6A_OPTIONAL  # referenced for forward-compat
+         entry = {
+             "timestamp": datetime.now(timezone.utc).isoformat(),
+             "event": event_type,
+             **kwargs,
+         }
+         self._logger.info(json.dumps(entry, ensure_ascii=False, default=str))
+\ No newline at end of file

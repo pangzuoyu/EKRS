@@ -1,0 +1,223 @@
+# Review package: 97a7c63c2801f0abed56be1a8bb201ca3fa32313..HEAD
+
+## Commits
+fb7ca93 feat(config): fail-fast on missing or relative SHARED_STORAGE_PATH
+
+## Files changed
+ .env.example                            |  3 ++-
+ rag/ekrs_rag/core/config.py             |  7 +++++++
+ rag/ekrs_rag/main.py                    |  8 ++++++++
+ rag/tests/conftest.py                   | 17 +++++++++++++++++
+ rag/tests/integration/test_ingestion.py | 10 ++++++++--
+ rag/tests/unit/test_config.py           | 33 +++++++++++++++++++++++++++++++++
+ 6 files changed, 75 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/.env.example b/.env.example
+index 662f817..1d216ff 100644
+--- a/.env.example
++++ b/.env.example
+@@ -5,21 +5,22 @@
+ PARSER_TOKEN=change-me-to-a-secure-random-string-32chars
+ 
+ # Qdrant
+ QDRANT_HOST=localhost
+ QDRANT_PORT=6333
+ QDRANT_GRPC_PORT=6334
+ 
+ # Redis
+ REDIS_URL=redis://localhost:6379
+ 
+-# Shared storage (parser writes JSONL here, RAG reads)
++# Shared storage root (parser writes JSONL here, RAG reads).
++# MUST be an absolute path AND must exist at startup; service refuses to boot otherwise.
+ SHARED_STORAGE_PATH=/parsed_lib
+ 
+ # Debug mode (enables verbose logging, dev UI)
+ EKRS_DEBUG=false
+ 
+ # Qdrant collection name
+ COLLECTION_NAME=rag_documents
+ 
+ # Chunking
+ MAX_CHUNK_TOKENS=500
+diff --git a/rag/ekrs_rag/core/config.py b/rag/ekrs_rag/core/config.py
+index 5114f98..2cc596e 100644
+--- a/rag/ekrs_rag/core/config.py
++++ b/rag/ekrs_rag/core/config.py
+@@ -64,15 +64,22 @@ class Settings(BaseSettings):
+     # (decoupled from TASK_DB_PATH so the two repos can run on separate disks).
+     DOCUMENTS_DB_PATH: str = "/var/lib/ekrs/documents.db"
+ 
+     @field_validator("PARSER_TOKEN")
+     @classmethod
+     def token_min_length(cls, v: str) -> str:
+         if len(v) < 32:
+             raise ValueError("PARSER_TOKEN must be >= 32 characters")
+         return v
+ 
++    @field_validator("SHARED_STORAGE_PATH")
++    @classmethod
++    def storage_must_be_absolute(cls, v: Path) -> Path:
++        if not v.is_absolute():
++            raise ValueError("SHARED_STORAGE_PATH must be an absolute path")
++        return v
++
+     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+ 
+ 
+ # Singleton
+ settings = Settings()
+diff --git a/rag/ekrs_rag/main.py b/rag/ekrs_rag/main.py
+index c8257ee..f0aa5bf 100644
+--- a/rag/ekrs_rag/main.py
++++ b/rag/ekrs_rag/main.py
+@@ -147,20 +147,28 @@ async def lifespan(app: FastAPI):
+             "process owns the port; continuing without local exporter",
+             metrics_host,
+             metrics_port,
+             e,
+         )
+         app.state.metrics_httpd = None
+ 
+     try:
+         logger.info("Starting EKRS RAG service (debug=%s)", settings.EKRS_DEBUG)
+ 
++        storage_root = settings.SHARED_STORAGE_PATH
++        if not storage_root.is_dir():
++            raise RuntimeError(
++                f"SHARED_STORAGE_PATH={storage_root} does not exist; "
++                "create the directory or fix the config before starting."
++            )
++        app.state.shared_storage_root = storage_root.resolve()
++
+         embedding_service = None
+         try:
+             # Phase 6B D5: EmbeddingService facade wraps bge-m3 ONNX;
+             # QdrantManager consumes it (no embedder arg on retriever).
+             embedding_service = EmbeddingService()
+             _qdrant = QdrantManager(
+                 host=settings.QDRANT_HOST,
+                 port=settings.QDRANT_GRPC_PORT,
+                 collection_name=settings.COLLECTION_NAME,
+                 embedding_service=embedding_service,
+diff --git a/rag/tests/conftest.py b/rag/tests/conftest.py
+index 826e3ac..ac15987 100644
+--- a/rag/tests/conftest.py
++++ b/rag/tests/conftest.py
+@@ -1,20 +1,37 @@
+ """Shared pytest fixtures for Phase 5 observability tests.
+ 
+ Issue 13: setup_logging handlers from prior tests would leak.
+ Issue 24: prometheus_client Counter/Histogram registration accumulates
+ across tests — Duplicate timeseries errors on second import.
+ """
+ import pytest
+ from prometheus_client import REGISTRY
+ 
+ 
++@pytest.fixture(autouse=True)
++def _redirect_shared_storage_path(tmp_path, monkeypatch):
++    """T1: redirect SHARED_STORAGE_PATH to a per-test tmpdir.
++
++    The integration-fix lifespan check (main.py startup) refuses to boot
++    if SHARED_STORAGE_PATH does not exist on disk. Production defaults to
++    /parsed_lib, but that path is not mounted in the test environment and
++    must not be created system-wide. Redirecting to a per-test tmp_path
++    keeps tests hermetic and lets every existing TestClient-based test
++    exercise lifespan without modification.
++    """
++    from ekrs_rag.core.config import settings as _settings
++
++    monkeypatch.setattr(_settings, "SHARED_STORAGE_PATH", tmp_path)
++    yield
++
++
+ @pytest.fixture(autouse=True, scope="session")
+ def _isolate_prometheus_registry():
+     """Clear non-default Prometheus collectors at end of session.
+ 
+     Default collectors (process_, python_gc_) are preserved; user-defined
+     ones (Counter/Histogram from ekrs_rag.observability.metrics) are pruned.
+ 
+     Scope is session-level (was per-test): per-test pruning emptied the
+     registry between tests in the same file, causing later tests to
+     fail with "missing metric" assertions. Session scope keeps collectors
+diff --git a/rag/tests/integration/test_ingestion.py b/rag/tests/integration/test_ingestion.py
+index b1616dd..dd1e095 100644
+--- a/rag/tests/integration/test_ingestion.py
++++ b/rag/tests/integration/test_ingestion.py
+@@ -21,26 +21,32 @@ def mock_qdrant():
+     mock.ensure_collection.return_value = None
+     mock.upsert_chunks.return_value = 5
+     mock.get_ingestion_status.return_value = IngestionStatus(
+         status="success", chunks_indexed=5, version=1,
+     )
+     mock.delete_old_versions.return_value = 0
+     return mock
+ 
+ 
+ @pytest.fixture
+-def client(mock_qdrant):
++def client(mock_qdrant, tmp_path, monkeypatch):
+     """Create TestClient with mocked Qdrant + Phase 4 components."""
+     # Match pre-T3 behavior: settings.PARSER_TOKEN default is the test secret.
+     # T3 moved auth to Depends(require_parser_token) which reads the env var;
+     # without this, missing/invalid-token tests return 202 instead of 403.
+-    os.environ["PARSER_TOKEN"] = "change-me-to-a-secure-random-string-32chars"
++    monkeypatch.setenv("PARSER_TOKEN", "change-me-to-a-secure-random-string-32chars")
++    # T1: redirect SHARED_STORAGE_PATH to a tmpdir so lifespan's existence
++    # check does not depend on the prod default /parsed_lib being mounted.
++    # The module-level `settings` singleton was instantiated at import time,
++    # so re-point the attribute directly (env-only patching wouldn't reach it).
++    from ekrs_rag.core.config import settings as _settings
++    monkeypatch.setattr(_settings, "SHARED_STORAGE_PATH", tmp_path)
+     mock_task_repo = MagicMock()
+     mock_task_repo.init.return_value = None
+     mock_task_repo.try_insert.return_value = True
+     mock_doc_repo = MagicMock()
+     mock_doc_repo.init.return_value = None
+     mock_redis_lock = MagicMock()
+     mock_redis_lock.acquire = AsyncMock(return_value="lock-token")
+     mock_redis_lock.release = AsyncMock(return_value=True)
+     mock_redis = MagicMock()
+     mock_scanner = MagicMock()
+diff --git a/rag/tests/unit/test_config.py b/rag/tests/unit/test_config.py
+new file mode 100644
+index 0000000..5e884af
+--- /dev/null
++++ b/rag/tests/unit/test_config.py
+@@ -0,0 +1,33 @@
++"""Unit tests for rag/ekrs_rag/core/config.py settings validation."""
++
++from pathlib import Path
++
++import pytest
++from pydantic import ValidationError
++
++from ekrs_rag.core.config import Settings
++
++
++def test_shared_storage_path_must_be_absolute(tmp_path, monkeypatch):
++    monkeypatch.setenv("SHARED_STORAGE_PATH", "relative/parsed")
++    monkeypatch.setenv("PARSER_TOKEN", "x" * 32)
++    with pytest.raises(ValidationError) as exc_info:
++        Settings()
++    assert "SHARED_STORAGE_PATH must be an absolute path" in str(exc_info.value)
++
++
++def test_shared_storage_path_absolute_passes(tmp_path, monkeypatch):
++    monkeypatch.setenv("SHARED_STORAGE_PATH", str(tmp_path))
++    monkeypatch.setenv("PARSER_TOKEN", "x" * 32)
++    s = Settings()
++    assert s.SHARED_STORAGE_PATH == tmp_path
++
++
++def test_lifespan_rejects_missing_storage_path(monkeypatch, tmp_path):
++    """Settings allows non-existent absolute path; lifespan must reject."""
++    monkeypatch.setenv("SHARED_STORAGE_PATH", "/nonexistent/parsed_lib_xyz")
++    monkeypatch.setenv("PARSER_TOKEN", "x" * 32)
++    s = Settings()
++    # Validator passes (absolute), but the dir doesn't exist
++    assert s.SHARED_STORAGE_PATH == Path("/nonexistent/parsed_lib_xyz")
++    assert not s.SHARED_STORAGE_PATH.is_dir()

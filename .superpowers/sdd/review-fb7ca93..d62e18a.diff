@@ -1,0 +1,197 @@
+# Review package: fb7ca93e2bff8a43c42acf56d5749eabab8ecb64..d62e18a
+
+## Commits
+d62e18a test(config): narrow conftest scope, verify lifespan abort
+
+## Files changed
+ rag/tests/conftest.py                   | 17 ---------
+ rag/tests/integration/conftest.py       | 27 +++++++++++++
+ rag/tests/integration/test_ingestion.py |  9 ++---
+ rag/tests/unit/test_main_lifespan.py    | 67 +++++++++++++++++++++++++++++++++
+ 4 files changed, 97 insertions(+), 23 deletions(-)
+
+## Diff
+diff --git a/rag/tests/conftest.py b/rag/tests/conftest.py
+index ac15987..826e3ac 100644
+--- a/rag/tests/conftest.py
++++ b/rag/tests/conftest.py
+@@ -1,37 +1,20 @@
+ """Shared pytest fixtures for Phase 5 observability tests.
+ 
+ Issue 13: setup_logging handlers from prior tests would leak.
+ Issue 24: prometheus_client Counter/Histogram registration accumulates
+ across tests — Duplicate timeseries errors on second import.
+ """
+ import pytest
+ from prometheus_client import REGISTRY
+ 
+ 
+-@pytest.fixture(autouse=True)
+-def _redirect_shared_storage_path(tmp_path, monkeypatch):
+-    """T1: redirect SHARED_STORAGE_PATH to a per-test tmpdir.
+-
+-    The integration-fix lifespan check (main.py startup) refuses to boot
+-    if SHARED_STORAGE_PATH does not exist on disk. Production defaults to
+-    /parsed_lib, but that path is not mounted in the test environment and
+-    must not be created system-wide. Redirecting to a per-test tmp_path
+-    keeps tests hermetic and lets every existing TestClient-based test
+-    exercise lifespan without modification.
+-    """
+-    from ekrs_rag.core.config import settings as _settings
+-
+-    monkeypatch.setattr(_settings, "SHARED_STORAGE_PATH", tmp_path)
+-    yield
+-
+-
+ @pytest.fixture(autouse=True, scope="session")
+ def _isolate_prometheus_registry():
+     """Clear non-default Prometheus collectors at end of session.
+ 
+     Default collectors (process_, python_gc_) are preserved; user-defined
+     ones (Counter/Histogram from ekrs_rag.observability.metrics) are pruned.
+ 
+     Scope is session-level (was per-test): per-test pruning emptied the
+     registry between tests in the same file, causing later tests to
+     fail with "missing metric" assertions. Session scope keeps collectors
+diff --git a/rag/tests/integration/conftest.py b/rag/tests/integration/conftest.py
+new file mode 100644
+index 0000000..7d75763
+--- /dev/null
++++ b/rag/tests/integration/conftest.py
+@@ -0,0 +1,27 @@
++"""Pytest fixtures shared across integration tests.
++
++The `_redirect_shared_storage_path` autouse fixture exists ONLY here
++(integration scope) because only TestClient-based integration tests
++trigger the FastAPI lifespan startup check that requires
++SHARED_STORAGE_PATH to exist on disk. Pure unit tests under
++`tests/unit/` do not run the lifespan and must not have this redirect
++applied — moving it here keeps unit-test isolation hermetic.
++"""
++import pytest
++
++
++@pytest.fixture(autouse=True)
++def _redirect_shared_storage_path(tmp_path, monkeypatch):
++    """Redirect SHARED_STORAGE_PATH to a per-test tmpdir for integration tests.
++
++    The integration-fix lifespan check (main.py startup) refuses to boot
++    if SHARED_STORAGE_PATH does not exist on disk. Production defaults to
++    /parsed_lib, but that path is not mounted in the test environment and
++    must not be created system-wide. Redirecting to a per-test tmp_path
++    keeps tests hermetic and lets every existing TestClient-based test
++    exercise lifespan without modification.
++    """
++    from ekrs_rag.core.config import settings as _settings
++
++    monkeypatch.setattr(_settings, "SHARED_STORAGE_PATH", tmp_path)
++    yield
+\ No newline at end of file
+diff --git a/rag/tests/integration/test_ingestion.py b/rag/tests/integration/test_ingestion.py
+index dd1e095..bb74007 100644
+--- a/rag/tests/integration/test_ingestion.py
++++ b/rag/tests/integration/test_ingestion.py
+@@ -27,26 +27,23 @@ def mock_qdrant():
+     return mock
+ 
+ 
+ @pytest.fixture
+ def client(mock_qdrant, tmp_path, monkeypatch):
+     """Create TestClient with mocked Qdrant + Phase 4 components."""
+     # Match pre-T3 behavior: settings.PARSER_TOKEN default is the test secret.
+     # T3 moved auth to Depends(require_parser_token) which reads the env var;
+     # without this, missing/invalid-token tests return 202 instead of 403.
+     monkeypatch.setenv("PARSER_TOKEN", "change-me-to-a-secure-random-string-32chars")
+-    # T1: redirect SHARED_STORAGE_PATH to a tmpdir so lifespan's existence
+-    # check does not depend on the prod default /parsed_lib being mounted.
+-    # The module-level `settings` singleton was instantiated at import time,
+-    # so re-point the attribute directly (env-only patching wouldn't reach it).
+-    from ekrs_rag.core.config import settings as _settings
+-    monkeypatch.setattr(_settings, "SHARED_STORAGE_PATH", tmp_path)
++    # SHARED_STORAGE_PATH is redirected to tmp_path by the integration-level
++    # autouse fixture in tests/integration/conftest.py — no need to repeat it
++    # here.
+     mock_task_repo = MagicMock()
+     mock_task_repo.init.return_value = None
+     mock_task_repo.try_insert.return_value = True
+     mock_doc_repo = MagicMock()
+     mock_doc_repo.init.return_value = None
+     mock_redis_lock = MagicMock()
+     mock_redis_lock.acquire = AsyncMock(return_value="lock-token")
+     mock_redis_lock.release = AsyncMock(return_value=True)
+     mock_redis = MagicMock()
+     mock_scanner = MagicMock()
+diff --git a/rag/tests/unit/test_main_lifespan.py b/rag/tests/unit/test_main_lifespan.py
+new file mode 100644
+index 0000000..cf8dba9
+--- /dev/null
++++ b/rag/tests/unit/test_main_lifespan.py
+@@ -0,0 +1,67 @@
++"""Async unit test for the lifespan's fail-fast storage check.
++
++The lifespan startup guard (ekrs_rag/main.py) raises RuntimeError if
++SHARED_STORAGE_PATH does not exist on disk. This test drives the
++app lifespan directly via `async with app.router.lifespan_context(app):`
++and asserts the RuntimeError propagates — i.e., that a later `except`
++in the same try block does NOT silently swallow it.
++
++The test must be async because Starlette's lifespan_context is
++async-only; a sync `with app.router.lifespan_context(app):` would
++return a coroutine and fail to enter the context.
++"""
++from __future__ import annotations
++
++import socket
++
++import pytest
++
++
++def _free_port() -> int:
++    """Allocate an ephemeral port for the metrics exporter.
++
++    Mirrors the helper in tests/integration/test_metrics_exporter.py:
++    bind SO_REUSEADDR to avoid TIME_WAIT bind errors on repeated runs.
++    """
++    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
++    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
++    s.bind(("127.0.0.1", 0))
++    port = s.getsockname()[1]
++    s.close()
++    return port
++
++
++@pytest.mark.asyncio
++async def test_lifespan_aborts_when_shared_storage_path_missing(
++    monkeypatch: pytest.MonkeyPatch, tmp_path
++) -> None:
++    """Lifespan startup must raise RuntimeError when SHARED_STORAGE_PATH
++    is an absolute path that does not exist on disk.
++
++    Verifies the raise is not silently swallowed by a later `except`
++    in the same try block (per reviewer Important finding).
++    """
++    # Point SHARED_STORAGE_PATH at an absolute path that does NOT exist.
++    missing = tmp_path / "nonexistent-shared-storage"
++    monkeypatch.setattr(
++        "ekrs_rag.main.settings.SHARED_STORAGE_PATH", missing
++    )
++    # Bind the metrics sidecar to a free port so the lifespan does not
++    # collide with prior test runs (mirrors test_metrics_exporter.py).
++    port = _free_port()
++    monkeypatch.setenv("METRICS_HOST", "127.0.0.1")
++    monkeypatch.setenv("METRICS_PORT", str(port))
++    # The lifespan's Qdrant/Redis init (after the storage check) is
++    # unreachable here — the storage guard runs first, so we don't need
++    # to mock them.
++
++    from ekrs_rag.main import app
++
++    with pytest.raises(RuntimeError) as exc_info:
++        async with app.router.lifespan_context(app):
++            pass  # pragma: no cover — should not reach
++
++    assert str(exc_info.value) == (
++        f"SHARED_STORAGE_PATH={missing} does not exist; "
++        "create the directory or fix the config before starting."
++    )
+\ No newline at end of file

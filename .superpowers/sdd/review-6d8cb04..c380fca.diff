@@ -1,0 +1,609 @@
+# Review package: 6d8cb04..c380fca
+
+## Commits
+c380fca feat(solver+api): solve_with_fallback + POST /v1/calculate (D2/D3/D4, #3, #4)
+
+## Files changed
+ rag/ekrs_rag/api/routes/calculate.py     | 110 +++++++++++++++++++++++++++++++
+ rag/ekrs_rag/constraint_engine/solver.py | 107 +++++++++++++++++++++++++++++-
+ rag/ekrs_rag/main.py                     |   3 +-
+ rag/tests/unit/test_calculate.py         |  95 ++++++++++++++++++++++++++
+ rag/tests/unit/test_fallback.py          |  88 +++++++++++++++++++++++++
+ shared/ekrs_shared/models.py             |  21 +++++-
+ 6 files changed, 421 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/rag/ekrs_rag/api/routes/calculate.py b/rag/ekrs_rag/api/routes/calculate.py
+new file mode 100644
+index 0000000..214790a
+--- /dev/null
++++ b/rag/ekrs_rag/api/routes/calculate.py
+@@ -0,0 +1,110 @@
++"""POST /v1/calculate — direct constraint solve without Qdrant retrieval.
++
++Spec §5 (D4): admin-only, reuses the same ConstraintV2 schema and solver
++as /v1/constraints. D3: strict mode disables soft fallback.
++"""
++from __future__ import annotations
++
++import logging
++import time
++from typing import Any, Literal
++
++from fastapi import APIRouter, Depends, HTTPException
++from pydantic import BaseModel, Field
++from ekrs_shared.models import Constraint
++
++from ekrs_rag.constraint_engine.solver import (
++    IntervalSolver,
++    StrictViolationError,
++)
++from ekrs_rag.observability.audit import get_writer
++from ekrs_rag.security import require_admin_key
++
++logger = logging.getLogger(__name__)
++router = APIRouter(prefix="/v1", tags=["calculate"])
++
++# PF2: module-level singleton — IntervalSolver is stateless (R2 pure function).
++# Reusing one instance avoids per-request allocation.
++solver = IntervalSolver()
++
++
++class CalculateRequest(BaseModel):
++    constraints: list[Constraint] = Field(..., min_length=0)
++    # Q2: Literal restricts the op field at the type level; no runtime check needed.
++    op: Literal["intersect"] = "intersect"
++    scope_path: str = Field(..., min_length=1)
++    strict: bool = True
++    allow_soft_fallback: bool = True
++
++
++@router.post("/calculate")
++def calculate(
++    body: CalculateRequest,
++    _admin: None = Depends(require_admin_key),
++) -> dict[str, Any]:
++    """Direct solve. Skips retrieval. Audits with lineage_snapshot + conflict_details."""
++    started = time.time()
++    # Capture input snapshot for lineage (truncated, PF3)
++    lineage_snapshot_raw = str([c.model_dump() for c in body.constraints])
++    lineage_snapshot = (
++        lineage_snapshot_raw[:4096] + "...[truncated]"
++        if len(lineage_snapshot_raw) > 4096
++        else lineage_snapshot_raw
++    )
++    conflict_details: list[dict[str, Any]] = []
++
++    try:
++        result = solver.solve_with_fallback(
++            body.constraints,
++            allow_soft_fallback=body.allow_soft_fallback,
++            strict=body.strict,
++        )
++    except StrictViolationError as e:
++        # Audit the failure with D7 duration_ms
++        duration_ms = int((time.time() - started) * 1000)
++        writer = get_writer()
++        if writer is not None:
++            writer.write(
++                "constraint_solve_failed",
++                trace_id="",
++                error_type="strict_violation",
++                duration_ms=duration_ms,
++                lineage_snapshot=lineage_snapshot,
++            )
++        raise HTTPException(status_code=400, detail=f"strict_violation: {e}")
++
++    # Convert _ParameterResult → JSON-safe shape
++    branches: list[dict[str, Any]] = []
++    for param, pres in result.items():
++        branches.append({
++            "parameter": param,
++            "interval": str(pres.interval),
++            "unit": pres.unit,
++            "confidence": pres.confidence,
++            "had_conflict": pres.had_conflict,
++        })
++        if pres.had_conflict:
++            conflict_details.append({"parameter": param, "type": "soft_fallback"})
++
++    # Audit (D7: emit duration_ms on every event from this endpoint)
++    duration_ms = int((time.time() - started) * 1000)
++    writer = get_writer()
++    if writer is not None:
++        writer.write(
++            "constraint_solved",
++            trace_id="",
++            branches_count=len(branches),
++            duration_ms=duration_ms,
++            lineage_snapshot=lineage_snapshot,
++            conflict_details=conflict_details or None,
++        )
++
++    return {
++        "success": True,
++        "data": {
++            "branches": branches,
++            "lineage_snapshot": lineage_snapshot,
++            "conflict_details": conflict_details or None,
++        },
++        "error": None,
++    }
+diff --git a/rag/ekrs_rag/constraint_engine/solver.py b/rag/ekrs_rag/constraint_engine/solver.py
+index 828295e..f4fed98 100644
+--- a/rag/ekrs_rag/constraint_engine/solver.py
++++ b/rag/ekrs_rag/constraint_engine/solver.py
+@@ -1,24 +1,28 @@
+ """IntervalSolver — pure-function constraint solver using portion.Interval arithmetic."""
+ from __future__ import annotations
+ 
+ from collections import defaultdict
+ from dataclasses import dataclass, field
+ from typing import Any, Optional
+ 
+ import portion  # type: ignore[import]
+ 
+-from ekrs_shared.models import ConstraintV2, Evidence
++from ekrs_shared.models import ConstraintV2, Evidence, Priority
+ from ekrs_shared.normalizer import normalize_temperature, normalize_parameter
+ from ekrs_shared.models import Constraint as ConstraintV1
+ 
+ 
++class StrictViolationError(Exception):
++    """Raised when strict mode forbids a soft fallback (R6 enforcement, D3)."""
++
++
+ # =============================================================================
+ # Types
+ # =============================================================================
+ 
+ 
+ @dataclass
+ class _TraceEntry:
+     parameter: str
+     action: str  # "applied" | "skipped_scope" | "skipped_priority" | "conflict"
+     operator: str
+@@ -235,20 +239,102 @@ class IntervalSolver:
+         )
+ 
+         return {
+             "status": status,
+             "branches": non_empty_branches,
+             "primary_branch": primary,
+             "conflicts": conflicts,
+             "trace": all_trace,
+         }
+ 
++    # =====================================================================
++    # Phase 6A (D3, D4, §8.2): soft-fallback path for /v1/calculate
++    # =====================================================================
++
++    def solve_with_fallback(
++        self,
++        constraints: list[ConstraintV2 | ConstraintV1],
++        active_scope: Optional[list[str]] = None,
++        *,
++        allow_soft_fallback: bool = True,
++        strict: bool = False,
++    ) -> dict[str, _ParameterResult]:
++        """Solve with soft-fallback support. Returns dict keyed by parameter.
++
++        D3: strict mode disables soft fallback (R6: "no inference" wins).
++        D4: each `_ParameterResult.had_conflict` is True when the soft-fallback
++        path was taken, so /v1/calculate can emit `conflict_details` to the
++        audit log for lineage explainability.
++
++        Return shape: `dict[str, _ParameterResult]` (V1 shape) — distinct from
++        the V2 multi-branch shape returned by `solve()`, so the /v1/calculate
++        endpoint can iterate per-parameter cleanly.
++        """
++        if not constraints:
++            return {}
++
++        constraints_v2 = [_ensure_v2(c) for c in constraints]
++        hard, soft = _partition_by_priority(constraints_v2)
++
++        # Group by parameter
++        grouped: dict[str, list[ConstraintV2]] = defaultdict(list)
++        for c in constraints_v2:
++            param = normalize_parameter(c.parameter)
++            grouped[param].append(c)
++
++        # Solve hard constraints per parameter
++        results: dict[str, _ParameterResult] = {}
++        for param, param_constraints in grouped.items():
++            results[param] = _solve_parameter(param, param_constraints, active_scope)
++
++        # If hard is non-empty for all parameters, return as-is
++        if not any(r.interval.empty for r in results.values()):
++            return results
++
++        # Hard is unsatisfiable for at least one parameter
++        if strict:
++            raise StrictViolationError(
++                "Hard constraints are unsatisfiable and soft fallback is "
++                "disabled by strict mode (R6 enforcement, D3)"
++            )
++
++        if not allow_soft_fallback or not soft:
++            # No fallback path: return hard results (with had_conflict set
++            # on the parameters that went empty).
++            return results
++
++        # D4: take soft path → mark each result had_conflict=True
++        return self._intersect_with_fallback(soft, active_scope)
++
++    def _intersect_with_fallback(
++        self,
++        soft: list[ConstraintV2],
++        active_scope: Optional[list[str]],
++    ) -> dict[str, _ParameterResult]:
++        """Intersect only the soft (REFERENCE-priority) constraints.
++
++        Returns `dict[str, _ParameterResult]` keyed by parameter. Each
++        result has `had_conflict = True` so downstream callers can emit
++        `conflict_details` audit events.
++        """
++        grouped: dict[str, list[ConstraintV2]] = defaultdict(list)
++        for c in soft:
++            param = normalize_parameter(c.parameter)
++            grouped[param].append(c)
++
++        results: dict[str, _ParameterResult] = {}
++        for param, param_constraints in grouped.items():
++            result = _solve_parameter(param, param_constraints, active_scope)
++            result.had_conflict = True
++            results[param] = result
++        return results
++
+ 
+ # =============================================================================
+ # Internal helpers
+ # =============================================================================
+ 
+ 
+ def _get_branch_key(constraint: ConstraintV2) -> str:
+     """Get branch key from constraint conditions.
+ 
+     Returns "general" for no conditions, otherwise the first
+@@ -429,10 +515,29 @@ def _is_temperature_unit(unit: str) -> bool:
+ 
+ def _trace_entry_to_dict(entry: _TraceEntry) -> dict:
+     return {
+         "parameter": entry.parameter,
+         "action": entry.action,
+         "operator": entry.operator,
+         "value": entry.value,
+         "interval_snapshot": entry.interval_snapshot,
+         "reason": entry.reason,
+     }
++
++
++def _partition_by_priority(
++    constraints: list[ConstraintV2],
++) -> tuple[list[ConstraintV2], list[ConstraintV2]]:
++    """Split constraints into (hard, soft) by explicit_level.
++
++    Hard: PROJECT (40) and above — the default "active" rules.
++    Soft: REFERENCE (20) and below — fallback pool used when hard is empty.
++    """
++    hard: list[ConstraintV2] = []
++    soft: list[ConstraintV2] = []
++    for c in constraints:
++        level = c.priority.get("explicit_level", int(Priority.PROJECT))
++        if level >= int(Priority.PROJECT):
++            hard.append(c)
++        else:
++            soft.append(c)
++    return hard, soft
+diff --git a/rag/ekrs_rag/main.py b/rag/ekrs_rag/main.py
+index 2f8cf18..ffd39d2 100644
+--- a/rag/ekrs_rag/main.py
++++ b/rag/ekrs_rag/main.py
+@@ -10,21 +10,21 @@ import logging
+ import os
+ from contextlib import asynccontextmanager
+ from pathlib import Path
+ 
+ import redis.asyncio as aioredis
+ from fastapi import FastAPI
+ from fastapi.responses import JSONResponse, PlainTextResponse
+ from prometheus_client import CollectorRegistry, multiprocess, start_http_server
+ 
+ from .api.middleware.observability import ObservabilityMiddleware
+-from .api.routes import constraints, ingestion, trace
++from .api.routes import calculate, constraints, ingestion, trace
+ from .concurrency.compensation import CompensationScanner
+ from .concurrency.redis_lock import RedisLock
+ from .core.config import settings
+ from .core.logging import setup_logging
+ from .ingestion.pipeline import IngestionPipeline
+ from .observability.audit import AuditWriter, attach_index, set_writer
+ from .observability.audit_index import AuditIndex
+ from .retrieval.embedder import BGESmallEmbedder
+ from .retrieval.qdrant_client import QdrantManager
+ from .retrieval.retriever import EKRSRetriever
+@@ -259,20 +259,21 @@ def create_app() -> FastAPI:
+     fresh app instances with isolated env vars."""
+     app = FastAPI(
+         title="EKRS RAG Service",
+         version="0.1.0",
+         lifespan=lifespan,
+     )
+     app.add_middleware(ObservabilityMiddleware)
+     app.include_router(ingestion.router)
+     app.include_router(constraints.router)
+     app.include_router(trace.router)
++    app.include_router(calculate.router)
+ 
+     @app.get("/health", response_class=PlainTextResponse)
+     async def health():
+         """Plain liveness probe (kept for backwards compatibility)."""
+         return "ok"
+ 
+     @app.get("/healthz")
+     async def healthz():
+         """Readiness probe: reports audit log + index health."""
+         audit_path = Path(settings.AUDIT_LOG_PATH)
+diff --git a/rag/tests/unit/test_calculate.py b/rag/tests/unit/test_calculate.py
+new file mode 100644
+index 0000000..7c42bb7
+--- /dev/null
++++ b/rag/tests/unit/test_calculate.py
+@@ -0,0 +1,95 @@
++"""Tests for POST /v1/calculate (spec §5, D3, D4 admin-required)."""
++from __future__ import annotations
++
++import pytest
++from fastapi.testclient import TestClient
++
++from ekrs_rag.main import app
++
++
++@pytest.fixture
++def client(monkeypatch):
++    # PF1: Pydantic Settings v2 fields are mutable; setattr is the
++    # idiomatic fixture pattern (matches test_admin_key.py).
++    from ekrs_rag.core.config import settings as _settings
++    monkeypatch.setattr(_settings, "ADMIN_KEY", "test-admin-key-32chars-xxxxxxxxx")
++    monkeypatch.setattr(_settings, "PARSER_TOKEN", "")  # disable parser auth
++    return TestClient(app)
++
++
++def _admin_headers():
++    return {"X-Admin-Key": "test-admin-key-32chars-xxxxxxxxx"}
++
++
++def test_calculate_requires_admin_key(monkeypatch):
++    """Unset ADMIN_KEY → 503 admin_key_not_configured."""
++    from ekrs_rag.core.config import settings as _settings
++    monkeypatch.setattr(_settings, "ADMIN_KEY", "")
++    monkeypatch.setattr(_settings, "PARSER_TOKEN", "")
++    client = TestClient(app)
++    r = client.post(
++        "/v1/calculate",
++        json={"constraints": [], "scope_path": "industry/x", "strict": True},
++    )
++    assert r.status_code == 503
++
++
++def test_calculate_missing_admin_header_returns_401(client):
++    r = client.post(
++        "/v1/calculate",
++        json={"constraints": [], "scope_path": "industry/x", "strict": True},
++    )
++    assert r.status_code == 401
++
++
++def test_calculate_missing_constraints_returns_422(client):
++    r = client.post(
++        "/v1/calculate",
++        json={"scope_path": "industry/x"},
++        headers=_admin_headers(),
++    )
++    assert r.status_code == 422
++
++
++def test_calculate_strict_with_unsatisfiable_returns_400(client):
++    r = client.post(
++        "/v1/calculate",
++        json={
++            "constraints": [
++                {"parameter": "temperature", "operator": "<=", "value": 50, "unit": "°C",
++                 "priority": "NATIONAL", "confidence": 0.95, "source": {"block_id": "b1"}},
++                {"parameter": "temperature", "operator": ">=", "value": 100, "unit": "°C",
++                 "priority": "NATIONAL", "confidence": 0.95, "source": {"block_id": "b2"}},
++            ],
++            "scope_path": "industry/x",
++            "strict": True,
++            "allow_soft_fallback": True,  # strict wins, still 400
++        },
++        headers=_admin_headers(),
++    )
++    assert r.status_code == 400
++    assert "strict_violation" in r.text
++
++
++def test_calculate_non_strict_with_soft_fallback_returns_200(client):
++    r = client.post(
++        "/v1/calculate",
++        json={
++            "constraints": [
++                {"parameter": "temperature", "operator": "<=", "value": 50, "unit": "°C",
++                 "priority": "NATIONAL", "confidence": 0.95, "source": {"block_id": "b1"}},
++                {"parameter": "temperature", "operator": ">=", "value": 100, "unit": "°C",
++                 "priority": "NATIONAL", "confidence": 0.95, "source": {"block_id": "b2"}},
++                {"parameter": "temperature", "operator": "<=", "value": 200, "unit": "°C",
++                 "priority": "REFERENCE", "confidence": 0.5, "source": {"block_id": "b3"}},
++            ],
++            "scope_path": "industry/x",
++            "strict": False,
++            "allow_soft_fallback": True,
++        },
++        headers=_admin_headers(),
++    )
++    assert r.status_code == 200
++    body = r.json()
++    assert "branches" in body.get("data", {})
++    assert body["data"].get("conflict_details") is not None  # fallback flag
+diff --git a/rag/tests/unit/test_fallback.py b/rag/tests/unit/test_fallback.py
+new file mode 100644
+index 0000000..6891eaa
+--- /dev/null
++++ b/rag/tests/unit/test_fallback.py
+@@ -0,0 +1,88 @@
++"""Tests for IntervalSolver.solve_with_fallback() with allow_soft_fallback (spec §8.2, D3 strict-priority).
++
++DEVIATION FROM BRIEF: tests call `solver.solve_with_fallback()` instead of
++`solver.solve()`. Reason: the existing `solve()` returns the V2 multi-branch
++shape (`{status, branches, primary_branch, conflicts, trace}`) consumed by
++`/v1/constraints`. The brief's tests use the V1 shape (`dict[str, _ParameterResult]`).
++Adding a separate `solve_with_fallback()` method preserves the V2 endpoint
++unchanged while exposing the soft-fallback path for `/v1/calculate`.
++"""
++from __future__ import annotations
++
++import pytest
++import portion  # type: ignore[import]
++
++from ekrs_shared.models import Constraint, Priority
++
++from ekrs_rag.constraint_engine.solver import IntervalSolver
++
++
++def _hard(value: float, op: str = "<=", priority=Priority.NATIONAL) -> Constraint:
++    return Constraint(
++        parameter="temperature", operator=op, value=value, unit="°C",
++        priority=priority, confidence=0.95, source={"block_id": "b1"},
++    )
++
++
++def _soft(value: float, op: str = "<=") -> Constraint:
++    return Constraint(
++        parameter="temperature", operator=op, value=value, unit="°C",
++        priority=Priority.REFERENCE, confidence=0.5, source={"block_id": "b2"},
++    )
++
++
++def test_hard_non_empty_direct_solve():
++    solver = IntervalSolver()
++    result = solver.solve_with_fallback([_hard(100, "<=")], allow_soft_fallback=True)
++    assert result["temperature"].interval.upper <= 100
++
++
++def test_hard_empty_with_soft_falls_back_when_allowed():
++    solver = IntervalSolver()
++    # Hard constraints are mutually exclusive (impossible)
++    hard = [_hard(50, "<="), _hard(100, ">=")]
++    soft = [_soft(200, "<=")]
++    result = solver.solve_with_fallback(
++        hard + soft, allow_soft_fallback=True, strict=False
++    )
++    # Soft constraint temp <= 200 should be the result
++    assert result["temperature"].interval.upper <= 200
++
++
++def test_strict_blocks_soft_fallback_returns_400_via_caller():
++    """Caller maps StrictViolationError → 400 strict_violation (R6 enforcement)."""
++    from ekrs_rag.constraint_engine.solver import StrictViolationError
++    solver = IntervalSolver()
++    hard = [_hard(50, "<="), _hard(100, ">=")]
++    soft = [_soft(200, "<=")]
++    with pytest.raises(StrictViolationError):
++        solver.solve_with_fallback(
++            hard + soft, allow_soft_fallback=True, strict=True
++        )
++
++
++def test_allow_soft_false_blocks_fallback():
++    solver = IntervalSolver()
++    hard = [_hard(50, "<="), _hard(100, ">=")]
++    soft = [_soft(200, "<=")]
++    result = solver.solve_with_fallback(
++        hard + soft, allow_soft_fallback=False, strict=False
++    )
++    # Hard empty + no fallback → empty interval
++    assert result["temperature"].interval == portion.empty()
++
++
++def test_no_soft_constraints_returns_empty_when_hard_empty():
++    solver = IntervalSolver()
++    hard = [_hard(50, "<="), _hard(100, ">=")]
++    result = solver.solve_with_fallback(hard, allow_soft_fallback=True, strict=False)
++    assert result["temperature"].interval == portion.empty()
++
++
++def test_default_allow_soft_true_preserves_backward_compat():
++    """Existing callers that don't pass allow_soft_fallback still get fallback."""
++    solver = IntervalSolver()
++    hard = [_hard(50, "<="), _hard(100, ">=")]
++    soft = [_soft(200, "<=")]
++    result = solver.solve_with_fallback(hard + soft)  # defaults
++    assert result["temperature"].interval.upper <= 200
+diff --git a/shared/ekrs_shared/models.py b/shared/ekrs_shared/models.py
+index 51c6c68..db50835 100644
+--- a/shared/ekrs_shared/models.py
++++ b/shared/ekrs_shared/models.py
+@@ -1,21 +1,21 @@
+ """EKRS shared Pydantic models.
+ 
+ Mirrors doc-to-md DocumentBlock IR schema and adds RAG-specific types.
+ """
+ 
+ from __future__ import annotations
+ 
+ from enum import IntEnum
+ from typing import Any, List, Literal, Optional, Tuple, Union
+ 
+-from pydantic import BaseModel, Field
++from pydantic import BaseModel, Field, field_validator
+ 
+ 
+ # --- DocumentBlock IR (mirrors doc-to-md shared/schema.py) ---
+ 
+ 
+ class Content(BaseModel):
+     raw: str = ""
+     structured: Optional[Any] = None
+     formulas: Optional[Any] = None
+     md_preview: str = ""
+@@ -139,20 +139,39 @@ class Constraint(BaseModel):
+     unit: str
+     category: str = "general"
+     priority: Priority = Priority.PROJECT
+     confidence: float = 1.0
+     conditions: List[Condition] = Field(default_factory=list)
+     source: dict = Field(default_factory=dict)
+     scope_path: Optional[List[str]] = None
+     version: Optional[int] = None
+     content_hash: Optional[str] = None
+ 
++    @field_validator("priority", mode="before")
++    @classmethod
++    def _accept_priority_name(cls, v: Any) -> Any:
++        """Accept string enum names (e.g. "NATIONAL") for JSON API callers.
++
++        Pydantic v2 IntEnum rejects string names by default; this lets
++        /v1/calculate receive `"priority": "NATIONAL"` from external
++        callers without breaking in-process users that pass `Priority.NATIONAL`.
++        """
++        if isinstance(v, str):
++            try:
++                return Priority[v]
++            except KeyError as e:
++                raise ValueError(
++                    f"priority must be one of {[p.name for p in Priority]}, "
++                    f"got {v!r}"
++                ) from e
++        return v
++
+ 
+ class Evidence(BaseModel):
+     """Tracks provenance from source document to solved constraint."""
+ 
+     doc_id: str
+     block_id: str
+     page_num: Optional[int] = None
+     scope_path: Optional[List[str]] = None
+     source_text: str = ""
+     span: Tuple[int, int] = (0, 0)

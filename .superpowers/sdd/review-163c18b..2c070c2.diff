@@ -1,0 +1,182 @@
+# Review package: 163c18b..2c070c2
+
+## Commits
+2c070c2 feat(security): X-Admin-Key Depends + ADMIN_KEY/ENGINE_URL config (D1, #10)
+
+## Files changed
+ .env.example                     |  9 +++++++
+ rag/ekrs_rag/api/dependencies.py |  6 +++++
+ rag/ekrs_rag/core/config.py      |  7 ++++++
+ rag/ekrs_rag/security.py         | 36 ++++++++++++++++++++++++++++
+ rag/tests/unit/test_admin_key.py | 52 ++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 110 insertions(+)
+
+## Diff
+diff --git a/.env.example b/.env.example
+index efc353e..4c3c625 100644
+--- a/.env.example
++++ b/.env.example
+@@ -45,10 +45,19 @@ PORT=8000
+ # Phase 5: Observability
+ AUDIT_LOG_PATH=audit.log            # 永久 audit.log 路径
+ DEBUG_LOG_PATH=logs/debug.log       # debug 日志路径 (仅 EKRS_DEBUG=true 时生效)
+ 
+ # Phase 5.5 D: Metrics sidecar exporter (与 RAG 主端口 8000 分离)
+ # PROMETHEUS_MULTIPROC_DIR: 多 worker 模式必填;单 worker 留空即可。
+ # 必须在 uvicorn fork 子进程前由部署层设置(部署层面的 env)。
+ # PROMETHEUS_MULTIPROC_DIR=/tmp/prom_multiproc
+ METRICS_HOST=127.0.0.1  # docker-compose overrides to 0.0.0.0 for cross-container scrape
+ METRICS_PORT=9090
++
++# Phase 6A: X-Admin-Key auth (spec §16). Empty disables admin endpoints (503).
++ADMIN_KEY=
++
++# Phase 6A: parser callback URL (spec §18, already in use by ingestion flow).
++ENGINE_URL=http://localhost:8000
++
++# Phase 6A: documents metadata DB path (D8 — independent from task DB).
++DOCUMENTS_DB_PATH=/var/lib/ekrs/documents.db
+diff --git a/rag/ekrs_rag/api/dependencies.py b/rag/ekrs_rag/api/dependencies.py
+new file mode 100644
+index 0000000..48c2489
+--- /dev/null
++++ b/rag/ekrs_rag/api/dependencies.py
+@@ -0,0 +1,6 @@
++"""FastAPI dependencies (Phase 6A)."""
++from __future__ import annotations
++
++
++# Populated in Task 2:
++# def get_document_repo(request: Request) -> DocumentRepo: ...
+diff --git a/rag/ekrs_rag/core/config.py b/rag/ekrs_rag/core/config.py
+index 7adde31..46cedf1 100644
+--- a/rag/ekrs_rag/core/config.py
++++ b/rag/ekrs_rag/core/config.py
+@@ -47,20 +47,27 @@ class Settings(BaseSettings):
+     TASK_DB_PATH: str = "/var/lib/ekrs/tasks.db"
+ 
+     # Phase 5: observability
+     AUDIT_LOG_PATH: str = "audit.log"
+     DEBUG_LOG_PATH: str = "logs/debug.log"
+ 
+     # Server
+     HOST: str = "0.0.0.0"
+     PORT: int = 8000
+ 
++    # Phase 6A: admin auth + parser callback
++    ADMIN_KEY: str = ""  # empty = /calculate returns 503
++    ENGINE_URL: str = "http://localhost:8000"
++    # D8: independent DB path for spec §4 documents table trio
++    # (decoupled from TASK_DB_PATH so the two repos can run on separate disks).
++    DOCUMENTS_DB_PATH: str = "/var/lib/ekrs/documents.db"
++
+     @field_validator("PARSER_TOKEN")
+     @classmethod
+     def token_min_length(cls, v: str) -> str:
+         if len(v) < 32:
+             raise ValueError("PARSER_TOKEN must be >= 32 characters")
+         return v
+ 
+     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+ 
+ 
+diff --git a/rag/ekrs_rag/security.py b/rag/ekrs_rag/security.py
+new file mode 100644
+index 0000000..14fcc9a
+--- /dev/null
++++ b/rag/ekrs_rag/security.py
+@@ -0,0 +1,36 @@
++"""X-Admin-Key authentication dependency (spec §16, D1).
++
++Distinguishes missing/bad keys (401) from unset `ADMIN_KEY` config (503).
++Endpoints that need admin scope declare `Depends(require_admin_key)`.
++"""
++from __future__ import annotations
++
++from fastapi import Header, HTTPException
++
++from ekrs_rag.core.config import settings
++
++
++def verify_admin_key(value: str | None, expected: str) -> bool:
++    """Pure helper: return True iff value matches expected (non-empty expected)."""
++    if not expected:
++        return False
++    if not value:
++        return False
++    return value == expected
++
++
++def require_admin_key(
++    x_admin_key: str | None = Header(None, alias="X-Admin-Key"),
++) -> None:
++    """FastAPI dependency. 401 for missing/bad, 503 if ADMIN_KEY is empty."""
++    # D3: read from Pydantic Settings (already loaded at app import).
++    expected = (settings.ADMIN_KEY or "").strip()
++    if not expected:
++        raise HTTPException(
++            status_code=503,
++            detail="admin_key_not_configured: ADMIN_KEY config is empty",
++        )
++    if not x_admin_key or x_admin_key != expected:
++        raise HTTPException(
++            status_code=401, detail="Invalid or missing X-Admin-Key"
++        )
+diff --git a/rag/tests/unit/test_admin_key.py b/rag/tests/unit/test_admin_key.py
+new file mode 100644
+index 0000000..b49eae9
+--- /dev/null
++++ b/rag/tests/unit/test_admin_key.py
+@@ -0,0 +1,52 @@
++"""Tests for X-Admin-Key authentication dependency (D1, spec §16)."""
++from __future__ import annotations
++
++import pytest
++from fastapi import HTTPException
++
++from ekrs_rag.core.config import settings
++from ekrs_rag.security import require_admin_key, verify_admin_key
++
++
++@pytest.fixture
++def admin_key_env(monkeypatch):
++    # PF1: Pydantic Settings v2 models are mutable by default; setattr is the
++    # idiomatic way to override Pydantic settings in tests without env churn.
++    monkeypatch.setattr(settings, "ADMIN_KEY", "test-secret-32chars-abcdefghijklmno")
++
++
++def test_verify_admin_key_returns_true_on_match():
++    assert verify_admin_key("test-secret-32chars-abcdefghijklmno", expected="test-secret-32chars-abcdefghijklmno") is True
++
++
++def test_verify_admin_key_returns_false_on_mismatch():
++    assert verify_admin_key("wrong", expected="right") is False
++
++
++def test_verify_admin_key_returns_false_on_none():
++    assert verify_admin_key(None, expected="right") is False
++
++
++def test_require_admin_key_missing_header_raises_401(admin_key_env):
++    with pytest.raises(HTTPException) as exc:
++        require_admin_key(x_admin_key=None)
++    assert exc.value.status_code == 401
++
++
++def test_require_admin_key_wrong_value_raises_401(admin_key_env):
++    with pytest.raises(HTTPException) as exc:
++        require_admin_key(x_admin_key="bad")
++    assert exc.value.status_code == 401
++
++
++def test_require_admin_key_correct_value_passes(admin_key_env):
++    require_admin_key(x_admin_key="test-secret-32chars-abcdefghijklmno")  # no raise
++
++
++def test_require_admin_key_admin_key_unset_raises_503(monkeypatch):
++    # PF1: simulate unset config by clearing the Pydantic field.
++    monkeypatch.setattr(settings, "ADMIN_KEY", "")
++    with pytest.raises(HTTPException) as exc:
++        require_admin_key(x_admin_key="anything")
++    assert exc.value.status_code == 503
++    assert "admin_key_not_configured" in exc.value.detail

@@ -1,0 +1,967 @@
+# Review package: 5a2b303..HEAD
+
+## Commits
+09191fc refactor(retrieval): remove BGESmallEmbedder, simplify retriever (D5)
+
+## Files changed
+ rag/ekrs_rag/main.py                   |  46 ++++++----
+ rag/ekrs_rag/retrieval/embedder.py     | 157 ---------------------------------
+ rag/ekrs_rag/retrieval/retriever.py    | 141 ++++-------------------------
+ rag/tests/unit/test_embedder.py        | 113 ------------------------
+ rag/tests/unit/test_retriever.py       |  44 +++------
+ rag/tests/unit/test_retriever_scope.py |  16 ++--
+ 6 files changed, 64 insertions(+), 453 deletions(-)
+
+## Diff
+diff --git a/rag/ekrs_rag/main.py b/rag/ekrs_rag/main.py
+index 23f032e..ce1380f 100644
+--- a/rag/ekrs_rag/main.py
++++ b/rag/ekrs_rag/main.py
+@@ -18,21 +18,21 @@ from prometheus_client import CollectorRegistry, multiprocess, start_http_server
+ 
+ from .api.middleware.observability import ObservabilityMiddleware
+ from .api.routes import calculate, constraints, ingestion, trace
+ from .concurrency.compensation import CompensationScanner
+ from .concurrency.redis_lock import RedisLock
+ from .core.config import settings
+ from .core.logging import setup_logging
+ from .ingestion.pipeline import IngestionPipeline
+ from .observability.audit import AuditWriter, attach_index, set_writer
+ from .observability.audit_index import AuditIndex
+-from .retrieval.embedder import BGESmallEmbedder
++from .retrieval.embedding_service import EmbeddingService
+ from .retrieval.qdrant_client import QdrantManager
+ from .retrieval.retriever import EKRSRetriever
+ from .storage.task_repo import TaskRepo
+ from .storage.documents import DocumentRepo
+ 
+ logger = logging.getLogger(__name__)
+ 
+ # Phase 4.5: real handler will be wired to IngestionPipeline.ingest via
+ # callback_url (per Task 7). Until then, the stub handler in lifespan() does
+ # no work, so the scanner must NOT claim-and-bump attempts for orphan rows;
+@@ -48,21 +48,20 @@ async def _stub_compensation_handler(task: dict) -> None:
+ 
+ 
+ def _get_compensation_handler():
+     """Lookup indirection so tests can monkeypatch this function to inject
+     a real handler without rewriting main.py."""
+     return _stub_compensation_handler
+ 
+ # Shared across app via module-level state
+ _qdrant: QdrantManager | None = None
+ _pipeline: IngestionPipeline | None = None
+-_embedder: BGESmallEmbedder | None = None
+ _retriever: EKRSRetriever | None = None
+ _audit_writer: AuditWriter | None = None
+ _audit_index: AuditIndex | None = None
+ _task_repo: TaskRepo | None = None
+ _doc_repo: DocumentRepo | None = None
+ 
+ # All audit event schemas required by spec §Audit (registered at startup).
+ # Phase 6A (D5 retro): the 2 optional fields (lineage_snapshot,
+ # conflict_details) are NOT in any event's required schema. They pass
+ # through `log_event`'s defensive spread via `_PHASE6A_OPTIONAL` in the
+@@ -89,23 +88,23 @@ _EVENT_SCHEMAS = {
+     "qdrant_write_failed": {"collection"},
+     "lock_acquire_failed": {"lock_key"},
+     # Phase 6A (T2 soft-fail audit): registered after Task 2 write-site was
+     # added (c439d50) so audit-event invariant count becomes 16.
+     "document_metadata_failed": {"request_id", "doc_id", "error"},
+ }
+ 
+ 
+ @asynccontextmanager
+ async def lifespan(app: FastAPI):
+-    """Startup: init logging, Qdrant, embedder, retriever, ingestion pipeline,
++    """Startup: init logging, Qdrant, embedding service, retriever, ingestion pipeline,
+     redis, task_repo, compensation scanner, AuditWriter, AuditIndex."""
+-    global _qdrant, _pipeline, _embedder, _retriever
++    global _qdrant, _pipeline, _retriever
+     global _audit_writer, _audit_index, _task_repo, _doc_repo
+ 
+     # ---- Phase 5.5 D: sidecar metrics exporter ----
+     multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+     # 0.0.0.0 allows cross-container scraping in docker-compose. For local
+     # development without Docker, set METRICS_HOST=127.0.0.1 to limit exposure.
+     metrics_host = os.environ.get("METRICS_HOST", "0.0.0.0")
+     metrics_port = int(os.environ.get("METRICS_PORT", "9090"))
+ 
+     setup_logging(debug=settings.EKRS_DEBUG, debug_log_path=settings.DEBUG_LOG_PATH)
+@@ -148,40 +147,51 @@ async def lifespan(app: FastAPI):
+             "process owns the port; continuing without local exporter",
+             metrics_host,
+             metrics_port,
+             e,
+         )
+         app.state.metrics_httpd = None
+ 
+     try:
+         logger.info("Starting EKRS RAG service (debug=%s)", settings.EKRS_DEBUG)
+ 
+-        _qdrant = QdrantManager(
+-            host=settings.QDRANT_HOST,
+-            port=settings.QDRANT_PORT,
+-            collection_name=settings.COLLECTION_NAME,
+-            vector_size=384,  # bge-small is 384d
+-        )
+-
+         try:
+-            _qdrant.ensure_collection(vector_size=384)
++            # Phase 6B D5: EmbeddingService facade wraps bge-m3 ONNX;
++            # QdrantManager consumes it (no embedder arg on retriever).
++            embedding_service = EmbeddingService()
++            _qdrant = QdrantManager(
++                host=settings.QDRANT_HOST,
++                port=settings.QDRANT_GRPC_PORT,
++                collection_name=settings.COLLECTION_NAME,
++                embedding_service=embedding_service,
++                auto_reindex=settings.AUTO_REINDEX,
++            )
++            # D4: rebuild collection (if dim mismatch) in lifespan, before serve.
++            # asyncio.to_thread: ensure_collection is sync; offload from event loop.
++            await asyncio.to_thread(_qdrant.ensure_collection)
+             logger.info("Qdrant collection ready: %s", settings.COLLECTION_NAME)
+         except Exception as e:
+-            logger.error("Qdrant connection failed: %s", e)
+-            # Don't crash — endpoints will return 503
++            logger.exception(
++                "RAG service startup failed during Qdrant/Embedding init: %s. "
++                "Check Qdrant reachability, model files, and AUTO_REINDEX setting.",
++                e,
++            )
++            raise  # FastAPI lifespan will record startup failure
++
++        app.state.embedding_service = embedding_service
++        app.state.qdrant_manager = _qdrant
+ 
+-        # Phase 2b: init embedder + retriever
+-        _embedder = BGESmallEmbedder()
+-        _retriever = EKRSRetriever(qdrant=_qdrant, embedder=_embedder)
++        # Phase 2b: retriever (no longer takes embedder — qdrant.search
++        # handles embedding internally via injected EmbeddingService).
++        _retriever = EKRSRetriever(qdrant=_qdrant)
+ 
+         # retriever wired to app.state below; get_retriever dep reads it
+-        app.state.embedder = _embedder
+         app.state.retriever = _retriever
+ 
+         _pipeline = IngestionPipeline(_qdrant, settings.SHARED_STORAGE_PATH)
+         app.state.pipeline = _pipeline
+ 
+         # Phase 4: redis, task_repo, lock, compensation
+         _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+         _redis_lock = RedisLock(_redis)
+         _task_repo = TaskRepo(db_path=settings.TASK_DB_PATH)
+         _task_repo.init()
+diff --git a/rag/ekrs_rag/retrieval/embedder.py b/rag/ekrs_rag/retrieval/embedder.py
+deleted file mode 100644
+index da33949..0000000
+--- a/rag/ekrs_rag/retrieval/embedder.py
++++ /dev/null
+@@ -1,157 +0,0 @@
+-"""BGESmall ONNX embedder for EKRS RAG.
+-
+-Loads bge-small-en-v1.5 ONNX model from rag/models/ directory.
+-Falls back to dummy zero vectors when model files are absent (CI/CI without model download).
+-"""
+-
+-from __future__ import annotations
+-
+-import logging
+-import time
+-from pathlib import Path
+-from typing import Optional, TYPE_CHECKING
+-
+-logger = logging.getLogger(__name__)
+-
+-# Model configuration
+-MODEL_DIR = Path(__file__).parent.parent.parent / "models" / "bge-small-en-v1.5"
+-ONNX_MODEL_PATH = MODEL_DIR / "onnx" / "model.onnx"
+-VECTOR_SIZE = 384  # bge-small-en-v1.5 output dimension
+-
+-# Try importing onnxruntime and transformers
+-try:
+-    import onnxruntime as ort
+-
+-    ONNXRUNTIME_AVAILABLE = True
+-except ImportError:
+-    ort = None  # type: ignore[assignment]
+-    ONNXRUNTIME_AVAILABLE = False
+-    logger.warning("onnxruntime not available, using dummy embedder")
+-
+-try:
+-    from transformers import AutoTokenizer
+-
+-    TRANSFORMERS_AVAILABLE = True
+-except ImportError:
+-    AutoTokenizer = None  # type: ignore[assignment]
+-    TRANSFORMERS_AVAILABLE = False
+-    logger.warning("transformers not available, using dummy embedder")
+-
+-
+-class BGESmallEmbedder:
+-    """ONNX embedder for bge-small-en-v1.5.
+-
+-    Encodes texts into 384-dimensional dense vectors using L2-normalized embeddings.
+-    Falls back to dummy zero vectors when model files are absent.
+-    """
+-
+-    def __init__(self) -> None:
+-        self._session: Optional["ort.InferenceSession"] = None
+-        self._tokenizer: Optional["AutoTokenizer"] = None
+-        self._dummy_mode: bool = False
+-
+-        self._model_load()
+-
+-    def _model_load(self) -> None:
+-        """Load ONNX model and tokenizer, or fall back to dummy mode."""
+-        if not ONNXRUNTIME_AVAILABLE or not TRANSFORMERS_AVAILABLE:
+-            logger.warning("Dependencies unavailable, using dummy embedder")
+-            self._dummy_mode = True
+-            self._warmup()
+-            return
+-
+-        if not ONNX_MODEL_PATH.exists():
+-            logger.warning(
+-                "ONNX model not found at %s, using dummy embedder",
+-                ONNX_MODEL_PATH,
+-            )
+-            self._dummy_mode = True
+-            self._warmup()
+-            return
+-
+-        try:
+-            # Load tokenizer
+-            tokenizer_path = str(MODEL_DIR / "onnx")
+-            self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+-
+-            # Load ONNX model
+-            sess_options = ort.SessionOptions()  # type: ignore[union-attr]
+-            sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL  # type: ignore[union-attr]
+-            self._session = ort.InferenceSession(  # type: ignore[union-attr]
+-                str(ONNX_MODEL_PATH),
+-                sess_options=sess_options,
+-                providers=["CPUExecutionProvider"],
+-            )
+-
+-            # Warmup
+-            self._warmup()
+-            logger.info("Loaded bge-small-en-v1.5 ONNX model from %s", ONNX_MODEL_PATH)
+-
+-        except Exception as e:
+-            logger.warning(
+-                "Failed to load ONNX model: %s, using dummy embedder",
+-                e,
+-            )
+-            self._dummy_mode = True
+-            self._warmup()
+-
+-    def _warmup(self) -> None:
+-        """Run one dummy forward pass to warm up the model."""
+-        start = time.perf_counter()
+-        _ = self.encode(["warmup"])
+-        duration = time.perf_counter() - start
+-        if self._dummy_mode:
+-            logger.info("Dummy embedder warmup completed in %.3f s", duration)
+-        else:
+-            logger.info("Model warmup completed in %.3f s", duration)
+-
+-    def _l2_normalize(self, vectors: list[list[float]]) -> list[list[float]]:
+-        """L2 normalize each vector."""
+-        normalized = []
+-        for vec in vectors:
+-            norm = sum(v * v for v in vec) ** 0.5
+-            if norm > 0:
+-                normalized.append([v / norm for v in vec])
+-            else:
+-                normalized.append(vec)
+-        return normalized
+-
+-    def encode(self, texts: list[str]) -> list[list[float]]:
+-        """Encode texts into 384-dimensional dense vectors.
+-
+-        Args:
+-            texts: List of texts to encode.
+-
+-        Returns:
+-            List of 384-dimensional L2-normalized dense vectors.
+-        """
+-        if self._dummy_mode:
+-            return [[0.0] * VECTOR_SIZE for _ in texts]
+-
+-        # Tokenize
+-        inputs = self._tokenizer(
+-            texts,
+-            padding=True,
+-            truncation=True,
+-            max_length=512,
+-            return_tensors="np",
+-        )
+-
+-        # Run inference
+-        input_names = [inp.name for inp in self._session.get_inputs()]
+-        onnx_inputs = {
+-            name: inputs[name]
+-            for name in input_names
+-            if name in inputs
+-        }
+-
+-        outputs = self._session.run(None, onnx_inputs)
+-        embeddings = outputs[0].tolist()
+-
+-        # L2 normalize
+-        return self._l2_normalize(embeddings)
+-
+-    @property
+-    def vector_size(self) -> int:
+-        """Return the embedding vector size (384 for bge-small-en-v1.5)."""
+-        return VECTOR_SIZE
+diff --git a/rag/ekrs_rag/retrieval/retriever.py b/rag/ekrs_rag/retrieval/retriever.py
+index dcdc8cd..5fd1878 100644
+--- a/rag/ekrs_rag/retrieval/retriever.py
++++ b/rag/ekrs_rag/retrieval/retriever.py
+@@ -1,214 +1,105 @@
+-"""Dense-only retriever for EKRS RAG.
++"""Scope-aware retriever (Phase 6B).
+ 
+-Phase 2b: Embeds queries with BGESmall and searches Qdrant with dense vectors.
+-Phase 3: Scope-aware ranking (national > industry > enterprise > project).
+-Numeric hints are extracted from retrieved chunks for downstream solving.
++Embeds queries via QdrantManager.search(query_text=...) which now
++internally uses EmbeddingService. Retriever no longer holds embedder
++directly (D5 simplification).
+ """
+-
+ from __future__ import annotations
+ 
+ import logging
+ from dataclasses import dataclass
+ from typing import List, Optional
+ 
+ from ekrs_shared.models import Chunk, NumericHint
+ 
+ from ekrs_rag.ingestion.numeric_hint_extractor import extract_hints
+-from ekrs_rag.retrieval.embedder import BGESmallEmbedder
+ from ekrs_rag.retrieval.qdrant_client import QdrantManager
+ 
+ logger = logging.getLogger(__name__)
+ 
+-
+-# Scope priority: national > industry > enterprise > project > reference
+ _SCOPE_PRIORITY_MAP = {
+-    "national": 100,
+-    "industry": 80,
+-    "enterprise": 60,
+-    "project": 40,
+-    "reference": 20,
++    "national": 100, "industry": 80, "enterprise": 60, "project": 40, "reference": 20,
+ }
+ 
+ 
+ @dataclass
+ class RetrievalResult:
+-    """Result of a retrieval query.
+-
+-    Attributes:
+-        chunks: List of retrieved Chunk objects, filtered by scope if applicable.
+-        vector_scores: Parallel list of cosine similarity scores (0.0-1.0).
+-        scope_scores: Parallel list of scope priority scores (0.0-1.0).
+-        final_scores: Composite scores = vector * (1 + scope), where scope
+-            is already normalized to 0.0-1.0 from _scope_priority().
+-    """
+-
+     chunks: List[Chunk]
+     vector_scores: List[float]
+     scope_scores: List[float]
+     final_scores: List[float]
+ 
+     @property
+     def scores(self) -> List[float]:
+-        """Backward-compat alias — returns vector_scores."""
+         return self.vector_scores
+ 
+ 
+ class EKRSRetriever:
+-    """Dense-only retriever using BGESmall embeddings.
+-
+-    Phase 2b replaces Phase 1 dummy-vector retrieval with real bge-small-en-v1.5
+-    384-dimensional embeddings.
+-    """
+-
+-    def __init__(self, qdrant: QdrantManager, embedder: BGESmallEmbedder):
+-        """Initialize retriever.
+-
+-        Args:
+-            qdrant: QdrantManager instance for vector search.
+-            embedder: BGESmallEmbedder instance for query encoding.
+-        """
++    def __init__(self, qdrant: QdrantManager) -> None:
+         self._qdrant = qdrant
+-        self._embedder = embedder
+ 
+     def retrieve(
+         self,
+         query: str,
+         top_k: int = 40,
+         active_scope: Optional[List[str]] = None,
+     ) -> RetrievalResult:
+-        """Retrieve chunks by semantic similarity to query.
+-
+-        1. Embed query with BGESmall → 384d dense vector.
+-        2. Search Qdrant with dense vector.
+-        3. Optionally filter by scope_path prefix.
+-        4. Extract NumericHints from each chunk text.
+-
+-        Args:
+-            query: Free-text query string.
+-            top_k: Maximum number of chunks to retrieve (before scope filtering).
+-            active_scope: Optional scope path prefix to filter results.
+-                          e.g. ["national", "GB"] matches scope_path starting with that prefix.
+-
+-        Returns:
+-            RetrievalResult with filtered chunks and parallel scores.
+-        """
+-        # Step 1: Encode query
+-        query_vectors = self._embedder.encode([query])
+-        if not query_vectors:
+-            logger.warning("Embedder returned no vectors for query")
+-            return RetrievalResult(chunks=[], vector_scores=[], scope_scores=[], final_scores=[])
+-
+-        query_vector = query_vectors[0]
+-
+-        # Step 2: Dense search in Qdrant
+-        hits = self._qdrant.search(query_vector=query_vector, top_k=top_k)
+-
++        # Phase 6B: qdrant.search handles embedding internally (D5)
++        hits = self._qdrant.search(query_text=query, top_k=top_k)
+         if not hits:
+             return RetrievalResult(chunks=[], vector_scores=[], scope_scores=[], final_scores=[])
+ 
+         payloads, raw_scores = zip(*hits)
+-
+-        # Step 3: Build Chunk objects from payloads
+         chunks: List[Chunk] = []
+         vector_scores: List[float] = []
+ 
+         for payload, score in zip(payloads, raw_scores):
+-            # Reconstruct Chunk from Qdrant payload
+             chunk = Chunk(
+                 text=payload.get("text", ""),
+                 scope_path=payload.get("scope_path", []),
+                 source_block_ids=payload.get("source_block_ids", []),
+                 token_count=payload.get("token_count", 0),
+                 doc_hash=payload.get("doc_hash", ""),
+                 version=payload.get("version", 0),
+                 page_numbers=payload.get("page_numbers", []),
+-                numeric_hints=[],  # populated below
++                numeric_hints=[],
+             )
+-
+-            # Step 4: Scope filtering (post-retrieval)
+             if active_scope is not None:
+                 if not chunk.scope_path:
+                     continue
+-                # Check if chunk.scope_path starts with the active_scope prefix
+                 if not self._scope_matches(chunk.scope_path, active_scope):
+                     continue
+-
+-            # Step 5: Extract numeric hints from chunk text
+             hints: List[NumericHint] = extract_hints(chunk)
+             chunk.numeric_hints = hints
+-
+             chunks.append(chunk)
+             vector_scores.append(score)
+ 
+-        # Step 6: Scope-aware ranking (composite score)
+-        chunks, vector_scores, scope_scores, final_scores = self._rank_by_scope(
+-            chunks, vector_scores
+-        )
+-
+-        logger.debug(
+-            "Retrieved %d chunks (of %d hits), scope=%s",
+-            len(chunks),
+-            len(hits),
+-            active_scope,
+-        )
+-
++        chunks, vector_scores, scope_scores, final_scores = self._rank_by_scope(chunks, vector_scores)
++        logger.debug("Retrieved %d chunks, scope=%s", len(chunks), active_scope)
+         return RetrievalResult(
+-            chunks=chunks,
+-            vector_scores=vector_scores,
+-            scope_scores=scope_scores,
+-            final_scores=final_scores,
++            chunks=chunks, vector_scores=vector_scores,
++            scope_scores=scope_scores, final_scores=final_scores,
+         )
+ 
+     @staticmethod
+     def _scope_priority(chunk: Chunk) -> float:
+-        """Get scope priority score for a chunk.
+-
+-        Returns normalized priority (0.0-1.0) based on first element of scope_path.
+-        """
+         if not chunk.scope_path:
+             return 0.0
+         first = chunk.scope_path[0].lower()
+         return _SCOPE_PRIORITY_MAP.get(first, 40) / 100.0
+ 
+-    def _rank_by_scope(
+-        self, chunks: List[Chunk], vector_scores: List[float]
+-    ) -> tuple[List[Chunk], List[float], List[float], List[float]]:
+-        """Rank chunks by composite score: vec * (1 + scope).
+-
+-        scope is already normalized to 0.0-1.0 by _scope_priority().
+-        For example: national (scope=1.0) + vec=1.0 -> final=2.0;
+-                     project (scope=0.4) + vec=1.0 -> final=1.4.
+-
+-        Returns (sorted_chunks, sorted_vector_scores, scope_scores, final_scores)
+-        sorted by final_scores descending.
+-        """
++    def _rank_by_scope(self, chunks, vector_scores):
+         if not chunks:
+             return [], [], [], []
+-
+         scope_scores = [self._scope_priority(c) for c in chunks]
+-        # final = vec * (1 + scope/100)
+-        final_scores = [
+-            vec * (1 + scope) for vec, scope in zip(vector_scores, scope_scores)
+-        ]
+-
+-        # Sort descending by final_scores, keeping parallel lists aligned
++        final_scores = [vec * (1 + scope) for vec, scope in zip(vector_scores, scope_scores)]
+         combined = list(zip(chunks, vector_scores, scope_scores, final_scores))
+         combined.sort(key=lambda x: x[3], reverse=True)
+-
+         sorted_chunks, sorted_vec, sorted_scope, sorted_final = zip(*combined)
+         return list(sorted_chunks), list(sorted_vec), list(sorted_scope), list(sorted_final)
+ 
+     @staticmethod
+-    def _scope_matches(chunk_scope: List[str], active_scope: List[str]) -> bool:
+-        """Check if chunk_scope starts with active_scope prefix.
+-
+-        Args:
+-            chunk_scope: The chunk's scope_path.
+-            active_scope: The query's active_scope prefix.
+-
+-        Returns:
+-            True if chunk_scope starts with active_scope, False otherwise.
+-        """
++    def _scope_matches(chunk_scope, active_scope):
+         if len(chunk_scope) < len(active_scope):
+             return False
+         return chunk_scope[: len(active_scope)] == active_scope
+diff --git a/rag/tests/unit/test_embedder.py b/rag/tests/unit/test_embedder.py
+deleted file mode 100644
+index 25f8a48..0000000
+--- a/rag/tests/unit/test_embedder.py
++++ /dev/null
+@@ -1,113 +0,0 @@
+-"""Behavior tests for the BGE-small ONNX embedder."""
+-from __future__ import annotations
+-
+-from types import SimpleNamespace
+-
+-import pytest
+-
+-from ekrs_rag.retrieval import embedder as embedder_module
+-from ekrs_rag.retrieval.embedder import BGESmallEmbedder, VECTOR_SIZE
+-
+-
+-class _FakeTokenizer:
+-    def __call__(self, texts, **kwargs):
+-        assert texts
+-        assert kwargs["return_tensors"] == "np"
+-        return {"input_ids": [[1]], "attention_mask": [[1]], "unused": [[0]]}
+-
+-
+-class _FakeOutput:
+-    def tolist(self):
+-        return [[3.0, 4.0]]
+-
+-
+-class _FakeSession:
+-    def __init__(self, *args, **kwargs):
+-        self.args = args
+-        self.kwargs = kwargs
+-
+-    def get_inputs(self):
+-        return [SimpleNamespace(name="input_ids"), SimpleNamespace(name="attention_mask")]
+-
+-    def run(self, output_names, inputs):
+-        assert output_names is None
+-        assert set(inputs) == {"input_ids", "attention_mask"}
+-        return [_FakeOutput()]
+-
+-
+-def test_missing_dependencies_use_dummy_vectors(monkeypatch):
+-    monkeypatch.setattr(embedder_module, "ONNXRUNTIME_AVAILABLE", False)
+-
+-    embedder = BGESmallEmbedder()
+-
+-    assert embedder.encode(["one", "two"]) == [
+-        [0.0] * VECTOR_SIZE,
+-        [0.0] * VECTOR_SIZE,
+-    ]
+-    assert embedder.vector_size == VECTOR_SIZE
+-
+-
+-def test_missing_model_uses_dummy_vectors(monkeypatch, tmp_path):
+-    monkeypatch.setattr(embedder_module, "ONNXRUNTIME_AVAILABLE", True)
+-    monkeypatch.setattr(embedder_module, "TRANSFORMERS_AVAILABLE", True)
+-    monkeypatch.setattr(embedder_module, "ONNX_MODEL_PATH", tmp_path / "missing.onnx")
+-
+-    embedder = BGESmallEmbedder()
+-
+-    assert embedder._dummy_mode is True
+-    assert embedder.encode(["query"])[0] == [0.0] * VECTOR_SIZE
+-
+-
+-def test_model_load_failure_falls_back_to_dummy(monkeypatch, tmp_path):
+-    model = tmp_path / "model.onnx"
+-    model.touch()
+-
+-    class _BrokenAutoTokenizer:
+-        @staticmethod
+-        def from_pretrained(path):
+-            raise RuntimeError("bad tokenizer")
+-
+-    monkeypatch.setattr(embedder_module, "ONNXRUNTIME_AVAILABLE", True)
+-    monkeypatch.setattr(embedder_module, "TRANSFORMERS_AVAILABLE", True)
+-    monkeypatch.setattr(embedder_module, "ONNX_MODEL_PATH", model)
+-    monkeypatch.setattr(embedder_module, "AutoTokenizer", _BrokenAutoTokenizer)
+-
+-    embedder = BGESmallEmbedder()
+-
+-    assert embedder._dummy_mode is True
+-
+-
+-def test_onnx_inference_filters_inputs_and_normalizes(monkeypatch, tmp_path):
+-    model = tmp_path / "model.onnx"
+-    model.touch()
+-
+-    class _AutoTokenizer:
+-        @staticmethod
+-        def from_pretrained(path):
+-            return _FakeTokenizer()
+-
+-    session_options = SimpleNamespace(graph_optimization_level=None)
+-    fake_ort = SimpleNamespace(
+-        SessionOptions=lambda: session_options,
+-        GraphOptimizationLevel=SimpleNamespace(ORT_ENABLE_ALL="all"),
+-        InferenceSession=_FakeSession,
+-    )
+-
+-    monkeypatch.setattr(embedder_module, "ONNXRUNTIME_AVAILABLE", True)
+-    monkeypatch.setattr(embedder_module, "TRANSFORMERS_AVAILABLE", True)
+-    monkeypatch.setattr(embedder_module, "ONNX_MODEL_PATH", model)
+-    monkeypatch.setattr(embedder_module, "AutoTokenizer", _AutoTokenizer)
+-    monkeypatch.setattr(embedder_module, "ort", fake_ort)
+-
+-    embedder = BGESmallEmbedder()
+-    result = embedder.encode(["query"])
+-
+-    assert session_options.graph_optimization_level == "all"
+-    assert result[0] == pytest.approx([0.6, 0.8])
+-
+-
+-def test_l2_normalize_preserves_zero_vector(monkeypatch):
+-    monkeypatch.setattr(embedder_module, "ONNXRUNTIME_AVAILABLE", False)
+-    embedder = BGESmallEmbedder()
+-
+-    assert embedder._l2_normalize([[0.0, 0.0]]) == [[0.0, 0.0]]
+diff --git a/rag/tests/unit/test_retriever.py b/rag/tests/unit/test_retriever.py
+index 15a0866..a4bd921 100644
+--- a/rag/tests/unit/test_retriever.py
++++ b/rag/tests/unit/test_retriever.py
+@@ -1,26 +1,21 @@
+-"""Behavior tests for end-to-end retrieval and scope filtering."""
++"""Behavior tests for end-to-end retrieval and scope filtering.
++
++Phase 6B D5: Retriever no longer takes an embedder; embedding happens
++inside qdrant.search via injected EmbeddingService. Mocks here only
++target qdrant.search(query_text=..., top_k=...).
++"""
+ from __future__ import annotations
+ 
+ from ekrs_rag.retrieval.retriever import EKRSRetriever
+ 
+ 
+-class _Embedder:
+-    def __init__(self, vectors):
+-        self.vectors = vectors
+-        self.calls = []
+-
+-    def encode(self, texts):
+-        self.calls.append(texts)
+-        return self.vectors
+-
+-
+ class _Qdrant:
+     def __init__(self, hits):
+         self.hits = hits
+         self.calls = []
+ 
+     def search(self, **kwargs):
+         self.calls.append(kwargs)
+         return self.hits
+ 
+ 
+@@ -29,80 +24,65 @@ def _payload(scope_path, text="Temperature shall not exceed 80°C", block_id="b1
+         "text": text,
+         "scope_path": scope_path,
+         "source_block_ids": [block_id],
+         "token_count": 7,
+         "doc_hash": f"hash-{block_id}",
+         "version": 2,
+         "page_numbers": [1],
+     }
+ 
+ 
+-def test_retrieve_returns_empty_when_embedder_has_no_vector():
+-    qdrant = _Qdrant([(_payload(["national"]), 0.9)])
+-    retriever = EKRSRetriever(qdrant=qdrant, embedder=_Embedder([]))
+-
+-    result = retriever.retrieve("temperature limit")
+-
+-    assert result.chunks == []
+-    assert result.final_scores == []
+-    assert qdrant.calls == []
+-
+-
+ def test_retrieve_returns_empty_when_search_has_no_hits():
+     qdrant = _Qdrant([])
+-    embedder = _Embedder([[0.1, 0.2]])
+-    retriever = EKRSRetriever(qdrant=qdrant, embedder=embedder)
++
++    retriever = EKRSRetriever(qdrant=qdrant)
+ 
+     result = retriever.retrieve("temperature limit", top_k=3)
+ 
+     assert result.chunks == []
+-    assert qdrant.calls == [{"query_vector": [0.1, 0.2], "top_k": 3}]
++    assert qdrant.calls == [{"query_text": "temperature limit", "top_k": 3}]
+ 
+ 
+ def test_retrieve_filters_scope_and_extracts_evidenced_hints():
+     hits = [
+         (_payload([], block_id="unscoped"), 0.99),
+         (_payload(["industry", "API"], block_id="wrong"), 0.95),
+         (_payload(["national", "GB", "pressure"], block_id="match"), 0.8),
+     ]
+-    retriever = EKRSRetriever(
+-        qdrant=_Qdrant(hits), embedder=_Embedder([[0.1, 0.2]])
+-    )
++    retriever = EKRSRetriever(qdrant=_Qdrant(hits))
+ 
+     result = retriever.retrieve(
+         "temperature limit", active_scope=["national", "GB"]
+     )
+ 
+     assert [chunk.source_block_ids for chunk in result.chunks] == [["match"]]
+     assert result.vector_scores == [0.8]
+     assert result.scores == result.vector_scores
+     hint = result.chunks[0].numeric_hints[0]
+     assert hint.span
+     assert hint.source_text == "80°C"
+     assert hint.block_id == "match"
+     assert hint.scope_path == ["national", "GB", "pressure"]
+ 
+ 
+ def test_retrieve_ranks_matching_hits_by_composite_score():
+     hits = [
+         (_payload(["project", "alpha"], block_id="project"), 1.0),
+         (_payload(["national", "GB"], block_id="national"), 0.8),
+     ]
+-    retriever = EKRSRetriever(
+-        qdrant=_Qdrant(hits), embedder=_Embedder([[0.1, 0.2]])
+-    )
++    retriever = EKRSRetriever(qdrant=_Qdrant(hits))
+ 
+     result = retriever.retrieve("temperature limit")
+ 
+     assert [chunk.source_block_ids for chunk in result.chunks] == [
+         ["national"],
+         ["project"],
+     ]
+     assert result.vector_scores == [0.8, 1.0]
+     assert result.scope_scores == [1.0, 0.4]
+     assert result.final_scores == [1.6, 1.4]
+ 
+ 
+ def test_scope_match_rejects_shorter_chunk_scope():
+     assert EKRSRetriever._scope_matches(
+         ["national"], ["national", "GB"]
+-    ) is False
++    ) is False
+\ No newline at end of file
+diff --git a/rag/tests/unit/test_retriever_scope.py b/rag/tests/unit/test_retriever_scope.py
+index 7b82179..4992548 100644
+--- a/rag/tests/unit/test_retriever_scope.py
++++ b/rag/tests/unit/test_retriever_scope.py
+@@ -93,63 +93,63 @@ def reference_chunk() -> Chunk:
+ # TC_SCOPE_RANK_01: national scope ranks above project
+ # =============================================================================
+ 
+ 
+ def test_national_scope_ranks_above_project(project_chunk, national_chunk):
+     """national scope priority (100) > project scope priority (40)."""
+     # Same vector score, different scope -> national should rank higher
+     chunks = [project_chunk, national_chunk]
+     vec_scores = [1.0, 1.0]
+ 
+-    retriever = EKRSRetriever(qdrant=None, embedder=None)
++    retriever = EKRSRetriever(qdrant=None)
+     sorted_chunks, sorted_vec, scope_scores, final_scores = retriever._rank_by_scope(
+         chunks, vec_scores
+     )
+ 
+     assert sorted_chunks[0] == national_chunk
+     assert sorted_chunks[1] == project_chunk
+     assert scope_scores[0] == 1.0  # national = 100/100
+     assert scope_scores[1] == 0.4  # project = 40/100
+ 
+ 
+ # =============================================================================
+ # TC_SCOPE_RANK_02: industry scope ranks above enterprise
+ # =============================================================================
+ 
+ 
+ def test_industry_scope_ranks_above_enterprise(enterprise_chunk, industry_chunk):
+     """industry scope priority (80) > enterprise scope priority (60)."""
+     chunks = [enterprise_chunk, industry_chunk]
+     vec_scores = [1.0, 1.0]
+ 
+-    retriever = EKRSRetriever(qdrant=None, embedder=None)
++    retriever = EKRSRetriever(qdrant=None)
+     sorted_chunks, sorted_vec, scope_scores, final_scores = retriever._rank_by_scope(
+         chunks, vec_scores
+     )
+ 
+     assert sorted_chunks[0] == industry_chunk
+     assert sorted_chunks[1] == enterprise_chunk
+ 
+ 
+ # =============================================================================
+ # TC_SCOPE_RANK_03: No active_scope still ranks by scope priority
+ # =============================================================================
+ 
+ 
+ def test_no_active_scope_ranks_by_priority(
+     national_chunk, industry_chunk, project_chunk
+ ):
+     """Even without active_scope filtering, scope priority affects ranking."""
+     chunks = [project_chunk, industry_chunk, national_chunk]
+     vec_scores = [1.0, 1.0, 1.0]  # Equal vector scores
+ 
+-    retriever = EKRSRetriever(qdrant=None, embedder=None)
++    retriever = EKRSRetriever(qdrant=None)
+     sorted_chunks, sorted_vec, scope_scores, final_scores = retriever._rank_by_scope(
+         chunks, vec_scores
+     )
+ 
+     # Order should be: national (100) > industry (80) > project (40)
+     assert sorted_chunks[0] == national_chunk
+     assert sorted_chunks[1] == industry_chunk
+     assert sorted_chunks[2] == project_chunk
+ 
+ 
+@@ -158,92 +158,92 @@ def test_no_active_scope_ranks_by_priority(
+ # =============================================================================
+ 
+ 
+ def test_composite_score_calculation(national_chunk, project_chunk):
+     """final = vec * (1 + scope/100)."""
+     # national: 1.0 * (1 + 100/100) = 1.0 * 2.0 = 2.0
+     # project: 1.0 * (1 + 40/100) = 1.0 * 1.4 = 1.4
+     chunks = [project_chunk, national_chunk]
+     vec_scores = [1.0, 1.0]
+ 
+-    retriever = EKRSRetriever(qdrant=None, embedder=None)
++    retriever = EKRSRetriever(qdrant=None)
+     sorted_chunks, sorted_vec, scope_scores, final_scores = retriever._rank_by_scope(
+         chunks, vec_scores
+     )
+ 
+     assert final_scores[0] == 2.0  # national
+     assert final_scores[1] == 1.4  # project
+     # Verify scope_scores match _SCOPE_PRIORITY_MAP / 100
+     assert scope_scores[0] == pytest.approx(1.0)  # national = 100/100
+     assert scope_scores[1] == pytest.approx(0.4)  # project = 40/100
+ 
+ 
+ def test_composite_score_with_different_vector_scores(national_chunk, project_chunk):
+     """Higher vector score with lower scope can beat higher scope with lower vec."""
+     # national: 0.5 * 2.0 = 1.0
+     # project: 1.0 * 1.4 = 1.4  -> project wins
+     chunks = [national_chunk, project_chunk]
+     vec_scores = [0.5, 1.0]  # national has lower vec score
+ 
+-    retriever = EKRSRetriever(qdrant=None, embedder=None)
++    retriever = EKRSRetriever(qdrant=None)
+     sorted_chunks, sorted_vec, scope_scores, final_scores = retriever._rank_by_scope(
+         chunks, vec_scores
+     )
+ 
+     # project should win because 1.0*1.4 > 0.5*2.0
+     assert sorted_chunks[0] == project_chunk
+     assert sorted_chunks[1] == national_chunk
+     assert final_scores[0] == pytest.approx(1.4)  # project: 1.0 * 1.4
+     assert final_scores[1] == pytest.approx(1.0)  # national: 0.5 * 2.0
+ 
+ 
+ # =============================================================================
+ # Edge cases
+ # =============================================================================
+ 
+ 
+ def test_empty_chunks():
+     """Empty input returns empty lists."""
+-    retriever = EKRSRetriever(qdrant=None, embedder=None)
++    retriever = EKRSRetriever(qdrant=None)
+     chunks, vec, scope, final = retriever._rank_by_scope([], [])
+     assert chunks == []
+     assert vec == []
+     assert scope == []
+     assert final == []
+ 
+ 
+ def test_unknown_scope_defaults_to_project():
+     """Unknown scope prefixes default to project priority (40)."""
+     chunk = Chunk(
+         text="Temperature shall not exceed 80°C",
+         scope_path=["unknown_type", "thing"],
+         source_block_ids=["b1"],
+         token_count=10,
+         doc_hash="hash",
+         version=1,
+         page_numbers=[1],
+         numeric_hints=[],
+     )
+ 
+-    retriever = EKRSRetriever(qdrant=None, embedder=None)
++    retriever = EKRSRetriever(qdrant=None)
+     priority = retriever._scope_priority(chunk)
+ 
+     assert priority == pytest.approx(0.4)  # project = 40/100
+ 
+ 
+ def test_empty_scope_path_defaults_to_zero():
+     """Empty scope_path returns 0 priority."""
+     chunk = Chunk(
+         text="Temperature shall not exceed 80°C",
+         scope_path=[],
+         source_block_ids=["b1"],
+         token_count=10,
+         doc_hash="hash",
+         version=1,
+         page_numbers=[1],
+         numeric_hints=[],
+     )
+ 
+-    retriever = EKRSRetriever(qdrant=None, embedder=None)
++    retriever = EKRSRetriever(qdrant=None)
+     priority = retriever._scope_priority(chunk)
+ 
+     assert priority == 0.0

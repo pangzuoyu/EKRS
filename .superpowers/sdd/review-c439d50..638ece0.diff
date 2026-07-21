@@ -1,0 +1,228 @@
+# Review package: c439d50..638ece0906e84e46bf382b4a7bc2740774d4d2b9
+
+## Commits
+638ece0 feat(api): POST /v1/constraints/trace (read-only audit retrieval, D8 prefix)
+
+## Files changed
+ rag/ekrs_rag/api/routes/trace.py | 79 ++++++++++++++++++++++++++++++++++++++++
+ rag/ekrs_rag/main.py             |  3 +-
+ rag/tests/unit/test_trace.py     | 76 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 157 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/rag/ekrs_rag/api/routes/trace.py b/rag/ekrs_rag/api/routes/trace.py
+new file mode 100644
+index 0000000..526ef42
+--- /dev/null
++++ b/rag/ekrs_rag/api/routes/trace.py
+@@ -0,0 +1,79 @@
++"""POST /v1/constraints/trace — retrieve events for a trace_id from audit log.
++
++Read-only over the audit log via AuditIndex. No new audit writes.
++D8: scope_filter is a prefix match on event.scope_path.
++A2: lineage_snapshot / conflict_details are optional; old traces return null.
++"""
++from __future__ import annotations
++
++import logging
++from typing import Any
++
++from fastapi import APIRouter, Depends, Request
++from pydantic import BaseModel, Field
++
++from ekrs_rag.api.auth import require_parser_token
++from ekrs_rag.observability.audit_index import AuditIndex
++
++logger = logging.getLogger(__name__)
++router = APIRouter(prefix="/v1", tags=["trace"])
++
++
++class TraceRequest(BaseModel):
++    trace_id: str = Field(..., min_length=1)
++    scope_filter: str | None = None
++
++
++def _get_audit_index(request: Request) -> AuditIndex | None:
++    return getattr(request.app.state, "audit_index", None)
++
++
++@router.post("/constraints/trace")
++def constraints_trace(
++    body: TraceRequest,
++    request: Request,
++    _auth: None = Depends(require_parser_token),
++) -> dict[str, Any]:
++    """Read-only trace retrieval. No new audit event written."""
++    idx = _get_audit_index(request)
++    if idx is None:
++        return {
++            "trace_id": body.trace_id,
++            "events": [],
++            "lineage_snapshot": None,
++            "conflict_details": None,
++        }
++
++    lines = idx.seek(body.trace_id) or []
++    if body.scope_filter:
++        prefix = body.scope_filter
++        lines = [l for l in lines if (l.raw.get("scope_path") or "").startswith(prefix)]
++
++    events = [
++        {"event": l.event, "trace_id": l.trace_id, "offset": l.offset, "raw": l.raw}
++        for l in lines
++    ]
++
++    # D5: lineage_snapshot + conflict_details are pulled from the
++    # `constraint_solve_started` event's payload (the canonical write site).
++    # Fallback to first event for pre-6A traces that lack a solve_started event.
++    snapshot: str | None = None
++    details: list | None = None
++    start_event = next(
++        (e["raw"] for e in events if e["event"] == "constraint_solve_started"),
++        None,
++    )
++    if start_event is not None:
++        snapshot = start_event.get("lineage_snapshot")
++        details = start_event.get("conflict_details")
++    elif events:
++        # Pre-Phase 6A back-compat (A2): field absent on older audit entries.
++        first_raw = events[0]["raw"]
++        snapshot = first_raw.get("lineage_snapshot")
++        details = first_raw.get("conflict_details")
++    return {
++        "trace_id": body.trace_id,
++        "events": events,
++        "lineage_snapshot": snapshot,
++        "conflict_details": details,
++    }
+diff --git a/rag/ekrs_rag/main.py b/rag/ekrs_rag/main.py
+index 827b3ff..d3c2256 100644
+--- a/rag/ekrs_rag/main.py
++++ b/rag/ekrs_rag/main.py
+@@ -10,21 +10,21 @@ import logging
+ import os
+ from contextlib import asynccontextmanager
+ from pathlib import Path
+ 
+ import redis.asyncio as aioredis
+ from fastapi import FastAPI
+ from fastapi.responses import JSONResponse, PlainTextResponse
+ from prometheus_client import CollectorRegistry, multiprocess, start_http_server
+ 
+ from .api.middleware.observability import ObservabilityMiddleware
+-from .api.routes import constraints, ingestion
++from .api.routes import constraints, ingestion, trace
+ from .concurrency.compensation import CompensationScanner
+ from .concurrency.redis_lock import RedisLock
+ from .core.config import settings
+ from .core.logging import setup_logging
+ from .ingestion.pipeline import IngestionPipeline
+ from .observability.audit import AuditWriter, attach_index, set_writer
+ from .observability.audit_index import AuditIndex
+ from .retrieval.embedder import BGESmallEmbedder
+ from .retrieval.qdrant_client import QdrantManager
+ from .retrieval.retriever import EKRSRetriever
+@@ -248,20 +248,21 @@ def create_app() -> FastAPI:
+     """Build the FastAPI app. Exposed as a factory so tests can construct
+     fresh app instances with isolated env vars."""
+     app = FastAPI(
+         title="EKRS RAG Service",
+         version="0.1.0",
+         lifespan=lifespan,
+     )
+     app.add_middleware(ObservabilityMiddleware)
+     app.include_router(ingestion.router)
+     app.include_router(constraints.router)
++    app.include_router(trace.router)
+ 
+     @app.get("/health", response_class=PlainTextResponse)
+     async def health():
+         """Plain liveness probe (kept for backwards compatibility)."""
+         return "ok"
+ 
+     @app.get("/healthz")
+     async def healthz():
+         """Readiness probe: reports audit log + index health."""
+         audit_path = Path(settings.AUDIT_LOG_PATH)
+diff --git a/rag/tests/unit/test_trace.py b/rag/tests/unit/test_trace.py
+new file mode 100644
+index 0000000..679d031
+--- /dev/null
++++ b/rag/tests/unit/test_trace.py
+@@ -0,0 +1,76 @@
++"""Tests for /v1/constraints/trace (spec §5, D8 prefix filter, A2 老数据 null)."""
++from __future__ import annotations
++
++import pytest
++from fastapi.testclient import TestClient
++
++from ekrs_rag.main import app
++
++
++@pytest.fixture
++def client():
++    return TestClient(app)
++
++
++def test_trace_requires_parser_token_in_prod(monkeypatch, client):
++    # PF1: settings loaded at import time → setattr is required (Pydantic cache).
++    # Also setenv because current require_parser_token reads os.environ at call time.
++    from ekrs_rag.core.config import settings as _settings
++    monkeypatch.setattr(_settings, "PARSER_TOKEN", "test-parser-token-32chars-xxxxxxxx")
++    monkeypatch.setenv("PARSER_TOKEN", "test-parser-token-32chars-xxxxxxxx")
++    r = client.post("/v1/constraints/trace", json={"trace_id": "any"})
++    assert r.status_code == 403  # existing require_parser_token returns 403
++
++
++def test_trace_missing_trace_id_returns_422(client):
++    r = client.post("/v1/constraints/trace", json={})
++    assert r.status_code == 422
++
++
++def test_trace_unknown_trace_id_returns_empty_events(client):
++    r = client.post("/v1/constraints/trace", json={"trace_id": "no-such-trace-xyz"})
++    assert r.status_code == 200
++    body = r.json()
++    assert body["trace_id"] == "no-such-trace-xyz"
++    assert body["events"] == []
++    assert body["lineage_snapshot"] is None
++    assert body["conflict_details"] is None
++
++
++def test_audit_index_seek_returns_only_matching_trace_id(tmp_path):
++    """AuditIndex.seek returns events for one trace_id, not neighbors."""
++    import json as _json
++    from ekrs_rag.observability.audit_index import AuditIndex
++    log = tmp_path / "audit.log"
++    log.write_text("\n".join([
++        _json.dumps({"event": "constraint_solve_started", "trace_id": "t1", "offset": 0, "raw": {"scope_path": "industry/petrochem"}}),
++        _json.dumps({"event": "constraint_solve_started", "trace_id": "t2", "offset": 1, "raw": {"scope_path": "industry/power"}}),
++    ]) + "\n")
++    idx = AuditIndex(str(log))
++    idx.build()
++    got = idx.seek("t1")
++    assert got is not None
++    assert all(l.trace_id == "t1" for l in got)
++
++
++def test_trace_returns_lineage_snapshot_from_constraint_solve_started_event(client, tmp_path, monkeypatch):
++    """D5 + D2: lineage_snapshot pulled from constraint_solve_started event, not first event."""
++    import json as _json
++    log = tmp_path / "audit.log"
++    # AuditIndex.seek() stores the entire JSON line as AuditLine.raw, so the
++    # legacy fields are top-level on each line (not nested under "raw").
++    log.write_text("\n".join([
++        _json.dumps({"event": "endpoint_started", "trace_id": "sx", "offset": 0, "lineage_snapshot": "from_endpoint_BUG"}),
++        _json.dumps({"event": "constraint_solve_started", "trace_id": "sx", "offset": 1, "lineage_snapshot": "from_solve_started_OK", "conflict_details": [{"type": "soft_fallback"}]}),
++        _json.dumps({"event": "constraint_solved", "trace_id": "sx", "offset": 2, "lineage_snapshot": "from_solved_BUG"}),
++    ]) + "\n")
++    from ekrs_rag.observability.audit_index import AuditIndex
++    idx = AuditIndex(str(log))
++    idx.build()
++    # Starlette State rejects monkeypatch.setattr (no __setattr__ for new keys),
++    # so assign directly. State is shared across the TestClient by design.
++    client.app.state.audit_index = idx
++    r = client.post("/v1/constraints/trace", json={"trace_id": "sx"})
++    body = r.json()
++    assert body["lineage_snapshot"] == "from_solve_started_OK"
++    assert body["conflict_details"] == [{"type": "soft_fallback"}]
