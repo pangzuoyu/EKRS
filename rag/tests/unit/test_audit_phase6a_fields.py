@@ -44,8 +44,9 @@ def test_event_schemas_exclude_phase6a_fields_from_required_set():
     them without re-registering the schema."""
     from ekrs_rag.main import _EVENT_SCHEMAS
     # Phase 6A expanded the count from 15 to 16 by registering
-    # `document_metadata_failed` (orphan-audit-event memory note).
-    assert len(_EVENT_SCHEMAS) == 16, "Event count is 16 after Phase 6A registration"
+    # `document_metadata_failed`. Doc-to-MD integration (T6/T9) added 3
+    # callback best-effort events, bringing the count to 19.
+    assert len(_EVENT_SCHEMAS) == 19, "Event count is 19 after doc-to-md integration"
 
     # No event's required schema should list the 2 optional Phase 6A fields.
     for ev, required in _EVENT_SCHEMAS.items():
@@ -60,7 +61,8 @@ def test_event_schemas_exclude_phase6a_fields_from_required_set():
 
 
 def test_event_names_are_unchanged():
-    """Audit event name set is frozen at 16 (15 pre-6A + document_metadata_failed added by T2)."""
+    """Audit event name set is frozen at 19 (15 pre-6A + document_metadata_failed
+    added by Phase 6A T2 + 3 callback events added by doc-to-md T6/T9)."""
     from ekrs_rag.main import _EVENT_SCHEMAS
     expected_names = {
         "endpoint_started", "endpoint_completed",
@@ -70,6 +72,7 @@ def test_event_names_are_unchanged():
         "ingestion_replay_started", "ingestion_replay_completed", "ingestion_replay_sha256_mismatch",
         "compensation_retry", "qdrant_write_failed", "lock_acquire_failed",
         "document_metadata_failed",
+        "callback_url_blocked", "callback_auth_missing", "callback_best_effort_failed",
     }
     assert set(_EVENT_SCHEMAS) == expected_names
 

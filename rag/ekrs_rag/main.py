@@ -90,6 +90,11 @@ _EVENT_SCHEMAS = {
     # Phase 6A (T2 soft-fail audit): registered after Task 2 write-site was
     # added (c439d50) so audit-event invariant count becomes 16.
     "document_metadata_failed": {"request_id", "doc_id", "error"},
+    # Doc-to-MD integration (T6/T9): callback best-effort audit events.
+    # Emitted by IngestionPipeline when a callback branch fails; count → 19.
+    "callback_url_blocked": {"doc_hash", "version", "reason"},
+    "callback_auth_missing": {"doc_hash", "version"},
+    "callback_best_effort_failed": {"doc_hash", "version", "rag_status", "error"},
 }
 
 

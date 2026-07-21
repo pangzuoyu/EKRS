@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Protocol
 
 import httpx
 from prometheus_client import Counter
@@ -53,6 +54,17 @@ class CallbackNonRetryableError(Exception):
     """4xx error — should NOT be retried."""
 
 
+class AuditEmitter(Protocol):
+    """Minimal contract for the injected audit writer.
+
+    Documents the method the pipeline actually calls (`write`), so a missing
+    or renamed method is caught by the type checker rather than at runtime.
+    Kept as a Protocol to preserve loose coupling (no import of AuditWriter).
+    """
+
+    def write(self, event_type: str, **kwargs: object) -> bool: ...
+
+
 class IngestionPipeline:
     """Orchestrates: read JSONL → parse → chunk → write Qdrant → callback."""
 
@@ -61,7 +73,7 @@ class IngestionPipeline:
         qdrant: QdrantManager,
         storage_path: Path,
         parser_token: str,
-        audit_writer: object | None = None,
+        audit_writer: AuditEmitter | None = None,
     ) -> None:
         self._qdrant = qdrant
         self._shared_storage_root = Path(storage_path).resolve()
@@ -207,7 +219,7 @@ class IngestionPipeline:
             )
         except (CallbackRetryableError, CallbackNonRetryableError) as cb_err:
             if self._audit_writer is not None:
-                self._audit_writer.emit_event(
+                self._audit_writer.write(
                     "callback_best_effort_failed",
                     doc_hash=doc_hash, version=version,
                     rag_status=outcome.rag_status,
@@ -282,7 +294,7 @@ class IngestionPipeline:
         except CallbackURLBlockedError as e:
             CALLBACK_OUTCOMES.labels(outcome="url_blocked").inc()
             if self._audit_writer is not None:
-                self._audit_writer.emit_event(
+                self._audit_writer.write(
                     "callback_url_blocked",
                     doc_hash=notification.doc_hash,
                     version=notification.version,
@@ -300,7 +312,7 @@ class IngestionPipeline:
         except CallbackAuthMissingError as e:
             CALLBACK_OUTCOMES.labels(outcome="auth_missing").inc()
             if self._audit_writer is not None:
-                self._audit_writer.emit_event(
+                self._audit_writer.write(
                     "callback_auth_missing",
                     doc_hash=notification.doc_hash,
                     version=notification.version,
