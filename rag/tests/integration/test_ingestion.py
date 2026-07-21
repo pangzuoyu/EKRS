@@ -209,3 +209,69 @@ def test_notify_rejects_relative_traversal(client, tmp_path):
         },
     )
     assert resp.status_code == 400
+
+
+@pytest.mark.integration
+def test_ingest_cleans_old_versions_after_upsert(
+    client, mock_qdrant, sample_jsonl,
+):
+    """T12: Successful upsert triggers delete_old_versions(doc_hash, keep_version=v)."""
+    # Bypass idempotency so the upsert branch runs.
+    mock_qdrant.get_ingestion_status.return_value = None
+    mock_qdrant.upsert_chunks.return_value = 3
+    mock_qdrant.delete_old_versions.reset_mock()
+
+    resp = client.post(
+        "/v1/ingestion/notify",
+        headers={"X-Parser-Token": PARSER_TOKEN},
+        json={
+            "doc_hash": "cleanup_doc",
+            "version": 2,
+            "output_path": sample_jsonl,
+            "callback_url": "",
+        },
+    )
+    assert resp.status_code == 202
+
+    # Wait for the BackgroundTasks to fire delete_old_versions.
+    import time
+    for _ in range(80):
+        if mock_qdrant.delete_old_versions.called:
+            break
+        time.sleep(0.05)
+
+    mock_qdrant.delete_old_versions.assert_called_once_with("cleanup_doc", keep_version=2)
+
+
+@pytest.mark.integration
+def test_ingest_skips_cleanup_when_disabled(
+    client, mock_qdrant, sample_jsonl, monkeypatch,
+):
+    """T12: When OLD_VERSION_DELETE_ENABLED=False, delete_old_versions is NOT called."""
+    from ekrs_rag.core.config import settings
+
+    mock_qdrant.get_ingestion_status.return_value = None
+    mock_qdrant.upsert_chunks.return_value = 3
+    mock_qdrant.delete_old_versions.reset_mock()
+    monkeypatch.setattr(settings, "OLD_VERSION_DELETE_ENABLED", False)
+
+    resp = client.post(
+        "/v1/ingestion/notify",
+        headers={"X-Parser-Token": PARSER_TOKEN},
+        json={
+            "doc_hash": "no_cleanup_doc",
+            "version": 1,
+            "output_path": sample_jsonl,
+            "callback_url": "",
+        },
+    )
+    assert resp.status_code == 202
+
+    # Wait for upsert to complete (so we know we got past Step 5).
+    import time
+    for _ in range(80):
+        if mock_qdrant.upsert_chunks.called:
+            break
+        time.sleep(0.05)
+
+    mock_qdrant.delete_old_versions.assert_not_called()
