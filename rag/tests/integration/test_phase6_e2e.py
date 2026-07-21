@@ -16,6 +16,7 @@ from ekrs_rag.storage.documents import DocumentRepo
 
 
 _ADMIN_KEY = "test-admin-key-32chars-xxxxxxxxx"
+_PARSER_TOKEN = "x" * 32  # T3: real secret; placeholder literal now rejected
 
 
 @pytest.fixture
@@ -34,12 +35,14 @@ def e2e_client(
     fake_redis = fakeredis.aioredis.FakeRedis()
 
     monkeypatch.setattr(settings, "ADMIN_KEY", _ADMIN_KEY)
-    monkeypatch.setattr(settings, "PARSER_TOKEN", "")
+    # T3: lifespan refuses to boot on empty/short PARSER_TOKEN. Use a real
+    # 32-char secret; the /notify call below must send the matching header.
+    monkeypatch.setattr(settings, "PARSER_TOKEN", _PARSER_TOKEN)
     monkeypatch.setattr(settings, "AUDIT_LOG_PATH", str(tmp_path / "audit.log"))
     monkeypatch.setattr(settings, "DOCUMENTS_DB_PATH", str(tmp_path / "documents.db"))
     monkeypatch.setattr(settings, "TASK_DB_PATH", str(tmp_path / "tasks.db"))
     monkeypatch.setattr(settings, "DEBUG_LOG_PATH", str(tmp_path / "debug.log"))
-    monkeypatch.setenv("PARSER_TOKEN", "")
+    monkeypatch.setenv("PARSER_TOKEN", _PARSER_TOKEN)
     monkeypatch.setenv("METRICS_HOST", "127.0.0.1")
     monkeypatch.setenv("METRICS_PORT", "0")
     monkeypatch.setattr(main_module, "QdrantManager", MagicMock(return_value=qdrant))
@@ -134,6 +137,7 @@ def test_ingestion_notify_persists_document_metadata(
                 }
             },
         },
+        headers={"X-Parser-Token": _PARSER_TOKEN},
     )
 
     assert response.status_code == 202

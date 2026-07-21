@@ -162,6 +162,18 @@ async def lifespan(app: FastAPI):
             )
         app.state.shared_storage_root = storage_root.resolve()
 
+        # T3 defense-in-depth: refuse to boot if PARSER_TOKEN is missing
+        # or shorter than 32 chars. Validator in core/config.py already
+        # rejects the placeholder default at Settings() time, but a second
+        # gate here catches operator overrides (e.g., empty string, 8-char
+        # rotation candidate) that bypass the validator (rotations happen
+        # via PARSER_TOKEN rotation endpoint, not module re-import).
+        if not settings.PARSER_TOKEN or len(settings.PARSER_TOKEN) < 32:
+            raise RuntimeError(
+                "PARSER_TOKEN is missing or shorter than 32 chars; "
+                "set PARSER_TOKEN in .env before starting."
+            )
+
         embedding_service = None
         try:
             # Phase 6B D5: EmbeddingService facade wraps bge-m3 ONNX;

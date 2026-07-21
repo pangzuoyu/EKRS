@@ -31,3 +31,20 @@ def test_lifespan_rejects_missing_storage_path(monkeypatch, tmp_path):
     # Validator passes (absolute), but the dir doesn't exist
     assert s.SHARED_STORAGE_PATH == Path("/nonexistent/parsed_lib_xyz")
     assert not s.SHARED_STORAGE_PATH.is_dir()
+
+
+def test_parser_token_rejects_default_placeholder(monkeypatch):
+    monkeypatch.setenv("SHARED_STORAGE_PATH", "/tmp")
+    # The default literal in Settings is the placeholder
+    monkeypatch.delenv("PARSER_TOKEN", raising=False)
+    with pytest.raises(ValidationError) as exc_info:
+        Settings()
+    assert "PARSER_TOKEN" in str(exc_info.value)
+
+
+def test_parser_token_rejects_empty(monkeypatch):
+    monkeypatch.setenv("SHARED_STORAGE_PATH", "/tmp")
+    monkeypatch.setenv("PARSER_TOKEN", "")
+    with pytest.raises(ValidationError) as exc_info:
+        Settings()
+    assert "PARSER_TOKEN" in str(exc_info.value)

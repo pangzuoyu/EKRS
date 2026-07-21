@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from ekrs_shared.models import IngestionStatus
 
 
-PARSER_TOKEN = "change-me-to-a-secure-random-string-32chars"
+PARSER_TOKEN = "x" * 32  # T3: real secret; placeholder literal now rejected
 
 
 @pytest.fixture
@@ -33,10 +33,13 @@ def mock_qdrant():
 @pytest.fixture
 def client(mock_qdrant, tmp_path, monkeypatch):
     """Create TestClient with mocked Qdrant + Phase 4 components."""
-    # Match pre-T3 behavior: settings.PARSER_TOKEN default is the test secret.
-    # T3 moved auth to Depends(require_parser_token) which reads the env var;
-    # without this, missing/invalid-token tests return 202 instead of 403.
-    monkeypatch.setenv("PARSER_TOKEN", "change-me-to-a-secure-random-string-32chars")
+    # T3: lifespan startup fails on empty/short PARSER_TOKEN, so we have to
+    # mutate the singleton (env var alone won't help — the singleton was
+    # already constructed at module-import time).
+    from ekrs_rag.core.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "PARSER_TOKEN", PARSER_TOKEN)
+    monkeypatch.setenv("PARSER_TOKEN", PARSER_TOKEN)
     # SHARED_STORAGE_PATH is redirected to tmp_path by the integration-level
     # autouse fixture in tests/integration/conftest.py — no need to repeat it
     # here.
@@ -136,7 +139,7 @@ class TestIngestionNotify:
                 "version": 1,
                 "output_path": sample_jsonl,
             },
-            headers={"X-Parser-Token": "change-me-to-a-secure-random-string-32chars"},
+            headers={"X-Parser-Token": PARSER_TOKEN},
         )
         assert resp.status_code == 202
         data = resp.json()
@@ -153,7 +156,7 @@ class TestIngestionNotify:
                 "version": 1,
                 "output_path": sample_jsonl,
             },
-            headers={"X-Parser-Token": "change-me-to-a-secure-random-string-32chars"},
+            headers={"X-Parser-Token": PARSER_TOKEN},
         )
         assert resp.status_code == 202
 

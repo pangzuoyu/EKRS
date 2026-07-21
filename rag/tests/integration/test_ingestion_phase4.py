@@ -29,13 +29,21 @@ from ekrs_rag.storage.task_repo import TaskRepo
 from ekrs_rag.storage.documents import DocumentRepo
 
 
-PARSER_TOKEN = "change-me-to-a-secure-random-string-32chars"
+PARSER_TOKEN = "x" * 32  # T3: real secret; placeholder literal now rejected by validator
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
     """TestClient with patched lifespan: fake Redis, in-memory TaskRepo,
-    mock ingestion pipeline. Real route handler runs end-to-end."""
+    mock ingestion pipeline. Real route handler runs end-to-end.
+    T3: lifespan startup fails on empty/short PARSER_TOKEN, so mutate the
+    singleton before TestClient enters lifespan.
+    """
+    from ekrs_rag.core.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "PARSER_TOKEN", PARSER_TOKEN)
+    monkeypatch.setenv("PARSER_TOKEN", PARSER_TOKEN)
+
     with tempfile.TemporaryDirectory() as d:
         db = os.path.join(d, "tasks.db")
         fake_redis = fakeredis.aioredis.FakeRedis()

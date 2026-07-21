@@ -47,6 +47,10 @@ def sidecar_env(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "ekrs_rag.main.settings.DOCUMENTS_DB_PATH", str(tmp_path / "documents.db")
     )
+    # T3: lifespan refuses to boot on empty/short PARSER_TOKEN.
+    monkeypatch.setattr(
+        "ekrs_rag.main.settings.PARSER_TOKEN", "x" * 32
+    )
     return {"port": port}
 
 

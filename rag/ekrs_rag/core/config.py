@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
     """All env vars loaded from .env or environment."""
 
-    # Auth
+    # Auth — placeholder default is intentionally invalid so the validator
+    # rejects startup with the literal. Production MUST export PARSER_TOKEN
+    # in .env (or process env) before boot; the lifespan startup check in
+    # main.py is the authoritative fail-fast. The comment marker below is
+    # the recognized invalid-default literal; do NOT change it without
+    # updating the validator that pins against it.
     PARSER_TOKEN: str = "change-me-to-a-secure-random-string-32chars"
 
     # Qdrant
@@ -67,6 +76,14 @@ class Settings(BaseSettings):
     @field_validator("PARSER_TOKEN")
     @classmethod
     def token_min_length(cls, v: str) -> str:
+        if not v:
+            raise ValueError(
+                "PARSER_TOKEN is empty; set a 32+ character secret in .env"
+            )
+        if v == "change-me-to-a-secure-random-string-32chars":
+            raise ValueError(
+                "PARSER_TOKEN is the example default; replace with a real secret"
+            )
         if len(v) < 32:
             raise ValueError("PARSER_TOKEN must be >= 32 characters")
         return v
@@ -81,5 +98,37 @@ class Settings(BaseSettings):
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
-# Singleton
-settings = Settings()
+def _fallback_settings() -> Settings:
+    """Build a Settings via model_construct, bypassing validators.
+
+    Used when a fresh Settings() raises (e.g., the PARSER_TOKEN placeholder
+    default is invalid and no real .env was loaded). Values match the
+    declared class defaults so attribute access is safe for modules that
+    import `settings`. PARSER_TOKEN is forced to "" so the lifespan
+    startup check refuses to boot until a real secret is provided via
+    environment variable.
+    """
+    defaults: dict[str, Any] = {
+        name: (info.default if info.default is not None else None)
+        for name, info in Settings.model_fields.items()
+    }
+    defaults["PARSER_TOKEN"] = ""
+    return Settings.model_construct(**defaults)
+
+
+# Module-load singleton. Tolerates ValidationError so the module can be
+# imported in environments without a real .env (test collections, REPL
+# inspection, doc builds). The lifespan startup check in main.py raises
+# RuntimeError when PARSER_TOKEN is missing/short, which is the
+# authoritative fail-fast for production deploys. Fresh Settings() calls
+# (e.g., tests in tests/unit/test_config.py) always run validators.
+try:
+    settings: Settings = Settings()
+except ValidationError as exc:
+    logger.warning(
+        "Settings() failed validation at module load (likely placeholder "
+        "PARSER_TOKEN and no real .env); using model_construct fallback. "
+        "Lifespan will refuse to boot. Errors: %s",
+        exc.errors(),
+    )
+    settings = _fallback_settings()
