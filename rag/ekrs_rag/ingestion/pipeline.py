@@ -29,6 +29,7 @@ from ..security import (
 )
 from .chunker import chunk_blocks
 from .ir_parser import IRParseError, parse_jsonl_file
+from .outcome import IngestionOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ class IngestionPipeline:
         # D5: optional injection; if None, audit emits are skipped (test fixtures).
         self._audit_writer = audit_writer
 
-    async def ingest(self, notification: IngestionNotification) -> None:
+    async def ingest(self, notification: IngestionNotification) -> IngestionOutcome:
         """Run full ingestion pipeline for a parser notification.
 
         Steps:
@@ -78,6 +79,11 @@ class IngestionPipeline:
         4. Chunk blocks
         5. Upsert to Qdrant
         6. Send callback to parser
+
+        Returns IngestionOutcome. Callback transport failures are
+        swallowed by _send_callback_safely so the outcome reflects only
+        the ingestion state (success/business-failure), not callback
+        delivery status.
         """
         doc_hash = notification.doc_hash
         version = notification.version
@@ -94,10 +100,12 @@ class IngestionPipeline:
                 output_path,
                 self._shared_storage_root,
             )
-            raise ValueError(
-                f"output_path {output_path} is outside SHARED_STORAGE_PATH "
-                f"root {self._shared_storage_root}"
-            ) from e
+            outcome = self._failed_outcome(
+                "output_path_out_of_scope",
+                f"output_path outside SHARED_STORAGE_PATH: {output_path}",
+            )
+            await self._send_callback_safely(notification, outcome)
+            return outcome
 
         logger.info("Starting ingestion: doc=%s v=%d path=%s",
                      doc_hash, version, output_path)
@@ -107,37 +115,44 @@ class IngestionPipeline:
         if existing and existing.status == "success" and existing.version == version:
             logger.info("Already indexed: doc=%s v=%d (%d chunks), skipping",
                          doc_hash, version, existing.chunks_indexed)
-            await self._send_callback(notification, "success")
-            return
+            outcome = IngestionOutcome(
+                rag_status="success",
+                chunks_indexed=existing.chunks_indexed,
+            )
+            await self._send_callback_safely(notification, outcome)
+            return outcome
 
         # Step 2: Read JSONL
         jsonl_path = output_path / "data.jsonl"
         if not jsonl_path.exists():
             logger.error("JSONL not found: %s", jsonl_path)
-            await self._send_callback(notification, "failed",
-                                       error=f"File not found: {jsonl_path}")
-            return
+            outcome = self._failed_outcome(
+                "jsonl_missing", f"File not found: {jsonl_path}",
+            )
+            await self._send_callback_safely(notification, outcome)
+            return outcome
 
         # Step 3-4: Parse and chunk
         try:
             blocks = parse_jsonl_file(str(jsonl_path))
             if not blocks:
                 logger.warning("Empty JSONL: %s", jsonl_path)
-                await self._send_callback(notification, "failed",
-                                           error="Empty JSONL file")
-                return
+                outcome = self._failed_outcome("jsonl_empty", "Empty JSONL file")
+                await self._send_callback_safely(notification, outcome)
+                return outcome
 
             chunks = chunk_blocks(blocks, doc_hash, version)
             if not chunks:
                 logger.warning("No chunks produced from %d blocks", len(blocks))
-                await self._send_callback(notification, "failed",
-                                           error="No chunks produced")
-                return
+                outcome = self._failed_outcome("no_chunks", "No chunks produced")
+                await self._send_callback_safely(notification, outcome)
+                return outcome
 
         except IRParseError as e:
             logger.error("JSONL parse error for %s: %s", doc_hash, e)
-            await self._send_callback(notification, "failed", error=str(e))
-            return
+            outcome = self._failed_outcome("ir_parse_error", str(e))
+            await self._send_callback_safely(notification, outcome)
+            return outcome
 
         # Step 5: Upsert to Qdrant
         try:
@@ -145,11 +160,63 @@ class IngestionPipeline:
             logger.info("Ingested %d chunks for doc=%s v=%d", count, doc_hash, version)
         except Exception as e:
             logger.error("Qdrant upsert failed for %s: %s", doc_hash, e)
-            await self._send_callback(notification, "failed", error=str(e))
-            return
+            outcome = self._failed_outcome("qdrant_upsert_failed", str(e))
+            await self._send_callback_safely(notification, outcome)
+            return outcome
 
-        # Step 6: Callback success
-        await self._send_callback(notification, "success")
+        # Step 5.5: P2 — old-version cleanup (only after successful upsert)
+        if settings.OLD_VERSION_DELETE_ENABLED:
+            try:
+                self._qdrant.delete_old_versions(doc_hash, keep_version=version)
+            except Exception as e:
+                logger.warning(
+                    "delete_old_versions_failed: doc=%s v=%d err=%s",
+                    doc_hash, version, e,
+                )
+
+        # Step 6: success
+        outcome = IngestionOutcome(rag_status="success", chunks_indexed=count)
+        await self._send_callback_safely(notification, outcome)
+        return outcome
+
+    @staticmethod
+    def _failed_outcome(error_code: str, error_msg: str) -> IngestionOutcome:
+        """Build a failed IngestionOutcome with consistent shape."""
+        return IngestionOutcome(
+            rag_status="failed",
+            error=error_msg,
+            error_code=error_code,
+        )
+
+    async def _send_callback_safely(
+        self,
+        notification: IngestionNotification,
+        outcome: IngestionOutcome,
+    ) -> None:
+        """Send callback; swallow transport failures.
+
+        By the time we reach this method the Qdrant write is already
+        committed (success) or there's no recoverable state worth
+        surfacing (failure). Best-effort by design.
+        """
+        doc_hash = notification.doc_hash
+        version = notification.version
+        try:
+            await self._send_callback(
+                notification, outcome.rag_status, error=outcome.error,
+            )
+        except (CallbackRetryableError, CallbackNonRetryableError) as cb_err:
+            if self._audit_writer is not None:
+                self._audit_writer.emit_event(
+                    "callback_best_effort_failed",
+                    doc_hash=doc_hash, version=version,
+                    rag_status=outcome.rag_status,
+                    error=str(cb_err),
+                )
+            logger.warning(
+                "callback_best_effort_failed: doc=%s v=%d status=%s err=%s",
+                doc_hash, version, outcome.rag_status, cb_err,
+            )
 
     async def replay(
         self,
