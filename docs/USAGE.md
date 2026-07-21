@@ -103,6 +103,8 @@ curl -s -X POST http://localhost:8000/v1/ingestion/notify \
 
 On completion, RAG POSTs to the notification's `callback_url` (or falls back to `ENGINE_URL` from server config).
 
+> **RAG 不依赖 `.ready` 文件**：parser 必须在 JSONL 完整落盘、`fsync()` 完成后才发送 `POST /v1/ingestion/notify`；RAG 不做 `.ready` 轮询，也不读取 `.processed` 命名约定。`.ready` 是 parser 内部的发布完成信号，RAG 完全依赖 notify HTTP 触发。
+
 ### `GET /v1/ingestion/status/{doc_hash}`
 
 ```bash

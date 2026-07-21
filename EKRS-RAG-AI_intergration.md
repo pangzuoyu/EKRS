@@ -55,7 +55,7 @@ pending → success / failed
 
 确保落盘：调用 fsync 或确保文件已关闭（Python open + flush + os.fsync）。
 
-创建 .ready：在目录中创建 .ready 空文件（原子操作）。此文件是 RAG 服务开始处理的唯一信号。
+创建 .ready：在目录中创建 .ready 空文件（原子操作）。**备注（2026-07-21 修正）**：`.ready` 文件由 parser 原子创建，作为 parser 侧的发布完成信号；RAG 服务**不读取** `.ready`，也**不扫描** `SHARED_STORAGE_PATH`。parser 必须在 JSONL 完整落盘、`fsync()` 完成后才发送 `POST /v1/ingestion/notify`；RAG 完全依赖 notify HTTP 触发。
 
 RAG 入库通知：
 
@@ -120,11 +120,11 @@ content_hash
 若删除旧版本失败，不影响新版本查询；可异步重试删除。
 
 3. 轮询降级扫描（修订）
-扫描 /parsed_lib/*/{timestamp}/.ready，对每个 .ready 文件，读取 meta.json 中的 content_hash 和 version。
+~~扫描 /parsed_lib/*/{timestamp}/.ready，对每个 .ready 文件，读取 meta.json 中的 content_hash 和 version。~~
 
-若 Qdrant 中不存在该 content_hash 的数据，则触发入库（与通知逻辑相同，使用锁防止重复）。
+**备注（2026-07-21 修正）**：RAG 服务**没有** `.ready` 轮询扫描器；本节为早期设计遗留，与当前实现不符。RAG 完全依赖 notify HTTP 触发；meta.json 也非本期契约——本期仅按 `output_path/data.jsonl` 精确读取，并通过 `notify` body 的 `metadata.doc_metadata` 字段透传 doc 元数据。若 Qdrant 中不存在该 content_hash 的数据，则触发入库（与通知逻辑相同，使用锁防止重复）。
 
-入库成功后，不要删除 .ready，而是重命名为 .processed，或保留 .ready 但记录已处理（推荐保留以便审计，但扫描时需跳过已处理的目录）。扫描时只处理状态未知的目录。
+入库成功后，~~不要删除 .ready，而是重命名为 .processed，或保留 .ready 但记录已处理~~；`.processed` 命名约定同样未实施——RAG 通过 `doc_hash` + `version` 在 Qdrant 中执行幂等检查（`get_ingestion_status`），无需任何文件系统状态标记。
 
 4. 解析系统 ↔ RAG 接口定义
 4.1 解析系统 → RAG

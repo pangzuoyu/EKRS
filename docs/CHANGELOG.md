@@ -6,6 +6,22 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com). Versions here
 
 ---
 
+## [Unreleased] — 2026-07-21
+
+### Security
+- Callback sender now sends `X-Parser-Token` and validates callback URL against `CALLBACK_ALLOWED_SCHEMES` (default `https`). Loopback/metadata IP literals and DNS-resolved private addresses are rejected.
+- `notify` rejects `output_path` that escapes `SHARED_STORAGE_PATH`.
+- `PARSER_TOKEN` defaults (placeholder / empty / <32 chars) fail at startup.
+
+### Fixed
+- `pipeline.ingest()` now returns `IngestionOutcome`; route maps outcome to TaskRepo status. Previous behavior marked all business failures as COMPLETED.
+- `delete_old_versions` uses `Range(lt=keep_version)`; old versions are now cleaned after successful upsert under the per-doc Redis lock.
+
+### Docs
+- Removed false `.ready` detection claims from `EKRS-RAG-AI_intergration.md`.
+
+---
+
 ## [phase6c-minor] — 2026-07-16
 
 Tag: `phase6c-minor` @ `e320717`
