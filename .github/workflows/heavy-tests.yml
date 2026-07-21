@@ -30,4 +30,6 @@ jobs:
       - name: Run heavy tests (real bge-m3)
         run: |
           cd rag
-          pytest tests/integration/test_embedding_heavy.py -v -m heavy
+          pytest tests/integration/test_embedding_heavy.py \
+                tests/integration/test_qdrant_failure_audit.py \
+                -v -m heavy
