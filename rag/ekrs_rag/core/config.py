@@ -77,6 +77,19 @@ class Settings(BaseSettings):
     CALLBACK_ALLOWED_SCHEMES: str = "https"  # comma-separated
     CALLBACK_ALLOWED_HOSTS: str = ""  # comma-separated; "*" disables pinning
 
+    # Pipeline / callback tuning (T6 — token header + retry semantics)
+    PIPELINE_CALLBACK_MAX_ATTEMPTS: int = 3
+    PIPELINE_RETRY_MIN_SEC: float = 2.0
+    PIPELINE_RETRY_MAX_SEC: float = 10.0
+    PIPELINE_CALLBACK_TIMEOUT_SEC: float = 30.0
+
+    # P2: old-version cleanup switch (T11/T12)
+    OLD_VERSION_DELETE_ENABLED: bool = True
+
+    # Defensive cap on callback error payload (prevents oversized rows in
+    # parser's parse_tasks.error column). Truncated server-side in _send_callback.
+    CALLBACK_ERROR_MAX_CHARS: int = 1024
+
     @field_validator("PARSER_TOKEN")
     @classmethod
     def token_min_length(cls, v: str) -> str:

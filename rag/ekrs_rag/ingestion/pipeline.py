@@ -9,15 +9,47 @@ import logging
 from pathlib import Path
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from prometheus_client import Counter
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from ekrs_shared.models import IngestionNotification
 
+from ..core.config import settings
 from ..retrieval.qdrant_client import QdrantManager
+from ..security import (
+    CallbackAuthMissingError,
+    CallbackURLBlockedError,
+    build_callback_headers,
+    validate_callback_url,
+)
 from .chunker import chunk_blocks
 from .ir_parser import IRParseError, parse_jsonl_file
 
 logger = logging.getLogger(__name__)
+
+
+# T6: callback outcome counters for observability. Matches the pattern used
+# by ekrs_rag.observability.metrics; uses prometheus_client directly so the
+# pipeline can be imported without spinning up the full metrics registry.
+# Outcome values: sent, url_blocked, auth_missing, nonretryable_4xx, retried.
+CALLBACK_OUTCOMES = Counter(
+    "rag_callback_total",
+    "RAG callback outcomes (one per terminal branch of _send_callback)",
+    ["outcome"],
+)
+
+
+class CallbackRetryableError(Exception):
+    """Network or 5xx error — should be retried."""
+
+
+class CallbackNonRetryableError(Exception):
+    """4xx error — should NOT be retried."""
 
 
 class IngestionPipeline:
@@ -151,17 +183,62 @@ class IngestionPipeline:
         logger.info("Replayed %d chunks for doc=%s v=%d", count, doc_hash, version)
         return count
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    @retry(
+        reraise=True,
+        retry=retry_if_exception_type(CallbackRetryableError),
+        stop=stop_after_attempt(settings.PIPELINE_CALLBACK_MAX_ATTEMPTS),
+        wait=wait_exponential(
+            min=settings.PIPELINE_RETRY_MIN_SEC,
+            max=settings.PIPELINE_RETRY_MAX_SEC,
+        ),
+    )
     async def _send_callback(
         self,
         notification: IngestionNotification,
         rag_status: str,
         error: str | None = None,
     ) -> None:
-        """Send callback to parser with ingestion result."""
+        """Send callback to parser with ingestion result.
+
+        URL is allowlisted (T4); headers carry X-Parser-Token (T6); 4xx
+        responses are non-retryable (T7); 5xx and network errors are
+        retried up to PIPELINE_CALLBACK_MAX_ATTEMPTS attempts.
+        """
         if not notification.callback_url:
             logger.warning("No callback_url, skipping callback for %s",
                            notification.doc_hash)
+            return
+
+        # T4: validate URL against allowlist (SSRF mitigation)
+        try:
+            parsed = validate_callback_url(notification.callback_url)
+        except CallbackURLBlockedError as e:
+            CALLBACK_OUTCOMES.labels(outcome="url_blocked").inc()
+            if self._audit_writer is not None:
+                self._audit_writer.emit_event(
+                    "callback_url_blocked",
+                    doc_hash=notification.doc_hash,
+                    version=notification.version,
+                    reason=str(e),
+                )
+            logger.warning(
+                "callback_url_blocked: doc=%s reason=%s",
+                notification.doc_hash, e,
+            )
+            return  # best-effort; don't block ingestion
+
+        # T6: build headers with X-Parser-Token
+        try:
+            headers = build_callback_headers()
+        except CallbackAuthMissingError as e:
+            CALLBACK_OUTCOMES.labels(outcome="auth_missing").inc()
+            if self._audit_writer is not None:
+                self._audit_writer.emit_event(
+                    "callback_auth_missing",
+                    doc_hash=notification.doc_hash,
+                    version=notification.version,
+                )
+            logger.error("callback_auth_missing: %s", e)
             return
 
         payload = {
@@ -171,18 +248,35 @@ class IngestionPipeline:
             "trace_id": notification.trace_id,
         }
         if error:
-            payload["error"] = error
+            # Defensive cap: prevents oversized callback body and DB errors
+            # if the parser's parse_tasks.error column is bounded.
+            payload["error"] = error[: settings.CALLBACK_ERROR_MAX_CHARS]
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(
+                timeout=settings.PIPELINE_CALLBACK_TIMEOUT_SEC,
+            ) as client:
                 resp = await client.post(
-                    notification.callback_url,
-                    json=payload,
+                    parsed.raw, json=payload, headers=headers,
                 )
+                # T7: 4xx is non-retryable
+                if 400 <= resp.status_code < 500:
+                    CALLBACK_OUTCOMES.labels(outcome="nonretryable_4xx").inc()
+                    raise CallbackNonRetryableError(
+                        f"callback {resp.status_code} (non-retryable)",
+                    )
                 resp.raise_for_status()
-                logger.info("Callback sent: doc=%s status=%s",
-                            notification.doc_hash, rag_status)
-        except Exception as e:
-            logger.error("Callback failed for %s: %s", notification.doc_hash, e)
-            # Re-raise to trigger tenacity retry
-            raise
+                CALLBACK_OUTCOMES.labels(outcome="sent").inc()
+                logger.info(
+                    "Callback sent: doc=%s status=%s",
+                    notification.doc_hash, rag_status,
+                )
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as e:
+            raise CallbackRetryableError(str(e)) from e
+        except httpx.HTTPStatusError as e:
+            if 400 <= e.response.status_code < 500:
+                CALLBACK_OUTCOMES.labels(outcome="nonretryable_4xx").inc()
+                raise CallbackNonRetryableError(
+                    f"callback {e.response.status_code} (non-retryable)",
+                ) from e
+            raise CallbackRetryableError(str(e)) from e
