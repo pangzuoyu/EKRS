@@ -67,11 +67,16 @@ class DocumentRepo:
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+        self._commit()
 
     def _c(self) -> sqlite3.Connection:
         assert self._conn is not None
         return self._conn
+
+    def _commit(self) -> None:
+        """Commit the current transaction. Helper to narrow _conn for mypy."""
+        conn = self._c()  # already asserts non-None
+        conn.commit()
 
     def insert(self, doc: Document) -> None:
         # INSERT OR IGNORE: first writer wins; subsequent writes are no-ops
@@ -81,7 +86,7 @@ class DocumentRepo:
             "VALUES (?, ?, ?, ?, ?)",
             (doc.doc_id, doc.doc_type, doc.scope_path, doc.status, doc.created_at),
         )
-        self._conn.commit()
+        self._commit()
 
     def get(self, doc_id: str) -> Document | None:
         row = self._c().execute(
@@ -126,7 +131,7 @@ class DocumentRepo:
             "VALUES (?, ?, ?)",
             (from_doc_id, to_doc_id, time.time()),
         )
-        self._conn.commit()
+        self._commit()
 
     def link_override(self, scope_path: str, overrides: dict[str, Any]) -> None:
         # INSERT OR REPLACE on scope_path PRIMARY KEY: last write wins.
@@ -135,7 +140,7 @@ class DocumentRepo:
             "VALUES (?, ?, ?)",
             (scope_path, json.dumps(overrides), time.time()),
         )
-        self._conn.commit()
+        self._commit()
 
     def close(self) -> None:
         if self._conn is not None:

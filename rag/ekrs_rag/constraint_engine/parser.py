@@ -77,7 +77,7 @@ class ConstraintParser:
                 context, hint.value, hint.unit, hint.span[0]
             )
 
-            if operator is None:
+            if operator is None or value is None:
                 continue
 
             # Build constraint
@@ -245,6 +245,7 @@ def parse_interval(
         # For range operator, use the tuple from _find_operator_in_context directly
         # (it's already a tuple of two values from the text)
         # For other operators, use the normalized single value
+        op_value: float | tuple[float, float]
         if operator == "range" and isinstance(value, tuple):
             # Normalize range values if temperature unit
             if is_temperature_unit(hint.unit):

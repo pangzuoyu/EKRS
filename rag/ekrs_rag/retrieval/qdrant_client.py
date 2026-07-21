@@ -93,8 +93,16 @@ class QdrantManager:
             existing_size = None
             try:
                 existing = self._client.get_collection(self._collection_name)
-                # B2 fix: 1.17.1 path is config.params.vectors["dense"].size
-                existing_size = existing.config.params.vectors["dense"].size
+                # B2 fix: 1.17.1 path is config.params.vectors["dense"].size.
+                # vectors may be VectorParams (single) | dict[str, VectorParams]
+                # (named) | None depending on qdrant-client version. Cast to
+                # the named-vectors shape; assert at runtime.
+                vectors = existing.config.params.vectors
+                assert vectors is not None, "vectors config must exist"
+                assert isinstance(vectors, dict), (
+                    f"expected named-vectors dict, got {type(vectors).__name__}"
+                )
+                existing_size = vectors["dense"].size
             except (UnexpectedResponse, ApiException, ValueError, KeyError, AttributeError):
                 # Collection missing (UnexpectedResponse 404) or response shape
                 # changed; treat as "no existing collection". Other exceptions
@@ -242,7 +250,11 @@ class QdrantManager:
                     ],
                 ),
             )
-            version = results[0].payload.get("version", 0)
+            # payload may be None even with with_payload=True if Qdrant omits
+            # the field; treat as missing for downstream typing.
+            payload = results[0].payload
+            assert payload is not None, "payload must be present when with_payload=True"
+            version = payload.get("version", 0)
             return IngestionStatus(
                 status="success",
                 chunks_indexed=count_result.count,
@@ -291,10 +303,7 @@ class QdrantManager:
                         limit=top_k,
                     ),
                     models.Prefetch(
-                        query=models.SparseVector(
-                            indices=sparse_qdrant["indices"],
-                            values=sparse_qdrant["values"],
-                        ),
+                        query=sparse_qdrant,
                         using="sparse",
                         limit=top_k,
                     ),
@@ -309,7 +318,14 @@ class QdrantManager:
                 # at small perf cost. Inherited by both prefetches.
                 search_params=models.SearchParams(hnsw_ef=128),
             )
-            return [(hit.payload, hit.score) for hit in results.points]
+            # hit.payload is dict[str, Any] | None in qdrant-client 1.17.x;
+            # filter Nones for typing — with with_payload=True these should
+            # all be present in practice.
+            return [
+                (hit.payload, hit.score)
+                for hit in results.points
+                if hit.payload is not None
+            ]
         except Exception as exc:
             _emit_qdrant_failure("read", self._collection_name, exc)
             raise

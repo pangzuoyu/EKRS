@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from qdrant_client import models
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_DIR = Path(__file__).parent.parent.parent / "models" / "bge-m3"
@@ -117,6 +119,9 @@ class EmbeddingService:
         if self._is_dummy:
             return [EncodedVector(dense=[0.0] * self.DENSE_SIZE, sparse={}) for _ in texts]
 
+        # _model is non-None when not in dummy mode (set by __init__), but mypy
+        # can't follow that invariant through `_is_dummy`.
+        assert self._model is not None, "model must be loaded when not in dummy mode"
         raw = self._model.encode(texts, return_dense=True, return_sparse=True)
         # FlagEmbedding returns dict with 'dense_vecs' and 'lexical_weights'
         dense_list = raw["dense_vecs"]
@@ -126,14 +131,14 @@ class EmbeddingService:
             for d, s in zip(dense_list, sparse_list)
         ]
 
-    def to_qdrant_sparse(self, sparse: dict[int, float]) -> dict:
+    def to_qdrant_sparse(self, sparse: dict[int, float]) -> models.SparseVector:
         """Convert {term_id: weight} dict to Qdrant sparse format.
 
-        Returns: {"indices": sorted(term_ids), "values": [matching_weights]}
+        Returns: SparseVector(indices=sorted(term_ids), values=[matching_weights])
         QdrantManager does not know about internal sparse format (D8).
         """
         if not sparse:
-            return {"indices": [], "values": []}
+            return models.SparseVector(indices=[], values=[])
         indices = sorted(sparse.keys())
         values = [sparse[i] for i in indices]
-        return {"indices": indices, "values": values}
+        return models.SparseVector(indices=indices, values=values)

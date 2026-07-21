@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import List, Optional
+from typing import List, Literal, Optional
 
-from ekrs_shared.models import Chunk, ConstraintV2, NumericHint
+from ekrs_shared.models import Chunk, Condition, ConstraintV2, NumericHint
 
 from ekrs_rag.constraint_engine.normalizer import (
     normalize_constraint_hint,
@@ -147,7 +147,7 @@ def _infer_doc_type(scope_path: list[str] | None) -> str:
     return "project"
 
 
-def _extract_conditions(text: str) -> list[dict]:
+def _extract_conditions(text: str) -> list[Condition]:
     """Extract applicability conditions from constraint text.
 
     Looks for patterns like "在...环境下" (in ... environment).
@@ -229,7 +229,7 @@ class EvidenceBuilder:
                 norm_val, norm_unit = normalize_constraint_hint(matching_hint)
 
                 # Get operator from interval bounds to determine value_type
-                value_type = "interval"
+                value_type: Literal["interval", "scalar"] = "interval"
                 scalar_value = None
                 if interval.get("lower") == interval.get("upper"):
                     # Single value — could be scalar

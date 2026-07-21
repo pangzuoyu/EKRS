@@ -141,11 +141,13 @@ async def query_constraints(
         replay_query = prior_started.raw.get("query", query.query)
         replay_scope = prior_started.raw.get("scope_path", query.context.get("scope_path"))
 
-        # Re-run solver with prior inputs (re-fetch retrieval)
-        retrieval_result: RetrievalResult = retriever.retrieve(
+        # Re-run solver with prior inputs (re-fetch retrieval).
+        # `replay_retrieval_result` (distinct name) avoids redefining the
+        # `retrieval_result` from the main branch below (mypy no-redef).
+        replay_retrieval_result: RetrievalResult = retriever.retrieve(
             replay_query, top_k=query.top_k, active_scope=replay_scope,
         )
-        constraints = EvidenceBuilder.build(retrieval_result.chunks)
+        constraints = EvidenceBuilder.build(replay_retrieval_result.chunks)
         result = IntervalSolver.solve(constraints, active_scope=replay_scope)
 
         # Compare with prior

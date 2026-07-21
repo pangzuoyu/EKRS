@@ -68,7 +68,7 @@ def extract_hints(chunk: Chunk) -> List[NumericHint]:
                 continue
 
             value_str = m.group(1)
-            unit = m.group(2) if m.lastindex >= 2 else ""
+            unit = m.group(2) or "" if m.lastindex and m.lastindex >= 2 else ""
 
             try:
                 value = float(value_str)

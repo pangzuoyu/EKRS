@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from qdrant_client import models
 
 from ekrs_rag.retrieval.embedding_service import (
     EmbeddingService,
@@ -109,14 +110,16 @@ def test_to_qdrant_sparse_converts_dict_format(tmp_path: Path) -> None:
     sparse = {100: 0.5, 5: 0.3, 50: 0.1}
     result = svc.to_qdrant_sparse(sparse)
 
-    assert result == {"indices": [5, 50, 100], "values": [0.3, 0.1, 0.5]}
+    assert result == models.SparseVector(
+        indices=[5, 50, 100], values=[0.3, 0.1, 0.5]
+    )
 
 
 def test_to_qdrant_sparse_handles_empty_dict(tmp_path: Path) -> None:
     """Empty sparse dict returns empty indices/values (D8)."""
     svc = EmbeddingService(model_dir=tmp_path)
     result = svc.to_qdrant_sparse({})
-    assert result == {"indices": [], "values": []}
+    assert result == models.SparseVector(indices=[], values=[])
 
 
 def test_is_dummy_when_onnx_load_fails(tmp_path: Path) -> None:
