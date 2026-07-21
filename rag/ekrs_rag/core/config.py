@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     # (decoupled from TASK_DB_PATH so the two repos can run on separate disks).
     DOCUMENTS_DB_PATH: str = "/var/lib/ekrs/documents.db"
 
+    # Phase 6B: callback URL allowlist (T4 — SSRF mitigation)
+    CALLBACK_ALLOWED_SCHEMES: str = "https"  # comma-separated
+    CALLBACK_ALLOWED_HOSTS: str = ""  # comma-separated; "*" disables pinning
+
     @field_validator("PARSER_TOKEN")
     @classmethod
     def token_min_length(cls, v: str) -> str:
@@ -93,6 +97,16 @@ class Settings(BaseSettings):
     def storage_must_be_absolute(cls, v: Path) -> Path:
         if not v.is_absolute():
             raise ValueError("SHARED_STORAGE_PATH must be an absolute path")
+        return v
+
+    @field_validator("CALLBACK_ALLOWED_SCHEMES")
+    @classmethod
+    def validate_callback_schemes(cls, v: str) -> str:
+        schemes = {s.strip().lower() for s in v.split(",") if s.strip()}
+        if not schemes:
+            raise ValueError("CALLBACK_ALLOWED_SCHEMES must contain at least one scheme")
+        if not schemes.issubset({"http", "https"}):
+            raise ValueError("CALLBACK_ALLOWED_SCHEMES only supports http and https")
         return v
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
