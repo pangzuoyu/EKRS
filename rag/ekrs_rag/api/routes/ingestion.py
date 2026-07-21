@@ -21,6 +21,7 @@ from ..auth import require_parser_token
 
 from ...concurrency.redis_lock import RedisLock
 from ...core.config import settings
+from ...ingestion.outcome import IngestionOutcome
 from ...ingestion.pipeline import IngestionPipeline
 from ...storage.task_repo import TaskRepo
 from ...storage.documents import Document
@@ -28,6 +29,43 @@ from ...storage.documents import Document
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/ingestion", tags=["ingestion"])
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+
+async def _run_locked_ingest(
+    pipeline: IngestionPipeline,
+    repo: TaskRepo,
+    lock: RedisLock,
+    lock_key: str,
+    lock_token: str,
+    notification: IngestionNotification,
+    request_id: str,
+) -> None:
+    """Run ingestion under the per-doc Redis lock and map outcome → TaskRepo.
+
+    - outcome.rag_status == "success"  → repo.mark_status(request_id, "COMPLETED")
+    - outcome.rag_status == "failed"   → repo.mark_failed_with_error(...)
+    - unhandled system exception       → repo.mark_failed_with_error + re-raise
+    The lock is always released in the finally block.
+    """
+    try:
+        outcome = await pipeline.ingest(notification)
+        if isinstance(outcome, IngestionOutcome):
+            if outcome.rag_status == "success":
+                repo.mark_status(request_id, "COMPLETED")
+            else:
+                repo.mark_failed_with_error(request_id, outcome.error or "unknown")
+        else:  # back-compat: legacy code path returning None
+            repo.mark_status(request_id, "COMPLETED")
+    except Exception as e:
+        repo.mark_failed_with_error(request_id, f"unhandled: {e}")
+        raise
+    finally:
+        await lock.release(lock_key, lock_token)
 
 
 # ---------------------------------------------------------------------------
@@ -143,14 +181,15 @@ async def notify(
                 pass  # audit best-effort
 
     async def _locked_ingest() -> None:
-        try:
-            await pipeline.ingest(notification)
-            repo.mark_status(request_id, "COMPLETED")
-        except Exception as e:
-            repo.mark_status(request_id, "FAILED", error=str(e))
-            raise
-        finally:
-            await lock.release(lock_key, token)
+        await _run_locked_ingest(
+            pipeline=pipeline,
+            repo=repo,
+            lock=lock,
+            lock_key=lock_key,
+            lock_token=token,
+            notification=notification,
+            request_id=request_id,
+        )
 
     background_tasks.add_task(_locked_ingest)
     return {"status": "queued", "doc_hash": doc_hash, "version": version}
