@@ -33,6 +33,7 @@ def test_lifespan_rejects_missing_storage_path(monkeypatch, tmp_path):
     assert not s.SHARED_STORAGE_PATH.is_dir()
 
 
+@pytest.mark.unit
 def test_parser_token_rejects_default_placeholder(monkeypatch):
     monkeypatch.setenv("SHARED_STORAGE_PATH", "/tmp")
     # The default literal in Settings is the placeholder
@@ -42,6 +43,7 @@ def test_parser_token_rejects_default_placeholder(monkeypatch):
     assert "PARSER_TOKEN" in str(exc_info.value)
 
 
+@pytest.mark.unit
 def test_parser_token_rejects_empty(monkeypatch):
     monkeypatch.setenv("SHARED_STORAGE_PATH", "/tmp")
     monkeypatch.setenv("PARSER_TOKEN", "")
