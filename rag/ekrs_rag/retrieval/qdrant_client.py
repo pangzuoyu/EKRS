@@ -320,9 +320,14 @@ class QdrantManager:
         wait=wait_exponential(min=2, max=10),
     )
     def delete_old_versions(self, doc_hash: str, keep_version: int) -> int:
-        """Delete Qdrant points for old versions of a document."""
+        """Delete Qdrant points for versions STRICTLY OLDER than keep_version.
+
+        Uses Range(lt=keep_version) so future versions (>= keep_version) survive
+        concurrent out-of-order ingestion. Must be called inside the same
+        per-doc Redis lock as the upsert to prevent races.
+        """
         try:
-            self._client.delete(
+            result = self._client.delete(
                 collection_name=self._collection_name,
                 points_selector=models.FilterSelector(
                     filter=models.Filter(
@@ -331,18 +336,21 @@ class QdrantManager:
                                 key="doc_hash",
                                 match=models.MatchValue(value=doc_hash),
                             ),
-                        ],
-                        must_not=[
                             models.FieldCondition(
                                 key="version",
-                                match=models.MatchValue(value=keep_version),
+                                range=models.Range(lt=keep_version),
                             ),
                         ],
                     ),
                 ),
+                wait=True,
             )
-            logger.info("Deleted old versions of %s keeping v%d", doc_hash, keep_version)
-            return 0
+            deleted = getattr(result, "deleted", None) or 0
+            logger.info(
+                "Deleted %d old-version points for %s keeping v%d",
+                deleted, doc_hash, keep_version,
+            )
+            return int(deleted)
         except Exception as exc:
             _emit_qdrant_failure("delete", self._collection_name, exc)
             raise

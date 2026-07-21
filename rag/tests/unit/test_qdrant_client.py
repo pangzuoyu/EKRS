@@ -329,7 +329,8 @@ def test_get_ingestion_status_returns_indexed_count(
 def test_delete_old_versions_calls_delete(
     mock_embedding_service: EmbeddingService,
 ) -> None:
-    """delete_old_versions issues a FilterSelector delete for keep_version."""
+    """T11: delete_old_versions uses Range(lt=keep_version) so future
+    concurrent out-of-order ingests are preserved."""
     client = _make_qdrant(existing_size=1024)
 
     with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
@@ -340,19 +341,18 @@ def test_delete_old_versions_calls_delete(
 
     client.delete.assert_called_once()
     selector = client.delete.call_args.kwargs["points_selector"]
-    # 6C-minor Finding 2: filter inverted bug fix — must pins doc_hash,
-    # must_not excludes the kept version.
     must_keys = [c.key for c in selector.filter.must]
-    must_not_keys = [c.key for c in selector.filter.must_not]
+    must_not_keys = [c.key for c in (selector.filter.must_not or [])]
     assert "doc_hash" in must_keys
-    assert "version" not in must_keys
-    assert "version" in must_not_keys
+    assert "version" in must_keys
+    # No must_not clause — Range replaces it.
+    assert not must_not_keys
 
 
 def test_delete_old_versions_filter_excludes_keep_version(
     mock_embedding_service: EmbeddingService,
 ) -> None:
-    """6C-minor Finding 2: must_not pins version != keep_version for the doc_hash."""
+    """T11: Range(lt=keep_version) excludes keep_version AND any future v > keep_version."""
     client = _make_qdrant(existing_size=1024)
 
     with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
@@ -363,13 +363,12 @@ def test_delete_old_versions_filter_excludes_keep_version(
 
     selector = client.delete.call_args.kwargs["points_selector"]
     must_conditions = list(selector.filter.must)
-    must_not_conditions = list(selector.filter.must_not)
     # doc_hash condition lives in must with the value passed in
     doc_hash_cond = next(c for c in must_conditions if c.key == "doc_hash")
     assert doc_hash_cond.match.value == "doc-xyz"
-    # keep_version condition lives in must_not with the value passed in
-    version_cond = next(c for c in must_not_conditions if c.key == "version")
-    assert version_cond.match.value == 2
+    # version condition lives in must with Range(lt=keep_version)
+    version_cond = next(c for c in must_conditions if c.key == "version")
+    assert version_cond.range.lt == 2
 
 
 def test_search_logs_warning_when_dummy(
