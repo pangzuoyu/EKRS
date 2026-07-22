@@ -28,6 +28,9 @@ Phase 6A T14 final review (`docs/superpowers/plans/2026-07-21-ekrs-integration-f
 - Ports free: 6333 (Qdrant HTTP), 6334 (Qdrant gRPC), 6379 (Redis), 8000 (RAG)
 - `PARSER_TOKEN` env set (≥32 chars) — generate with `openssl rand -hex 32`
 - `SHARED_STORAGE_PATH` exists and is writable
+- `TASK_DB_PATH` and `DOCUMENTS_DB_PATH` point to writable SQLite locations (for local smoke, use `/tmp/ekrs-shared/tasks.db` and `/tmp/ekrs-shared/documents.db`; the defaults under `/var/lib/ekrs` may require elevated filesystem setup)
+- Qdrant ports are explicit: `QDRANT_PORT=6333` is the REST/HTTP port used by EKRS; `QDRANT_GRPC_PORT=6334` is reserved for gRPC. Do not point the REST client at 6334.
+- Host-port coordination with doc-to-md: keep EKRS RAG on `8000`, Qdrant on `6333/6334`, Redis on `6379`; doc-to-md's OCR services use `8002`, `8003`, and `8004`. If any host port is occupied, override the host-side mapping or run RAG on a documented alternate port and update curl URLs consistently.
 - `rag/models/bge-m3/` populated (for embedding; without it, dummy-mode is acceptable for smoke)
 
 ## Steps
@@ -48,13 +51,17 @@ cd ../rag
 # In another terminal, or background:
 PARSER_TOKEN=$(openssl rand -hex 32) \
 SHARED_STORAGE_PATH=/tmp/ekrs-shared \
+TASK_DB_PATH=/tmp/ekrs-shared/tasks.db \
+DOCUMENTS_DB_PATH=/tmp/ekrs-shared/documents.db \
 QDRANT_HOST=localhost \
+QDRANT_PORT=6333 \
+QDRANT_GRPC_PORT=6334 \
 REDIS_URL=redis://localhost:6379 \
 EKRS_DEBUG=true \
 uvicorn ekrs_rag.main:app --host 0.0.0.0 --port 8000
 ```
 
-Wait for `Uvicorn running on http://0.0.0.0:8000`.
+Wait for `Uvicorn running on http://0.0.0.0:8000`. If `:8000` is occupied (e.g., by a doc-to-md callback receiver), pick another port like `8001` and adjust all subsequent `curl` URLs in this runbook to match. Avoid `8002/8003/8004` which are reserved for doc-to-md OCR services.
 
 ### 3. Health probes
 

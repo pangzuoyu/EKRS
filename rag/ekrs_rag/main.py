@@ -186,7 +186,7 @@ async def lifespan(app: FastAPI):
             embedding_service = EmbeddingService()
             _qdrant = QdrantManager(
                 host=settings.QDRANT_HOST,
-                port=settings.QDRANT_GRPC_PORT,
+                port=settings.QDRANT_PORT,
                 collection_name=settings.COLLECTION_NAME,
                 embedding_service=embedding_service,
                 auto_reindex=settings.AUTO_REINDEX,

@@ -13,8 +13,17 @@ return a coroutine and fail to enter the context.
 from __future__ import annotations
 
 import socket
+from pathlib import Path
 
 import pytest
+
+
+def test_lifespan_passes_rest_port_to_qdrant_manager() -> None:
+    """The REST-backed QdrantClient must receive QDRANT_PORT, not gRPC port."""
+    source = Path(__file__).parents[2].joinpath("ekrs_rag", "main.py").read_text()
+
+    assert "port=settings.QDRANT_PORT" in source
+    assert "port=settings.QDRANT_GRPC_PORT" not in source
 
 
 def _free_port() -> int:
