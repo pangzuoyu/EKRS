@@ -53,6 +53,7 @@ def _ensure_v2(c: ConstraintV2 | ConstraintV1) -> ConstraintV2:
         return c
     # V1 -> V2 conversion
     op = c.operator
+    interval: dict[str, float | tuple[float, float] | None]
     if op == "==":
         interval = {"lower": c.value, "upper": c.value, "lower_inclusive": True, "upper_inclusive": True}
     elif op == "<=":
@@ -106,7 +107,12 @@ def _ensure_v2(c: ConstraintV2 | ConstraintV1) -> ConstraintV2:
                 orig_unit = c.unit
                 lo_norm, _ = normalize_temperature(c.value[0], orig_unit)
                 hi_norm, _ = normalize_temperature(c.value[1], orig_unit)
-                interval = {"lower": lo_norm, "upper": hi_norm, "lower_inclusive": True, "upper_inclusive": True}
+                interval = {
+                    "lower": lo_norm,
+                    "upper": hi_norm,
+                    "lower_inclusive": True,
+                    "upper_inclusive": True,
+                }
 
     return ConstraintV2(
         parameter=c.parameter,
@@ -343,11 +349,9 @@ def _get_branch_key(constraint: ConstraintV2) -> str:
     if not constraint.conditions:
         return "general"
     for cond in constraint.conditions:
-        param = cond.parameter if hasattr(cond, 'parameter') else cond.get("parameter", "")
-        if param in ("environment", "condition"):
-            val = cond.value if hasattr(cond, 'value') else cond.get("value", "general")
-            if val:
-                return val
+        if cond.parameter in ("environment", "condition"):
+            if cond.value:
+                return str(cond.value)
     return "general"
 
 
@@ -447,7 +451,7 @@ def _solve_parameter(
     )
 
 
-def _v2_interval_to_portion(interval_dict: dict) -> portion.Interval | None:
+def _v2_interval_to_portion(interval_dict: dict | None) -> portion.Interval | None:
     """Convert V2 interval dict to portion.Interval using factory functions.
 
     V2 interval dict: {lower, upper, lower_inclusive, upper_inclusive}

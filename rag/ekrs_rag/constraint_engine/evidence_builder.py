@@ -153,29 +153,33 @@ def _extract_conditions(text: str) -> list[Condition]:
     Looks for patterns like "在...环境下" (in ... environment).
 
     Returns:
-        List of Condition dicts matching Pydantic model: [{"parameter": "environment", "operator": "=", "value": "高温"}]
+        List of `Condition` instances matching Pydantic model.
     """
     import re
 
-    conditions = []
+    conditions: list[Condition] = []
 
     # 在...环境下 pattern
     m = re.search(r"在([^。，,，\\s]+)环境下", text)
     if m:
-        conditions.append({
-            "parameter": "environment",
-            "operator": "=",
-            "value": m.group(1),
-        })
+        conditions.append(
+            Condition(
+                parameter="environment",
+                operator="=",
+                value=m.group(1),
+            )
+        )
 
     # 在...条件下 pattern
     m = re.search(r"在([^。，,，\\s]+)条件下", text)
     if m:
-        conditions.append({
-            "parameter": "condition",
-            "operator": "=",
-            "value": m.group(1),
-        })
+        conditions.append(
+            Condition(
+                parameter="condition",
+                operator="=",
+                value=m.group(1),
+            )
+        )
 
     return conditions
 
