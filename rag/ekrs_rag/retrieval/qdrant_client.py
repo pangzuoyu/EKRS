@@ -223,33 +223,41 @@ class QdrantManager:
     def get_ingestion_status(self, doc_hash: str) -> Optional[IngestionStatus]:
         """Query Qdrant for ingestion status of a document."""
         try:
-            results, _ = self._client.scroll(
-                collection_name=self._collection_name,
-                scroll_filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="doc_hash",
-                            match=models.MatchValue(value=doc_hash),
-                        ),
-                    ],
-                ),
-                limit=1,
-                with_payload=True,
-                with_vectors=False,
-            )
+            try:
+                results, _ = self._client.scroll(
+                    collection_name=self._collection_name,
+                    scroll_filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="doc_hash",
+                                match=models.MatchValue(value=doc_hash),
+                            ),
+                        ],
+                    ),
+                    limit=1,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as scroll_exc:
+                _emit_qdrant_failure("read", self._collection_name, scroll_exc)
+                raise
             if not results:
                 return None
-            count_result = self._client.count(
-                collection_name=self._collection_name,
-                count_filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="doc_hash",
-                            match=models.MatchValue(value=doc_hash),
-                        ),
-                    ],
-                ),
-            )
+            try:
+                count_result = self._client.count(
+                    collection_name=self._collection_name,
+                    count_filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="doc_hash",
+                                match=models.MatchValue(value=doc_hash),
+                            ),
+                        ],
+                    ),
+                )
+            except Exception as count_exc:
+                _emit_qdrant_failure("read", self._collection_name, count_exc)
+                raise
             # payload may be None even with with_payload=True if Qdrant omits
             # the field; treat as missing for downstream typing.
             payload = results[0].payload

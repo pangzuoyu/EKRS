@@ -51,18 +51,63 @@ async def _run_locked_ingest(
     - outcome.rag_status == "failed"   → repo.mark_failed_with_error(...)
     - unhandled system exception       → repo.mark_failed_with_error + re-raise
     The lock is always released in the finally block.
+
+    Audit (Phase 7 T2): emit ingestion_received on entry, then
+    ingestion_completed or ingestion_failed on each terminal branch. The
+    writer is best-effort: missing writer in test fixtures is silently
+    skipped (mirrors callback_url_blocked pattern).
     """
+    from ekrs_rag.observability.audit import get_writer
+
+    writer = get_writer()
+    if writer is not None:
+        writer.write(
+            "ingestion_received",
+            request_id=request_id,
+            doc_id=notification.doc_hash,
+        )
+
     try:
         outcome = await pipeline.ingest(notification)
         if isinstance(outcome, IngestionOutcome):
             if outcome.rag_status == "success":
                 repo.mark_status(request_id, "COMPLETED")
+                if writer is not None:
+                    writer.write(
+                        "ingestion_completed",
+                        request_id=request_id,
+                        doc_id=notification.doc_hash,
+                        chunks_indexed=outcome.chunks_indexed,
+                    )
             else:
                 repo.mark_failed_with_error(request_id, outcome.error or "unknown")
+                if writer is not None:
+                    writer.write(
+                        "ingestion_failed",
+                        request_id=request_id,
+                        doc_id=notification.doc_hash,
+                        error_code=outcome.error_code or "unknown",
+                        error=outcome.error or "unknown",
+                    )
         else:  # back-compat: legacy code path returning None
             repo.mark_status(request_id, "COMPLETED")
+            if writer is not None:
+                writer.write(
+                    "ingestion_completed",
+                    request_id=request_id,
+                    doc_id=notification.doc_hash,
+                    chunks_indexed=0,
+                )
     except Exception as e:
         repo.mark_failed_with_error(request_id, f"unhandled: {e}")
+        if writer is not None:
+            writer.write(
+                "ingestion_failed",
+                request_id=request_id,
+                doc_id=notification.doc_hash,
+                error_code="unhandled_exception",
+                error=str(e),
+            )
         raise
     finally:
         await lock.release(lock_key, lock_token)
@@ -136,6 +181,16 @@ async def notify(
     token = await lock.acquire(lock_key, ttl_sec=settings.LOCK_TTL_SEC)
     if token is None:
         logger.info("Lock held for %s; another pod is processing", doc_hash)
+        from ekrs_rag.observability.audit import get_writer
+
+        writer = get_writer()
+        if writer is not None:
+            writer.write(
+                "lock_acquire_failed",
+                lock_key=lock_key,
+                request_id=request_id,
+                doc_id=doc_hash,
+            )
         return {"status": "in_flight", "doc_hash": doc_hash, "version": version}
 
     try:

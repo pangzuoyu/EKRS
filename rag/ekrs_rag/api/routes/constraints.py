@@ -184,6 +184,21 @@ async def query_constraints(
 
     active_scope = query.context.get("scope_path")
 
+    # --- Audit: constraint_solve_started (Phase 7 T2). Best-effort: ---
+    # missing writer in test fixtures is silently skipped. Use trace_id
+    # from the request context (set by ObservabilityMiddleware).
+    from ekrs_rag.observability.audit import get_writer
+
+    _writer = get_writer()
+    _trace_id = get_trace_id()
+    if _writer is not None:
+        _writer.write(
+            "constraint_solve_started",
+            trace_id=_trace_id,
+            query=query.query,
+            scope_path=active_scope,
+        )
+
     # --- Gate 0: context merge (placeholder, doc/inferred contexts empty) ---
     # In Phase 2b doc_context and inferred_context are empty dicts.
     # The user_context is query.context and is passed through as-is.
@@ -199,6 +214,13 @@ async def query_constraints(
     # --- Gate 1: Recall check ---
     if len(retrieval_result.chunks) < MIN_RECALL_CHUNKS:
         logger.warning("Gate 1 trigger: insufficient recall chunks=%d", len(retrieval_result.chunks))
+        if _writer is not None:
+            _writer.write(
+                "constraint_solve_failed",
+                trace_id=_trace_id,
+                error_type="insufficient_recall",
+                status_code=404,
+            )
         raise HTTPException(status_code=404, detail="Insufficient recall")
 
     # --- Step 4: Evidence building ---
@@ -207,12 +229,26 @@ async def query_constraints(
     # --- Gate 2: Extraction check ---
     if len(constraints) == 0:
         logger.warning("Gate 2 trigger: no constraints extracted")
+        if _writer is not None:
+            _writer.write(
+                "constraint_solve_failed",
+                trace_id=_trace_id,
+                error_type="no_constraints_extracted",
+                status_code=404,
+            )
         raise HTTPException(status_code=404, detail="No constraints extracted")
 
     # --- Strict mode validation (R6) ---
     if query.strict:
         for c in constraints:
             if c.inferred:
+                if _writer is not None:
+                    _writer.write(
+                        "constraint_solve_failed",
+                        trace_id=_trace_id,
+                        error_type="strict_inferred",
+                        status_code=400,
+                    )
                 raise HTTPException(
                     status_code=400,
                     detail="missing_context: inferred constraint not allowed in strict mode",
@@ -226,10 +262,26 @@ async def query_constraints(
     if result["status"] == "CONFLICT":
         conflicts = result.get("conflicts", [])
         logger.info("Gate 3 CONFLICT: %d conflict(s)", len(conflicts))
+        if _writer is not None:
+            _writer.write(
+                "constraint_solve_failed",
+                trace_id=_trace_id,
+                error_type="conflict",
+                status_code=409,
+            )
         raise HTTPException(status_code=409, detail={"conflicts": conflicts})
 
     # Determine mode
     mode = "multi_branch" if active_scope else "single"
+
+    # --- Audit: constraint_solved (Phase 7 T2) ---
+    if _writer is not None:
+        _writer.write(
+            "constraint_solved",
+            trace_id=_trace_id,
+            branches_count=len(result.get("branches", {})),
+            conflict_details=conflicts or None,
+        )
 
     return ConstraintQueryResponse(
         branches=result.get("branches", {}),

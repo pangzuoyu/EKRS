@@ -541,3 +541,61 @@ class TestQdrantWriteFailedAuditEmit:
         for call in mock_writer.write.call_args_list:
             event = call.args[0] if call.args else call.kwargs.get("event_type")
             assert event != "qdrant_write_failed"
+
+    def test_get_ingestion_status_emits_audit_event_on_count_failure(
+        self, mock_embedding_service: EmbeddingService
+    ) -> None:
+        """get_ingestion_status emits qdrant_write_failed(operation="read") when
+        client.count fails. The function still returns IngestionStatus(failed)
+        so the route contract is preserved."""
+        from ekrs_rag.retrieval import qdrant_client as qc_mod
+
+        client = _make_qdrant(existing_size=1024)
+        # scroll succeeds (returns the matched doc)
+        client.scroll.return_value = (
+            [SimpleNamespace(payload={"version": 1})],
+            None,
+        )
+        # count fails
+        client.count.side_effect = ConnectionError("Qdrant down on count")
+
+        mock_writer = MagicMock()
+        with patch.object(qc_mod, "get_writer", return_value=mock_writer), \
+             patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+            mgr = QdrantManager(
+                host="localhost", port=6333,
+                embedding_service=mock_embedding_service,
+            )
+            status = mgr.get_ingestion_status(doc_hash="doc-count-fail")
+
+        # Contract preserved: route still gets a structured failure, not 5xx.
+        assert status is not None
+        assert status.status == "failed"
+        assert status.error is not None
+        # But the failure is now observable in the audit log.
+        assert mock_writer.write.call_count == 1
+        self._assert_emit(mock_writer, operation="read")
+
+    def test_get_ingestion_status_emits_audit_event_on_scroll_failure(
+        self, mock_embedding_service: EmbeddingService
+    ) -> None:
+        """get_ingestion_status emits qdrant_write_failed(operation="read") when
+        client.scroll fails. The function still returns IngestionStatus(failed)."""
+        from ekrs_rag.retrieval import qdrant_client as qc_mod
+
+        client = _make_qdrant(existing_size=1024)
+        client.scroll.side_effect = ConnectionError("Qdrant down on scroll")
+
+        mock_writer = MagicMock()
+        with patch.object(qc_mod, "get_writer", return_value=mock_writer), \
+             patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+            mgr = QdrantManager(
+                host="localhost", port=6333,
+                embedding_service=mock_embedding_service,
+            )
+            status = mgr.get_ingestion_status(doc_hash="doc-scroll-fail")
+
+        assert status is not None
+        assert status.status == "failed"
+        assert mock_writer.write.call_count == 1
+        self._assert_emit(mock_writer, operation="read")

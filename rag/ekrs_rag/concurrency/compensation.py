@@ -45,6 +45,10 @@ class CompensationScanner:
                     task["request_id"],
                     "handler not implemented (Phase 4.5)",
                 )
+                _emit_compensation_event(
+                    task["request_id"],
+                    reason="handler_not_wired",
+                )
                 continue
             # SQL 内再次校验 status / attempts / updated_at, 避免两个并发 scan
             # 拿到同一行都进入 handler. claim 失败 = 输掉竞争 / 行已不在窗口内,
@@ -56,7 +60,17 @@ class CompensationScanner:
             )
             if not claimed:
                 logger.warning("Skip task %s: lost claim race", task["request_id"])
+                _emit_compensation_event(
+                    task["request_id"],
+                    reason="claim_race_lost",
+                )
                 continue
+            attempt = int(task.get("attempts", 0)) + 1
+            _emit_compensation_event(
+                task["request_id"],
+                attempt=attempt,
+                reason="retry_invoked",
+            )
             try:
                 await self._handler(task)
                 self._repo.mark_status(task["request_id"], "COMPLETED")
@@ -64,4 +78,37 @@ class CompensationScanner:
             except Exception as e:
                 logger.exception("Compensation handler failed for %s", task["request_id"])
                 self._repo.mark_failed_with_error(task["request_id"], str(e))
+                _emit_compensation_event(
+                    task["request_id"],
+                    attempt=attempt,
+                    reason=f"handler_failed:{e.__class__.__name__}",
+                )
         return retried
+
+
+def _emit_compensation_event(
+    request_id: str,
+    attempt: int | None = None,
+    reason: str | None = None,
+) -> None:
+    """Best-effort emit of `compensation_retry` to the audit log.
+
+    Mirrors the `get_writer()` guard used elsewhere: missing writer
+    in test fixtures is silently skipped. `attempt` and `reason` are
+    informational extras (schema requires only `request_id`); they pass
+    through `log_event`'s defensive spread without re-registration.
+    """
+    try:
+        from ..observability.audit import get_writer
+
+        writer = get_writer()
+    except Exception:  # pragma: no cover — module-load safety
+        return
+    if writer is None:
+        return
+    kwargs: dict[str, Any] = {"request_id": request_id}
+    if attempt is not None:
+        kwargs["attempt"] = attempt
+    if reason is not None:
+        kwargs["reason"] = reason
+    writer.write("compensation_retry", **kwargs)
