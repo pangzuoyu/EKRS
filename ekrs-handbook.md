@@ -274,11 +274,11 @@ Phase 7	operational hardening + dev tooling: qdrant_write_failed 集成测试 (T
 - audit.log 远程归档（当前仅本地 rotation 100MB × 5）
 
 **功能未交付**
-- `/dev-ui` HTTP 调试路由 — `CLAUDE.md` Current State 提及但从未实现；Phase 7 T5 Streamlit `dev_ui/app.py` 已替代（dev-only，本地 `streamlit run`）
+- ~~`/dev-ui` HTTP 调试路由 — `CLAUDE.md` Current State 提及但从未实现；Phase 7 T5 Streamlit `dev_ui/app.py` 已替代（dev-only，本地 `streamlit run`）~~ [closed by Phase 7 T5, commit 79b04fc]
 - 模块级 `_qdrant` / `_pipeline` 全局 setter — Phase 5.5 E 已删除；任何新单例须走 FastAPI Depends
 
 **文档 / 流程**
-- Phase 6B D7 `qdrant_write_failed` emit 缺口 — 已通过 Phase 7 T1 集成测试 + Phase 6B D7 语义放宽（覆盖 read/write/delete/upsert/scroll）+ payload `operation` 字段修复
+- ~~Phase 6B D7 `qdrant_write_failed` emit 缺口 — 已通过 Phase 7 T1 集成测试 + Phase 6B D7 语义放宽（覆盖 read/write/delete/upsert/scroll）+ payload `operation` 字段修复~~ [closed by Phase 7 T1, commit f50b5e9]
 - successful ingestion 路径在 Phase 6C T4 烟雾测试中未跑通 — 仅失败路径验证；smoke 环境缺少 bge-m3 ONNX 模型。下次跑 smoke 需 docker image 内置 vendor 模型
 - bge-m3 ONNX 模型 vendor (~2.1 GB) — 当前存在 git lfs / vendored，但 CI 默认 runner 不下载；heavy test 走 nightly
 
@@ -286,6 +286,31 @@ Phase 7	operational hardening + dev tooling: qdrant_write_failed 集成测试 (T
 - AuditIndex 全量重建耗时长 — 当前只扫描当前文件，跳过 .gz 历史；如未来需要跨历史回放需重构
 - `phase7` tag 反映 delivered state（决策 §3, force-move）— 任何 phase 标签不得作为 immutable snapshot 引用
 - 黄金集 42 用例 — Phase 6A 闭合, Phase 7 未扩展；如新增约束类型需补用例
+
+### 6.2 Post-deploy 技术债注册表（2026-07-23, Phase 8 范围澄清）
+
+以下 6 项**不属于 Phase 8 范围**,冻结至部署完成 + 真实流量画像形成后重审。每项重新启动须新 plan doc + 决策流程（与 §6.1 同规则）。也镜像在 `README.md` "Post-deploy tech debt" 段落,作为面向新读者的项目门面。
+
+| # | 项 | 部署后再做的原因 | Phase 8 重启门槛 |
+|---|----|-----------------|-----------------|
+| PD-1 | **Qdrant 索引优化**(HNSW 参数、scalar/int8 量化) | 缺真实负载画像;猜测性优化风险高 | 收集 ≥4 周 prod 流量数据 |
+| PD-2 | **多区域部署 / 跨区域复制** | 业务需求未触发;多区域是产品决策不是工程决策 | 业务方书面需求 + RPO/RTO 目标 |
+| PD-3 | **大规模嵌入批处理 / 异步并发上限** | 依赖 PD-1 的负载画像 | 同 PD-1 |
+| PD-4 | **服务间身份认证**(mTLS / JWT) | 单服务部署无需求;mTLS 需双向证书管理 | 部署拓扑出现 ≥2 个内部服务 |
+| PD-5 | **audit.log 远程归档** | 需选 sink (S3 / syslog / Loki);本地 rotation 100MB × 5 短期够用 | 合规要求 OR 本地存储超阈值 |
+| PD-6 | **bge-m3 ONNX 模型 vendor 分发**(~2.1 GB) | 需决定 git lfs / Docker layer / CDN 三选一;当前 heavy test 走 nightly 即可 | 部署镜像必须内置模型 OR CI 必须默认加载 |
+
+**Phase 8 范围(部署就绪相关,与 §6.2 互补):**
+
+| 候选 | 项 | 估测 effort |
+|------|----|-----------|
+| T8-1 | SlowAPI 速率限制 | 小 |
+| T8-2 | 密钥轮换 SOP | 小 |
+| T8-3 | successful ingestion 烟雾测试(补 Phase 6C T4 缺口) | 小 |
+| T8-4 | 黄金集用例扩展 | 小 |
+| T8-5 | chunker 10k+ 性能压测 | 中 |
+
+Phase 8 plan doc 写入 `docs/superpowers/plans/` 后启动实施。
 
 7. 技术栈明细与接口细化
 组件	技术选型	用途

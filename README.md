@@ -103,6 +103,29 @@ Spec gaps between phases are tracked in `docs/superpowers/plans/` and `.superpow
 
 ---
 
+## Post-deploy tech debt (NOT Phase 8 scope)
+
+Items below are explicitly **out of scope for Phase 8** and remain on the
+backlog until the service has shipped to a real production environment.
+Each requires a new plan doc + decision cycle before re-scoping. The
+authoritative registry lives in `ekrs-handbook.md` §6.2.
+
+| Item | Why post-deploy only |
+|------|----------------------|
+| Qdrant index optimization (HNSW tuning, scalar/int8 quantization) | Needs real load profile — speculative before traffic exists |
+| Multi-region deployment / cross-region replication | Business demand not yet defined |
+| Large-scale embedding batch processing / async concurrency limits | Depends on the load profile above |
+| Service-to-service authn (mTLS / JWT) | Requires multi-service topology to justify |
+| `audit.log` remote archival | Needs sink choice (S3 / syslog / etc.); local rotation 100 MB × 5 covers short-term |
+| bge-m3 ONNX model vendor distribution (~2.1 GB) | Strategy decision (git lfs vs Docker layer vs CDN) needs production-image constraints |
+
+**Phase 8 picks the deployment-readiness items** (SlowAPI rate limit,
+secret rotation SOP, successful-ingestion smoke, golden set extension,
+chunker 10k perf test) — see `docs/superpowers/plans/` for the Phase 8
+scope doc when written.
+
+---
+
 ## Iron Rules (never violate)
 
 Defined in `ekrs-handbook.md` §Iron Rules. Eight invariants govern ingestion, retrieval, solving, and conflict semantics. Reviewed at every phase boundary.
