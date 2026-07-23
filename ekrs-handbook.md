@@ -445,6 +445,25 @@ strict 模式拒绝 inferred
 | TC‑REPLAY‑01 | Replay | 基于 trace_id 重复计算 | 提供历史 trace_id，输入相同 | 结果与历史完全一致（确定性） |
 | TC‑UNIT‑EDGE‑01 | 单位边界 | 开尔文零度以下转换 | text: "温度 ≥ 0 K" | 转换后 lower=-273.15，仍支持（不报错） |
 
+**Phase 8 T8-4 扩展用例（8 项，2026-07-24 追加）**
+
+| ID | 类别 | 描述 | 输入（关键字段） | 期望输出 |
+|----|------|------|------------------|----------|
+| TC‑CRYO‑01 | 单位换算 | 低温液氮开尔文 → 摄氏度 | text: "液氮温度不得超过77K" | 转换后 upper=-196.15 °C，operator="<=" |
+| TC‑PRESS‑SCOPE‑01 | 优先级 | 两压力约束按作用域优先级 | 同参数 P，一条 national (priority=100)，一条 industry (priority=80) | 取 national 区间，scope_path 来源标注为 national |
+| TC‑ELONG‑01 | 非数值单位 | 延伸率百分比（%） | text: "延伸率不低于20%" | percentage ≥ 20%，unit="%" |
+| TC‑MULTI‑COND‑01 | 多条件复合 | 温度 AND 压力同时约束 | text: "当温度为80°C且压力为1MPa时..." | 两 scalar 约束同时记录；solve gate 返回 EMPTY（条件未闭合） |
+| TC‑STRICT‑PASS‑01 | 严格模式 | 有 valid hints 通过 | strict=true，所有约束 inferred=False | 正常返回 200 + 求解结果 |
+| TC‑API‑EMPTY‑01 | API 校验 | 空查询字符串 | POST /v1/constraints, body={"query":""} | 4xx（400 或 404 "Insufficient recall"），不返回 5xx |
+| TC‑API‑SCOPE‑01 | API 校验 | 非法 scope_path 类型 | POST /v1/constraints, body={"query":"...","context":{"scope_path":"not-a-list"}} | 4xx（filter → 404，或 400 拒绝），不返回 5xx |
+| TC‑API‑CONC‑01 | API 确定性 | 相同 body N 次并发 | POST /v1/constraints × 5，body 完全相同 | N 个响应 JSON 字节级一致（deterministic_replay） |
+
+**实现位置**
+- TC‑CRYO‑01 / TC‑PRESS‑SCOPE‑01 / TC‑ELONG‑01 / TC‑MULTI‑COND‑01 / TC‑STRICT‑PASS‑01 → `rag/tests/golden_set/golden_set.json`（chunk‑level，42→47，编号 `t8_4_*`，由 `test_golden_set.py` 通过 EvidenceBuilder + IntervalSolver 驱动）
+- TC‑API‑EMPTY‑01 / TC‑API‑SCOPE‑01 / TC‑API‑CONC‑01 → `rag/tests/golden_set/test_api_validation.py`（API‑level，由 TestClient + dependency_overrides 驱动 `get_retriever` 桩）
+
+**总计**：42 (Phase 6A baseline) + 5 (T8‑4 chunk‑level) + 3 (T8‑4 API‑level) = **50 golden cases**，由 `make golden-test` 校验。
+
 10. 风险与应对
 风险	概率	影响	应对措施
 状态元数据缺失	高	中	规则推断 + 人工确认队列 + 默认保守值

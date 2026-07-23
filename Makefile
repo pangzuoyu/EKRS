@@ -28,8 +28,11 @@ lint:
 heavy-test:
 	cd rag && pytest tests/ -m heavy -v
 
-# Golden set regression: 42 cases from ekrs-handbook.md §9.1
-# (rag/tests/golden_set/test_golden_set.py). Gate for behavior changes.
+# Golden set regression: 50 cases from ekrs-handbook.md §9.1
+# (42 baseline + 5 chunk-level + 3 API-level from Phase 8 T8-4).
+# Gate for behavior changes. See rag/tests/golden_set/test_golden_set.py
+# (chunk-level via EvidenceBuilder + IntervalSolver) and
+# rag/tests/golden_set/test_api_validation.py (API-level via TestClient).
 golden-test:
 	cd rag && pytest tests/golden_set/ -v
 

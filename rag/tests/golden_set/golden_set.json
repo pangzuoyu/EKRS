@@ -943,5 +943,123 @@
     "note": "Unit edge case: Kelvin-to-Celsius below absolute zero. Affine conversion (K-273.15) yields lower=-273.15; solver must accept negative Celsius without raising. Builder IR-layer: K unit not extracted by current EvidenceBuilder. Awaiting unit-level builder test for TC-UNIT-EDGE-01.",
     "expected": {"status": "EMPTY"},
     "gates": {}
+  },
+  {
+    "name": "t8_4_cryogenic_kelvin",
+    "query": "低温液氮温度上限（开尔文）",
+    "raw_text": "液氮温度不得超过77K",
+    "strict": false,
+    "scope_path": ["reference", "cryogenics"],
+    "note": "Phase 8 T8-4 TC-CRYO-01: Kelvin→Celsius affine conversion (K-273.15). 77K → -196.15°C upper bound. Verifies the normalizer's K→°C branch on a non-trivial negative result.",
+    "expected": {
+      "temperature": {
+        "range": [null, -196.15],
+        "unit": "°C"
+      }
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {
+        "must_have_hint": {
+          "value": -196.15,
+          "unit": "°C",
+          "operator": "<="
+        }
+      },
+      "solve": {"range_upper_celsius": -196.15}
+    }
+  },
+  {
+    "name": "t8_4_two_scope_pressure_priority",
+    "query": "国家 vs 行业压力标准优先级",
+    "raw_text": "压力不低于1.0MPa",
+    "strict": false,
+    "scope_path": ["national", "GB"],
+    "note": "Phase 8 T8-4 TC-SCOPE-PRIO-01: scope-priority composite scoring (national=100 > industry=80 > enterprise=60 > project=40 > reference=20). With active scope=[national,GB], a chunk at that scope must be selected and the solver must report pressure ≥ 1MPa with the scope annotation in evidence.",
+    "expected": {
+      "pressure": {
+        "range": [1000000.0, null],
+        "unit": "pa"
+      }
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {
+        "must_have_hint": {
+          "value": 1000000.0,
+          "unit": "pa",
+          "operator": ">="
+        }
+      },
+      "solve": {"pressure_lower": 1000000.0}
+    }
+  },
+  {
+    "name": "t8_4_percent_elongation_ge",
+    "query": "钢筋延伸率下限（百分比单位）",
+    "raw_text": "钢筋延伸率不低于20%",
+    "strict": false,
+    "scope_path": ["industry", "GB50010"],
+    "note": "Phase 8 T8-4 TC-UNIT-PCT-01: material limit with non-numeric unit (%). 延伸率 not in PARAMETER_SYNONYMS — falls back to slug normalization; the % unit is mapped to the 'percentage' category by UnitNormalizer. Result key is 'percentage' (per Phase 6A §9.1 TC-BUILDER format).",
+    "expected": {
+      "percentage": {
+        "range": [20.0, null],
+        "unit": "%"
+      }
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {
+        "must_have_hint": {
+          "value": 20.0,
+          "unit": "%",
+          "operator": ">="
+        }
+      },
+      "solve": {"range_lower": 20.0}
+    }
+  },
+  {
+    "name": "t8_4_multi_condition_t_and_p",
+    "query": "温度与压力同时约束的复合条件",
+    "raw_text": "当温度为80°C且压力为1MPa时",
+    "strict": false,
+    "note": "Phase 8 T8-4 TC-COND-COMPOUND-01: multi-condition compound (T AND P simultaneously). Both constraints are extracted as scalar (==) hints. The interval solver does not consume scalars, so the final result is EMPTY (status='EMPTY'). The assertion targets the extraction gate (both hints present) and the solve gate (EMPTY).",
+    "expected": {"status": "EMPTY"},
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {
+        "must_have_hints": [
+          {"value": 80.0, "unit": "°C", "operator": "=="},
+          {"value": 1000000.0, "unit": "pa", "operator": "=="}
+        ]
+      },
+      "solve": {"status": "EMPTY"}
+    }
+  },
+  {
+    "name": "t8_4_strict_with_valid_hints_passes",
+    "query": "strict=true 但上下文非空",
+    "raw_text": "温度不得超过80°C",
+    "strict": true,
+    "scope_path": ["national", "GB"],
+    "note": "Phase 8 T8-4 TC-STRICT-CONTEXT-01: complements tc_strict_mode_rejection (which tests strict + empty). R6 forbids inference on missing context, but valid explicit context still resolves. This case guards against an over-broad strict-mode implementation that rejects all requests.",
+    "expected": {
+      "temperature": {
+        "range": [null, 80.0],
+        "unit": "°C"
+      }
+    },
+    "gates": {
+      "recall": {"min_chunks": 1},
+      "extraction": {
+        "must_have_hint": {
+          "value": 80.0,
+          "unit": "°C",
+          "operator": "<="
+        }
+      },
+      "solve": {"range_upper": 80.0}
+    }
   }
 ]
