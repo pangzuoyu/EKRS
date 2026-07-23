@@ -60,6 +60,41 @@ Returns **200** when audit log is writable AND index is loaded; otherwise **503*
 
 ---
 
+## Rate limiting (Phase 8 T8-1)
+
+Every `/v1/*` request is rate-limited per peer IP using a sliding
+window: **60 requests per minute** by default. Limits are configurable
+via environment variables (see [Configuration](#configuration) below).
+Exempt routes (k8s probes, Swagger UI, OpenAPI schema):
+
+- `/health`, `/healthz`
+- `/metrics`
+- `/docs`, `/redoc`, `/openapi.json`
+
+When the limit is exceeded the API returns:
+
+```
+HTTP/1.1 429 Too Many Requests
+Retry-After: 47
+Content-Type: application/json
+
+{
+  "detail": "rate limit exceeded",
+  "limit": 60,
+  "retry_after_sec": 47
+}
+```
+
+Clients should treat `Retry-After` as a **minimum** delay before the
+next attempt. The limiter is keyed on the immediate peer IP by
+default; set `EKRS_TRUST_PROXY=true` when running behind an Ingress
+to key on the client IP recorded in `X-Forwarded-For`.
+
+The limiter is per-process; multi-worker Redis-backed limiters are
+deferred to `ekrs-handbook.md §6.2 PD-3`.
+
+---
+
 ## Ingestion (Parser → RAG)
 
 ### `POST /v1/ingestion/notify` — queue ingestion
@@ -396,3 +431,26 @@ curl -s -X POST http://localhost:8000/v1/admin/audit/rebuild-index \
 
 If rotation keeps failing, the most common cause is the audit PVC being
 mounted read-only after a kubelet hiccup. Check `kubectl describe pvc rag-audit`.
+
+---
+
+## Configuration
+
+RAG reads configuration from environment variables at startup
+(Pydantic Settings). Pass them via `.env` (loaded by uvicorn at
+launch) or via the deployment manifest. Minimum required vars are
+documented in `.env.example`.
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `PARSER_TOKEN` | — (required) | Shared secret in `X-Parser-Token` for write paths |
+| `SHARED_STORAGE_PATH` | — (required) | Where the parser writes JSONL; RAG reads from here |
+| `QDRANT_HOST` | `localhost` | Qdrant hostname |
+| `QDRANT_PORT` | `6334` | Qdrant gRPC port |
+| `REDIS_URL` | `redis://localhost:6379/0` | Distributed locks + replay cache |
+| `ADMIN_KEY` | unset | Required to enable admin endpoints; sent in `X-Admin-Key` |
+| `EKRS_DEBUG` | `false` | Enables `/dev-ui` debug surface + verbose logging |
+| `AUTO_REINDEX` | `true` (dev) / `false` (prod) | Auto-rebuild Qdrant collection on dim mismatch |
+| **Phase 8 T8-1 — rate limiting** | | |
+| `EKRS_RATE_LIMIT` | `60` | Max requests per minute per peer IP for `/v1/*` (set to `0` to disable) |
+| `EKRS_TRUST_PROXY` | `false` | When `true`, the limiter keys on the first IP in `X-Forwarded-For` (required behind an Ingress) |

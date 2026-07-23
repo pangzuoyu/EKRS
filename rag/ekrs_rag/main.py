@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import CollectorRegistry, multiprocess, start_http_server
 
 from .api.middleware.observability import ObservabilityMiddleware
+from .api.middleware.rate_limit import install_rate_limiter
 from .api.routes import admin, admin_embedding_cache, calculate, constraints, ingestion, trace
 from .concurrency.compensation import CompensationScanner
 from .concurrency.redis_lock import RedisLock
@@ -381,6 +382,11 @@ def create_app() -> FastAPI:
         ],
     )
     app.add_middleware(ObservabilityMiddleware)
+    # Phase 8 T8-1: per-IP rate limiting on /v1/* (default 60/min,
+    # overridable via EKRS_RATE_LIMIT). /healthz, /health, /metrics,
+    # /docs, /redoc, /openapi.json are exempt — see
+    # docs/superpowers/plans/2026-07-23-phase8-scope.md T8-1.
+    install_rate_limiter(app)
     app.include_router(ingestion.router)
     app.include_router(constraints.router)
     app.include_router(trace.router)
