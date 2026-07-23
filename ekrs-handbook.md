@@ -253,6 +253,40 @@ Phase 5	可观测性：Prometheus、审计日志、CI 门禁	监控面板、Repl
 	- 5.5 E: 路由依赖注入（FastAPI Depends），删除模块级 set_X 单例
 	- 5.5 F: 审计日志 rotation (100MB × 5 gzip) + /healthz 不写审计
 Phase 6A	spec closure: 9 垂直切片补齐 (X-Admin-Key, DocumentRepo/A1, /trace, /calculate, soft fallback, golden 13→42, audit 2 fields, ENGINE_URL, 85% CI gate)	/api 路由 + audit 字段 + 测试 + CI	531 tests pass, 86.63% coverage, CI gate green
+Phase 6B	retrieval-layer migration: bge-small-en (384d) → bge-m3 (1024d + sparse), QdrantManager rewrite 修 3 prod bug, AUTO_REINDEX, 14 unit tests, heavy integration + nightly CI, vendor bge-m3 ONNX	EmbeddingService facade + Qdrant rewrite + 测试 + plan	修 3 prod bug + heavy test 通过 + AUTO_REINDEX 自动迁移 dim
+Phase 6C	spec closure retrofit: mypy 49/49 文件零错误 (T1+T2) + TDD fixture convention (T3) + manual smoke runbook (T4 执行成功) + admin cleanup (T5, .superpowers/sdd 39MB→3.4MB)	mypy clean + docs + runbook + sdd 治理	601 passed 3 skipped, smoke via docker.m.daocloud.io mirror, sdd 可读
+Phase 7	operational hardening + dev tooling: qdrant_write_failed 集成测试 (T1) + 8 audit events emit (T2) + CompensationHandler 真重试 (T3, schema 加 reingest_outcome/duration_ms) + /docs+/redoc (T4) + Streamlit dev_ui 3 tab (T5) + LRU+TTL embedding cache + /v1/admin/embedding-cache/flush (T7)	audit pipeline 端到端 + handler 真解析 + Streamlit dev_ui + cache	422 unit + 70 integration pass, mypy 干净, sha256(model.onnx|sparse_linear.pt) 自动失效缓存, X-Admin-Key 鉴权 flush
+
+### 6.1 Phase 6+ 延期列表（冻结于 2026-07-23, Phase 7 closure）
+
+以下项从 Phase 6C/7 延期列表中提取并冻结。除非新阶段明确重新启动,否则不再作为 Phase 6/7 范围处理。重新启动需要写新的 plan doc + 重新走决策流程。
+
+**性能 / 容量**
+- Qdrant 索引优化（HNSW 参数调优、scalar/int8 量化）— 没有负载画像前的猜测性优化
+- 多区域部署 / 跨区域复制
+- 大规模嵌入的批处理 / 异步并发上限
+- chunker 性能压测（10k+ 文档级别）
+
+**生产加固**
+- 通过 SlowAPI 加速率限制
+- 服务间身份认证（mTLS / JWT）
+- 密钥轮换的运维 SOP
+- audit.log 远程归档（当前仅本地 rotation 100MB × 5）
+
+**功能未交付**
+- `/dev-ui` HTTP 调试路由 — `CLAUDE.md` Current State 提及但从未实现；Phase 7 T5 Streamlit `dev_ui/app.py` 已替代（dev-only，本地 `streamlit run`）
+- 模块级 `_qdrant` / `_pipeline` 全局 setter — Phase 5.5 E 已删除；任何新单例须走 FastAPI Depends
+
+**文档 / 流程**
+- Phase 6B D7 `qdrant_write_failed` emit 缺口 — 已通过 Phase 7 T1 集成测试 + Phase 6B D7 语义放宽（覆盖 read/write/delete/upsert/scroll）+ payload `operation` 字段修复
+- successful ingestion 路径在 Phase 6C T4 烟雾测试中未跑通 — 仅失败路径验证；smoke 环境缺少 bge-m3 ONNX 模型。下次跑 smoke 需 docker image 内置 vendor 模型
+- bge-m3 ONNX 模型 vendor (~2.1 GB) — 当前存在 git lfs / vendored，但 CI 默认 runner 不下载；heavy test 走 nightly
+
+**已知技术债（非 blocker）**
+- AuditIndex 全量重建耗时长 — 当前只扫描当前文件，跳过 .gz 历史；如未来需要跨历史回放需重构
+- `phase7` tag 反映 delivered state（决策 §3, force-move）— 任何 phase 标签不得作为 immutable snapshot 引用
+- 黄金集 42 用例 — Phase 6A 闭合, Phase 7 未扩展；如新增约束类型需补用例
+
 7. 技术栈明细与接口细化
 组件	技术选型	用途
 业务层	Python 3.11 + FastAPI	API、文档管理、RAG
@@ -416,7 +450,7 @@ ekrs/
 │   │   └── models.py / config.py / cli.py
 │   └── tests/                # 单元、黄金集、集成（pytest）
 ├── shared/ekrs_shared/       # 共享 IR 模型 + 归一化 + 审计基类
-├── dev_ui/                   # Streamlit 调试界面（占位，Phase 6 实施）
+├── dev_ui/                   # Streamlit 调试界面（Phase 7 T5: 文档入库 / 约束查询 / 黄金集验证 / 覆盖关系）
 ├── deployment/               # docker-compose.yml, prometheus.yml
 ├── docs/superpowers/         # 设计 spec + 实施 plan
 └── scripts/                  # 运维脚本（mock_parser_notify.sh, load_golden_fixtures.py）
@@ -424,11 +458,10 @@ ekrs/
 运行时：fastapi, uvicorn, pydantic, qdrant-client, httpx, tenacity, redis,
 aiosqlite, prometheus-client, python-json-logger, portion, onnxruntime,
 transformers（bge tokenizer）
-FlagEmbedding (==1.2.13) — bge-m3 dense+sparse 推理框架(Phase 6B 新增)
-onnxruntime (>=1.15.0,<1.18.0) — FlagEmbedding 依赖(锁定避免 API drift)
-numpy (>=1.24.0,<2.0.0) — FlagEmbedding 依赖(锁定 1.x API)
-dev：pytest, pytest-asyncio, pytest-cov, fakeredis
-注：streamlit 尚未安装（dev_ui/ 占位待 Phase 6 实施）；FlagEmbedding 未使用（实现选 onnxruntime + transformers 直接调用）。
+onnxruntime (>=1.15.0,<1.18.0) — Phase 6B 锁定避免 API drift
+numpy (>=1.24.0,<2.0.0) — Phase 6B 锁定 1.x API
+dev：pytest, pytest-asyncio, pytest-cov, fakeredis, streamlit（Phase 7 T5, `pip install -e rag[dev]`）
+注：FlagEmbedding 未使用（实现选 onnxruntime + transformers 直接调用, 见 Phase 6B D8）。streamlit 仅 dev 额外安装, 生产 Docker image 不含。
 15. 部署拓扑与网络架构
 Docker Compose 编排 Qdrant、Redis、Engine、Business。生产环境通过 Ingress 暴露业务层 API。
 
