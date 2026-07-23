@@ -36,6 +36,10 @@ dev = [
     "pytest-cov",
     "httpx",  # for TestClient async
     "fakeredis>=2.20",
+    # T5 (Phase 7, Decision §2): dev-only Streamlit UI. Folded into rag/
+    # extras so production Docker images stay slim. Install with
+    # `pip install -e rag[dev]` then run `streamlit run dev_ui/app.py`.
+    "streamlit>=1.30",
 ]
 
 [tool.pytest.ini_options]
