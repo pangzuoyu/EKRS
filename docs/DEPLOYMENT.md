@@ -50,6 +50,12 @@ METRICS_PORT=9090
 AUDIT_LOG_PATH=/var/log/ekrs/audit.log
 DEBUG_LOG_PATH=/var/log/ekrs/debug.log
 PROMETHEUS_MULTIPROC_DIR=/var/run/ekrs/prom  # see K8s note below
+# Phase 8 T8-3a: embedding model resolution. Default in the docker image is
+# the vendored copy at /opt/ekrs/models/bge-m3; bare-metal deployments must
+# either export EMBEDDING_MODEL_DIR pointing at a local checkout of
+# rag/models/bge-m3/ or mount the vendored copy from the docker image.
+EMBEDDING_MODEL=bge-m3
+EMBEDDING_MODEL_DIR=/opt/ekrs/models/bge-m3
 ```
 
 ---
@@ -246,6 +252,62 @@ resources:
 
 CPU-bound during bge-m3 ONNX inference on first ingest burst. Memory cap
 is firm — bge-m3 ONNX session is ~1.5 GB resident.
+
+---
+
+## Docker image (Phase 8 T8-3a)
+
+`rag/Dockerfile` builds an image with the bge-m3 ONNX model **vendored
+inside** at `/opt/ekrs/models/bge-m3`. The image is the deployable
+unit — no model download at runtime, no sidecar volume mount required.
+
+### Build context
+
+Build context is the **repo root** (one level above `rag/Dockerfile`),
+so `COPY shared`, `COPY rag`, and `COPY rag/models/bge-m3/` are all
+resolved against `EKRS/`. The compose file (`deployment/docker-compose.yml`)
+sets this automatically:
+
+```yaml
+rag:
+  build:
+    context: ..
+    dockerfile: rag/Dockerfile
+    args:
+      PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
+      PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+```
+
+### Restricted-network build
+
+For China-network dev machines where `docker.io` and `pypi.org` are
+unreachable, two build args are overridable:
+
+| Arg | Default | Common China-network override |
+|-----|---------|------------------------------|
+| `PYTHON_BASE_IMAGE` | `python:3.11-slim` | `docker.m.daocloud.io/library/python:3.11-slim` |
+| `PIP_INDEX_URL` | `https://pypi.org/simple` | `https://mirrors.aliyun.com/pypi/simple/` |
+
+Override example:
+
+```bash
+docker build \
+  --build-arg PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim \
+  --build-arg PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+  -t ekrs-rag:dev .
+```
+
+The model files themselves are read from `rag/models/bge-m3/` on the
+local filesystem — no model download at build time. bge-m3.sha256 is
+verified byte-for-byte inside the image against the in-repo manifest
+(see `tests/integration/test_docker_image.py`, marked `@pytest.mark.heavy`).
+
+### Image size
+
+Vendoring bge-m3 ONNX adds ~2.3 GB to the image. This is intentional:
+shipping the model separately would either require a sidecar service
+(extra container) or rely on a host mount (fragile under k8s
+scheduling). The production image is the right place for it.
 
 ---
 

@@ -43,6 +43,29 @@ _CACHE_CAPACITY = int(os.environ.get("EKRS_TEST_CACHE_CAPACITY", "10000"))
 _CACHE_TTL_SEC = int(os.environ.get("EKRS_TEST_CACHE_TTL_SEC", "86400"))
 
 
+def _resolve_model_dir(arg: Optional[Path]) -> Path:
+    """Decide which directory to load the ONNX model from.
+
+    Precedence (Phase 8 T8-3a):
+        1. Explicit constructor argument (`arg`) — always wins. Test
+           fixtures + ad-hoc scripts rely on this for pointing at a
+           temp / dev path.
+        2. ``EMBEDDING_MODEL_DIR`` env var — used by the Docker
+           entrypoint to point at the vendored model at
+           ``/opt/ekrs/models/bge-m3``. Empty / whitespace strings
+           are treated as unset so docker-compose env passthrough
+           of an empty value falls through to the default.
+        3. ``DEFAULT_MODEL_DIR`` — the repo-local ``rag/models/bge-m3/``
+           checkout. Local dev + CI fallback.
+    """
+    if arg is not None:
+        return Path(arg)
+    env_dir = os.environ.get("EMBEDDING_MODEL_DIR", "").strip()
+    if env_dir:
+        return Path(env_dir)
+    return DEFAULT_MODEL_DIR
+
+
 class EmbeddingUnavailableError(RuntimeError):
     """Raised when embedding service is in dummy mode and writes are attempted."""
 
@@ -170,7 +193,7 @@ class EmbeddingService:
     DENSE_SIZE = DENSE_SIZE
 
     def __init__(self, model_dir: Optional[Path] = None) -> None:
-        self._model_dir = Path(model_dir) if model_dir else DEFAULT_MODEL_DIR
+        self._model_dir = _resolve_model_dir(model_dir)
         self._model = None
         self._is_dummy = False
         # Phase 7 T7: LRU+TTL cache for encode() output. Capacity and TTL

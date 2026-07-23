@@ -263,3 +263,109 @@ def test_sha256_passes_when_sparse_linear_pt_correct(tmp_path: Path) -> None:
         svc = EmbeddingService(model_dir=tmp_path)
 
     assert svc.is_dummy is False
+
+
+# ---------------------------------------------------------------------------
+# EMBEDDING_MODEL_DIR env var override (Phase 8 T8-3a)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_model_dir_explicit_arg_wins(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Explicit constructor arg takes precedence over env var.
+
+    The Docker entrypoint never passes `model_dir=`, so EMBEDDING_MODEL_DIR
+    is the operative signal in production. Local dev / tests that pass
+    `model_dir=tmp_path` need that override to keep working.
+    """
+    from ekrs_rag.retrieval.embedding_service import _resolve_model_dir
+
+    monkeypatch.setenv("EMBEDDING_MODEL_DIR", "/from/env")
+    explicit = tmp_path / "explicit"
+    assert _resolve_model_dir(explicit) == explicit
+
+
+def test_resolve_model_dir_env_var_when_arg_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """When no explicit arg, EMBEDDING_MODEL_DIR env var drives the path."""
+    from ekrs_rag.retrieval.embedding_service import _resolve_model_dir
+
+    env_path = tmp_path / "from-env"
+    monkeypatch.setenv("EMBEDDING_MODEL_DIR", str(env_path))
+    assert _resolve_model_dir(None) == env_path
+
+
+def test_resolve_model_dir_default_when_neither_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When arg is None and env is unset, fall back to DEFAULT_MODEL_DIR."""
+    from ekrs_rag.retrieval.embedding_service import (
+        DEFAULT_MODEL_DIR,
+        _resolve_model_dir,
+    )
+
+    monkeypatch.delenv("EMBEDDING_MODEL_DIR", raising=False)
+    assert _resolve_model_dir(None) == DEFAULT_MODEL_DIR
+
+
+def test_resolve_model_dir_treats_empty_env_as_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty EMBEDDING_MODEL_DIR is treated as unset (defensive against
+    docker-compose env passthrough of an empty string)."""
+    from ekrs_rag.retrieval.embedding_service import (
+        DEFAULT_MODEL_DIR,
+        _resolve_model_dir,
+    )
+
+    monkeypatch.setenv("EMBEDDING_MODEL_DIR", "   ")
+    assert _resolve_model_dir(None) == DEFAULT_MODEL_DIR
+
+
+def test_embedding_service_uses_env_var_model_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mock_flag_model: MagicMock,
+) -> None:
+    """Integration: when EMBEDDING_MODEL_DIR points at a dir with valid
+    ONNX, EmbeddingService loads from there (not DEFAULT_MODEL_DIR). The
+    observation is the model's _model_dir attribute must equal the env-var
+    path. We populate tmp_path with model.onnx so the existence check
+    passes, then construct without arg.
+    """
+    env_dir = tmp_path / "from-docker"
+    env_dir.mkdir()
+    (env_dir / "model.onnx").write_bytes(b"x")
+    monkeypatch.setenv("EMBEDDING_MODEL_DIR", str(env_dir))
+
+    with patch(
+        "ekrs_rag.retrieval.embedding_service._load_onnx_model",
+        return_value=mock_flag_model,
+    ):
+        svc = EmbeddingService()  # no model_dir arg — env var drives
+
+    assert svc._model_dir == env_dir
+
+
+def test_embedding_service_constructor_arg_overrides_env_var(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mock_flag_model: MagicMock,
+) -> None:
+    """The explicit model_dir= arg still beats the env var. This is the
+    safety net for tests + ad-hoc tool scripts that need to point at a
+    fixture path."""
+    env_dir = tmp_path / "from-docker"
+    env_dir.mkdir()
+    (env_dir / "model.onnx").write_bytes(b"x")
+    monkeypatch.setenv("EMBEDDING_MODEL_DIR", str(env_dir))
+
+    explicit = tmp_path / "from-test-fixture"
+    explicit.mkdir()
+    (explicit / "model.onnx").write_bytes(b"x")
+
+    with patch(
+        "ekrs_rag.retrieval.embedding_service._load_onnx_model",
+        return_value=mock_flag_model,
+    ):
+        svc = EmbeddingService(model_dir=explicit)
+
+    assert svc._model_dir == explicit

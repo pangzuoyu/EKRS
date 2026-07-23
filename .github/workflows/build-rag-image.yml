@@ -1,0 +1,66 @@
+name: build-rag-image
+
+# Phase 8 T8-3a: rebuild the RAG Docker image whenever the vendored
+# bge-m3 model changes. Without this trigger, edits under
+# `rag/models/bge-m3/**` would silently bypass the in-image path
+# (the production `EMBEDDING_MODEL_DIR` points at `/opt/ekrs/...`
+# inside the image, not at the host checkout).
+#
+# The cache-bust pattern from Phase 7 T7
+# (sha256(model.onnx) | sha256(sparse_linear.pt)) auto-invalidates
+# the runtime embedding cache when SHA changes; this workflow extends
+# the same invariant up to the image layer — a model edit MUST
+# rebuild the image, otherwise the deployed image keeps serving
+# stale SHAs from a previous tag.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "rag/models/bge-m3/**"
+      - "rag/models/bge-m3.sha256"
+      - "rag/Dockerfile"
+      - "deployment/docker-compose.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+          fetch-depth: 1
+      - name: Build image (vendors bge-m3)
+        run: |
+          # CI runners have unrestricted Docker Hub + PyPI access, so
+          # both build-args use canonical defaults. Override these on
+          # restricted networks by exporting PYTHON_BASE_IMAGE /
+          # PIP_INDEX_URL at the job level.
+          docker build -t ekrs-rag:test \
+            -f rag/Dockerfile \
+            --build-arg PYTHON_BASE_IMAGE=${PYTHON_BASE_IMAGE:-python:3.11-slim} \
+            --build-arg PIP_INDEX_URL=${PIP_INDEX_URL:-https://pypi.org/simple} \
+            .
+      - name: Verify model files + SHA in the image
+        run: |
+          set -euo pipefail
+          # Pull bge-m3.sha256 from the image and confirm it matches the
+          # in-repo manifest byte-for-byte. This catches the "COPY
+          # accidentally truncated" failure mode.
+          docker run --rm ekrs-rag:test \
+            cat /opt/ekrs/models/bge-m3/bge-m3.sha256 > /tmp/image.sha256
+          if ! diff -q rag/models/bge-m3/bge-m3.sha256 /tmp/image.sha256; then
+            echo "::error::bge-m3.sha256 differs between repo and built image"
+            exit 1
+          fi
+      - name: Verify model.onnx present + non-zero
+        run: |
+          set -euo pipefail
+          docker run --rm ekrs-rag:test \
+            sh -c 'test -s /opt/ekrs/models/bge-m3/model.onnx'
+          docker run --rm ekrs-rag:test \
+            sh -c 'test -s /opt/ekrs/models/bge-m3/sparse_linear.pt'
+          docker run --rm ekrs-rag:test \
+            sh -c 'test -s /opt/ekrs/models/bge-m3/model.onnx_data'
