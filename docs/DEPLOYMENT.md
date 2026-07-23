@@ -388,6 +388,44 @@ re-ingesting from scratch under the old model.
 
 ---
 
+### Chunker perf baseline (Phase 8 T8-5)
+
+The chunker (`rag/ekrs_rag/ingestion/chunker.py:chunk_blocks`) was
+benchmarked at 10k synthetic documents to establish a regression
+baseline. Numbers come from `benchmarks/test_chunker_10k.py` (run
+via `make bench-chunker`).
+
+**Baseline measurement** (Python 3.13.12, Linux x86_64, 2026-07-23):
+
+| Metric | Value |
+|--------|-------|
+| Documents | 10,000 |
+| Total time | 1.13 s |
+| Per-doc p50 | 108 µs |
+| Per-doc p95 | 213 µs |
+| Per-doc p99 | 279 µs |
+| Per-doc max | 1.67 ms |
+| Throughput | 165,000 chunks/s |
+| Peak RSS | 1.09 GB |
+| Threshold (p99 < 5 s/doc) | PASS |
+
+The synthetic corpus is deterministic (`seed=42`, mean 20 blocks/doc).
+JSON reports land in `benchmarks/results/chunker-10k-<ts>.json`.
+
+**When to re-benchmark**: any change to `chunker.py` or its
+dependencies (`estimate_tokens`, `extract_text`, `extract_table_headers`,
+`_split_text`, `_split_large_block`). Re-run `make bench-chunker`
+and diff the new JSON against the baseline. A >2× regression on p99
+should block the PR until either the chunker is restored to baseline
+or the threshold (env var `EKRS_BENCH_CHUNKER_P99_THRESHOLD_SEC`)
+is consciously raised with a justification.
+
+**Out of scope**: parallel chunking strategy comparison, memory
+profiling below the peak RSS, optimization of the solver (separate
+chunker-vs-solver tradeoffs).
+
+---
+
 ## Production checklist
 
 Before declaring a deployment "production ready":

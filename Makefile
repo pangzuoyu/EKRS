@@ -28,6 +28,12 @@ lint:
 heavy-test:
 	cd rag && pytest tests/ -m heavy -v
 
+# Phase 8 T8-5: chunker perf baseline (10k synthetic docs).
+# Excluded from `make test` and PR CI; run on nightly heavy CI or
+# locally for regression triage. See benchmarks/README.md.
+bench-chunker:
+	cd rag && PYTHONPATH=.. pytest ../benchmarks/test_chunker_10k.py -v -s -m heavy
+
 # Golden set regression: 50 cases from ekrs-handbook.md §9.1
 # (42 baseline + 5 chunk-level + 3 API-level from Phase 8 T8-4).
 # Gate for behavior changes. See rag/tests/golden_set/test_golden_set.py
