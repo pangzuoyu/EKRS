@@ -2,9 +2,12 @@
 
 Replaces the old BGESmallEmbedder (bge-small-en, 384d dense-only).
 Loads the bge-m3 ONNX export directly via onnxruntime + HuggingFace
-tokenizer (no FlagEmbedding dependency). The sparse weights are a
-self-similarity pseudo-sparse computed from token embeddings — see
-``onnx_bge_m3.py`` docstring for the rationale.
+tokenizer (no FlagEmbedding dependency at runtime). Dense vectors
+come from the ONNX export's sentence_embedding output; sparse weights
+are either BAAI's learned ``nn.Linear(1024, 1)`` head (when
+``sparse_linear.pt`` is present in the model directory) or a
+self-similarity pseudo-sparse computed from token embeddings. See
+``onnx_bge_m3.py`` docstring for the full rationale.
 
 Falls back to dummy mode when model files are absent (CI without
 model), but blocks upsert in dummy mode (D1) to prevent silent data
@@ -87,26 +90,49 @@ class EmbeddingService:
             self._is_dummy = True
 
     def _verify_sha256(self, onnx_path: Path, sha_path: Path) -> None:
-        """Verify ONNX model SHA256. Raise RuntimeError on mismatch (D1)."""
-        expected = None
+        """Verify SHA256 for every entry listed in the .sha256 file (D1).
+
+        Iterates every ``<sha>  <filename>`` line and confirms the actual
+        file's SHA matches. Raises RuntimeError on the first mismatch
+        (or on a missing entry for the ONNX model). Originally only
+        verified model.onnx; extended to cover ``sparse_linear.pt`` when
+        that file is shipped alongside the ONNX export.
+        """
+        entries = {}
         for line in sha_path.read_text().splitlines():
-            if line.endswith(onnx_path.name):
-                expected = line.split()[0]
-                break
-        if not expected:
-            raise RuntimeError(f"No SHA256 entry for {onnx_path.name} in {sha_path}")
+            line = line.strip()
+            if not line:
+                continue
+            sha, _, fname = line.partition("  ")
+            entries[fname.strip()] = sha.strip()
 
-        actual = hashlib.sha256()
-        with open(onnx_path, "rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                actual.update(chunk)
-        actual_hex = actual.hexdigest()
+        onnx_name = onnx_path.name
+        if onnx_name not in entries:
+            raise RuntimeError(f"No SHA256 entry for {onnx_name} in {sha_path}")
 
-        if actual_hex != expected:
-            raise RuntimeError(
-                f"SHA256 mismatch for {onnx_path.name}: "
-                f"expected {expected}, got {actual_hex}"
-            )
+        # Verify ONNX first (it is the only file the load actually needs);
+        # then walk the remaining entries so a tampered sparse_linear.pt
+        # cannot silently load.
+        for fname, expected_sha in entries.items():
+            fpath = onnx_path.parent / fname
+            if not fpath.exists():
+                # Skip optional files that aren't shipped — only ONNX is
+                # required to be present for the model to load.
+                if fname != onnx_name:
+                    logger.warning(
+                        "SHA256 entry %s listed but file missing; skipping", fname
+                    )
+                    continue
+            actual = hashlib.sha256()
+            with open(fpath, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    actual.update(chunk)
+            actual_hex = actual.hexdigest()
+            if actual_hex != expected_sha:
+                raise RuntimeError(
+                    f"SHA256 mismatch for {fname}: "
+                    f"expected {expected_sha}, got {actual_hex}"
+                )
 
     @property
     def is_dummy(self) -> bool:

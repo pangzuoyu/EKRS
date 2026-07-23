@@ -13,22 +13,27 @@ and outputs are::
         token_embeddings:     float [batch, seq_len, 1024]
         sentence_embedding:   float [batch, 1024]
 
-``FlagEmbedding.BGEM3FlagModel`` adds two extra heads on top — a
-``ColBert``-style multi-vector projection and a learned *lexical*
-projection that produces per-token sparse weights for inverted-index
-retrieval. Neither head is in this vanilla export, so we cannot recover
-BAAI's official sparse weights verbatim.
+Sparse head (optional BAAI-learned weights)
+-------------------------------------------
+BAAI's ``FlagEmbedding.BGEM3FlagModel`` adds a small learned head
+(``nn.Linear(1024, 1)``) on top of the encoder to produce per-token
+sparse weights via ``relu(W_lex @ token_emb + b)``. BAAI publishes
+those weights separately as ``sparse_linear.pt`` (3.5 KB on disk —
+just the 1×1024 weight + 1-element bias). When that file is present
+in the model directory, we load it and use the learned projection for
+sparse weights, matching what ``BGEM3FlagModel.encode`` would produce
+without needing the 2.1 GB ``pytorch_model.bin`` to be loaded.
 
-Pseudo-sparse workaround
-------------------------
-We compute a *self-similarity* sparse weight as ``<token_emb, sent_emb>``
-for each non-special token — a well-known dense-retrieval trick
-(CoIL, SPLADE-style approximation without a learned head). The
-resulting ``{token_id: weight}`` dict is not as discriminative as
-BAAI's learned lexical projection, but it preserves the lexical
-matching property well enough for hybrid retrieval to work, and
-matches the ``{int: float}`` shape the existing ``EncodedVector``
-contract and Qdrant sparse path already expect.
+Pseudo-sparse fallback
+----------------------
+If ``sparse_linear.pt`` is absent (e.g., a minimal install that only
+ships the dense ONNX export), we fall back to a *self-similarity*
+sparse weight ``<token_emb, sent_emb>`` per non-special token — a
+well-known dense-retrieval trick (CoIL, SPLADE-style approximation).
+The resulting ``{token_id: weight}`` dict is not as discriminative as
+the BAAI learned projection, but it preserves lexical matching well
+enough for hybrid retrieval and matches the ``{int: float}`` shape
+the existing ``EncodedVector`` contract and Qdrant sparse path expect.
 
 Interface
 ---------
@@ -49,7 +54,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # Special token IDs from tokenizer_config.json — these are never content
-# tokens and must be excluded from the pseudo-sparse representation.
+# tokens and must be excluded from the sparse representation.
 _SPECIAL_TOKEN_IDS = frozenset({0, 1, 2, 3, 250001})
 
 # bge-m3 standard practical cap. The tokenizer advertises 8192 but most
@@ -90,7 +95,39 @@ class OnnxBgeM3:
             str(model_dir), use_fast=True
         )
         self._model_dir = Path(model_dir)
-        logger.info("OnnxBgeM3 loaded from %s", self._model_dir)
+        # BAAI's learned per-token sparse projection (Linear(1024, 1)).
+        # Optional — when missing, we fall back to pseudo-sparse.
+        self._sparse_weight: np.ndarray | None = None
+        self._sparse_bias: np.ndarray | None = None
+        self._sparse_mode: str = "pseudo"
+        sparse_pt = self._model_dir / "sparse_linear.pt"
+        if sparse_pt.exists():
+            try:
+                import torch  # noqa: WPS433 — lazy import (heavy)
+                sd = torch.load(sparse_pt, map_location="cpu", weights_only=True)
+                w = sd["weight"].to(torch.float32).cpu().numpy()  # [1, 1024]
+                b = sd["bias"].to(torch.float32).cpu().numpy()    # [1]
+                if w.shape == (1, 1024):
+                    self._sparse_weight = w
+                    self._sparse_bias = b
+                    self._sparse_mode = "learned"
+                    logger.info(
+                        "OnnxBgeM3 learned sparse head loaded from %s", sparse_pt
+                    )
+                else:
+                    logger.warning(
+                        "sparse_linear.pt has unexpected weight shape %s; "
+                        "falling back to pseudo-sparse", w.shape
+                    )
+            except Exception as e:  # pragma: no cover — defensive
+                logger.warning(
+                    "Failed to load sparse_linear.pt (%s); falling back to "
+                    "pseudo-sparse", e
+                )
+        logger.info(
+            "OnnxBgeM3 loaded from %s (sparse_mode=%s)",
+            self._model_dir, self._sparse_mode,
+        )
 
     def encode(
         self,
@@ -135,11 +172,24 @@ class OnnxBgeM3:
             result["dense_vecs"] = sentence_embedding / np.clip(norms, 1e-9, None)
 
         if return_sparse:
-            # Self-similarity importance: <token_emb, sent_emb> per token,
-            # masked to non-padded, non-special positions. Negative scores
-            # are clipped to 0 (Qdrant sparse weights must be positive).
-            importance = (token_embeddings * sentence_embedding[:, None, :]).sum(axis=-1)
-            importance = np.clip(importance, 0.0, None)
+            if self._sparse_mode == "learned":
+                # _sparse_mode == "learned" implies weight & bias are loaded;
+                # narrow for mypy.
+                assert self._sparse_weight is not None
+                assert self._sparse_bias is not None
+                # BAAI learned projection: relu(W_lex @ token_emb + b).
+                # token_embeddings [batch, seq, 1024]; sparse_weight [1, 1024].
+                # einsum gives [batch, seq] (sum over the singleton h-axis).
+                importance = np.einsum(
+                    "bsh,kh->bs",
+                    token_embeddings.astype(np.float32, copy=False),
+                    self._sparse_weight,
+                ) + self._sparse_bias
+            else:
+                # Self-similarity importance: <token_emb, sent_emb> per token,
+                # masked to non-padded, non-special positions.
+                importance = (token_embeddings * sentence_embedding[:, None, :]).sum(axis=-1)
+            importance = np.clip(importance, 0.0, None)  # relu; sparse weights must be ≥0
             is_special = np.isin(input_ids, list(_SPECIAL_TOKEN_IDS))
             keep = (attention_mask.astype(bool)) & (~is_special)
 
@@ -152,3 +202,8 @@ class OnnxBgeM3:
             result["lexical_weights"] = lexical
 
         return result
+
+    @property
+    def sparse_mode(self) -> str:
+        """Sparse computation mode: ``learned`` (BAAI W_lex loaded) or ``pseudo``."""
+        return self._sparse_mode

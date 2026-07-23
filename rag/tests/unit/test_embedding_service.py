@@ -5,6 +5,7 @@ Heavy integration tests in tests/integration/test_embedding_heavy.py.
 """
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -132,3 +133,133 @@ def test_is_dummy_when_onnx_load_fails(tmp_path: Path) -> None:
     ):
         svc = EmbeddingService(model_dir=tmp_path)
     assert svc.is_dummy is True
+
+
+# ---------------------------------------------------------------------------
+# Learned-sparse (sparse_linear.pt) coverage
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("sparse_pt_present", [True, False])
+def test_sparse_mode_reports_loaded_vs_pseudo(
+    mock_flag_model: MagicMock, tmp_path: Path, sparse_pt_present: bool
+) -> None:
+    """OnnxBgeM3.sparse_mode is ``learned`` if sparse_linear.pt exists, else ``pseudo``.
+
+    We mock OnnxBgeM3 to inspect its constructor behavior without loading the
+    real ONNX model. The fixture's patch only intercepts the EmbeddingService
+    loader, so we exercise the OnnxBgeM3 init directly here.
+    """
+    from ekrs_rag.retrieval.onnx_bge_m3 import OnnxBgeM3
+
+    # Need model.onnx to exist so the existence check in __init__ passes.
+    (tmp_path / "model.onnx").write_bytes(b"x")
+
+    # Create a synthetic sparse_linear.pt (torch Linear(1024, 1) state_dict).
+    if sparse_pt_present:
+        import torch
+        torch.save(
+            {"weight": torch.zeros(1, 1024, dtype=torch.float16),
+             "bias": torch.zeros(1, dtype=torch.float16)},
+            tmp_path / "sparse_linear.pt",
+        )
+
+    # ort is imported lazily inside __init__, so patch the actual
+    # onnxruntime module attribute that gets bound.
+    with patch(
+        "onnxruntime.InferenceSession"
+    ), patch(
+        "transformers.AutoTokenizer.from_pretrained"
+    ):
+        model = OnnxBgeM3(tmp_path)
+
+    assert model.sparse_mode == ("learned" if sparse_pt_present else "pseudo")
+    if sparse_pt_present:
+        assert model._sparse_weight is not None and model._sparse_weight.shape == (1, 1024)
+        assert model._sparse_bias is not None and model._sparse_bias.shape == (1,)
+    else:
+        assert model._sparse_weight is None
+        assert model._sparse_bias is None
+
+
+def test_sparse_mode_falls_back_on_wrong_shape(tmp_path: Path) -> None:
+    """sparse_linear.pt with wrong weight shape falls back to pseudo-sparse."""
+    from ekrs_rag.retrieval.onnx_bge_m3 import OnnxBgeM3
+
+    (tmp_path / "model.onnx").write_bytes(b"x")
+    import torch
+    # Wrong shape — e.g. (2, 1024) — should be rejected.
+    torch.save(
+        {"weight": torch.zeros(2, 1024, dtype=torch.float16),
+         "bias": torch.zeros(2, dtype=torch.float16)},
+        tmp_path / "sparse_linear.pt",
+    )
+
+    with patch(
+        "onnxruntime.InferenceSession"
+    ), patch(
+        "transformers.AutoTokenizer.from_pretrained"
+    ):
+        model = OnnxBgeM3(tmp_path)
+
+    assert model.sparse_mode == "pseudo"
+    assert model._sparse_weight is None
+
+
+def test_sparse_mode_falls_back_on_corrupt_pt(tmp_path: Path) -> None:
+    """sparse_linear.pt that fails to load falls back to pseudo-sparse."""
+    from ekrs_rag.retrieval.onnx_bge_m3 import OnnxBgeM3
+
+    (tmp_path / "model.onnx").write_bytes(b"x")
+    # Write garbage that torch.load can't parse.
+    (tmp_path / "sparse_linear.pt").write_bytes(b"not a valid torch checkpoint")
+
+    with patch(
+        "onnxruntime.InferenceSession"
+    ), patch(
+        "transformers.AutoTokenizer.from_pretrained"
+    ):
+        model = OnnxBgeM3(tmp_path)
+
+    assert model.sparse_mode == "pseudo"
+
+
+def test_sha256_verifies_sparse_linear_pt(tmp_path: Path) -> None:
+    """EmbeddingService SHA256 verification covers sparse_linear.pt too (D1)."""
+    onnx_bytes = b"fake onnx model bytes"
+    sparse_bytes = b"fake sparse head bytes"
+    (tmp_path / "model.onnx").write_bytes(onnx_bytes)
+    (tmp_path / "sparse_linear.pt").write_bytes(sparse_bytes)
+
+    onnx_sha = hashlib.sha256(onnx_bytes).hexdigest()
+    sparse_sha = hashlib.sha256(sparse_bytes).hexdigest()
+    # Write the CORRECT onnx sha + a TAMPERED sparse sha; expect RuntimeError.
+    (tmp_path / "bge-m3.sha256").write_text(
+        f"{onnx_sha}  model.onnx\n"
+        "0000000000000000000000000000000000000000000000000000000000000000  sparse_linear.pt\n"
+    )
+
+    with pytest.raises(RuntimeError, match="SHA256 mismatch.*sparse_linear.pt"):
+        EmbeddingService(model_dir=tmp_path)
+
+
+def test_sha256_passes_when_sparse_linear_pt_correct(tmp_path: Path) -> None:
+    """When SHA256 matches for both files, EmbeddingService proceeds to load."""
+    onnx_bytes = b"fake onnx model bytes"
+    sparse_bytes = b"fake sparse head bytes"
+    (tmp_path / "model.onnx").write_bytes(onnx_bytes)
+    (tmp_path / "sparse_linear.pt").write_bytes(sparse_bytes)
+
+    onnx_sha = hashlib.sha256(onnx_bytes).hexdigest()
+    sparse_sha = hashlib.sha256(sparse_bytes).hexdigest()
+    (tmp_path / "bge-m3.sha256").write_text(
+        f"{onnx_sha}  model.onnx\n{sparse_sha}  sparse_linear.pt\n"
+    )
+
+    with patch(
+        "ekrs_rag.retrieval.embedding_service._load_onnx_model",
+        return_value=mock_flag_model,
+    ):
+        svc = EmbeddingService(model_dir=tmp_path)
+
+    assert svc.is_dummy is False
