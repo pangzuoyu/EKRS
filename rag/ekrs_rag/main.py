@@ -323,6 +323,15 @@ def create_app() -> FastAPI:
         title="EKRS RAG Service",
         version="0.1.0",
         lifespan=lifespan,
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_tags=[
+            {"name": "ingestion", "description": "Parser callback + replay"},
+            {"name": "constraints", "description": "Constraint solving API"},
+            {"name": "calculate", "description": "Numerical calc endpoint"},
+            {"name": "trace", "description": "Trace replay endpoint"},
+            {"name": "admin", "description": "Operator recovery (X-Admin-Key)"},
+        ],
     )
     app.add_middleware(ObservabilityMiddleware)
     app.include_router(ingestion.router)
