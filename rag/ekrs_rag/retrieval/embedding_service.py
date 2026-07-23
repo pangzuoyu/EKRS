@@ -1,9 +1,14 @@
 """EmbeddingService facade for bge-m3 (1024d dense + sparse).
 
 Replaces the old BGESmallEmbedder (bge-small-en, 384d dense-only).
-Wraps FlagEmbedding's BGEM3FlagModel. Falls back to dummy mode when
-model files are absent (CI without model), but blocks upsert in dummy
-mode (D1) to prevent silent data corruption.
+Loads the bge-m3 ONNX export directly via onnxruntime + HuggingFace
+tokenizer (no FlagEmbedding dependency). The sparse weights are a
+self-similarity pseudo-sparse computed from token embeddings — see
+``onnx_bge_m3.py`` docstring for the rationale.
+
+Falls back to dummy mode when model files are absent (CI without
+model), but blocks upsert in dummy mode (D1) to prevent silent data
+corruption.
 """
 from __future__ import annotations
 
@@ -32,21 +37,24 @@ class EncodedVector:
     sparse: dict[int, float] = field(default_factory=dict)  # {term_id: weight}
 
 
-def _load_flag_model(model_dir: Path):
-    """Load BGEM3FlagModel. Imported lazily to keep module importable without FlagEmbedding installed."""
+def _load_onnx_model(model_dir: Path):
+    """Load the bge-m3 ONNX export via onnxruntime + HF tokenizer.
+
+    Imported lazily to keep this module importable when onnxruntime or
+    transformers are not installed (e.g., lightweight unit-test runners).
+    """
     try:
-        from FlagEmbedding import BGEM3FlagModel  # type: ignore
+        from .onnx_bge_m3 import OnnxBgeM3
     except ImportError as e:
         raise ImportError(
-            "FlagEmbedding is required for EmbeddingService but not installed. "
-            "Run: pip install 'FlagEmbedding==1.2.13' "
-            "(also requires onnxruntime>=1.15,<1.18 and numpy<2.0)."
+            "onnxruntime + transformers are required for EmbeddingService. "
+            "Run: pip install onnxruntime>=1.15,<1.18 transformers>=4.37"
         ) from e
-    return BGEM3FlagModel(model_name_or_path=str(model_dir), use_fp16=False)
+    return OnnxBgeM3(model_dir)
 
 
 class EmbeddingService:
-    """Facade over BGEM3FlagModel. Single encode() returns EncodedVector list."""
+    """Facade over the bge-m3 ONNX export. Single encode() returns EncodedVector list."""
 
     DENSE_SIZE = DENSE_SIZE
 
@@ -72,8 +80,8 @@ class EmbeddingService:
             logger.warning("No bge-m3.sha256 at %s, skipping integrity check", sha_path)
 
         try:
-            self._model = _load_flag_model(self._model_dir)
-            logger.info("Loaded bge-m3 from %s", self._model_dir)
+            self._model = _load_onnx_model(self._model_dir)
+            logger.info("Loaded bge-m3 (ONNX) from %s", self._model_dir)
         except Exception as e:
             logger.warning("Failed to load bge-m3: %s, using dummy", e)
             self._is_dummy = True
@@ -123,12 +131,14 @@ class EmbeddingService:
         # can't follow that invariant through `_is_dummy`.
         assert self._model is not None, "model must be loaded when not in dummy mode"
         raw = self._model.encode(texts, return_dense=True, return_sparse=True)
-        # FlagEmbedding returns dict with 'dense_vecs' and 'lexical_weights'
-        dense_list = raw["dense_vecs"]
+        # OnnxBgeM3 returns dict with 'dense_vecs' (np.ndarray [N, 1024])
+        # and 'lexical_weights' (list[dict[int, float]]), matching the
+        # BGEM3FlagModel.encode shape so existing callers stay compatible.
+        dense_array = raw["dense_vecs"]
         sparse_list = raw["lexical_weights"]
         return [
-            EncodedVector(dense=list(d), sparse=dict(s))
-            for d, s in zip(dense_list, sparse_list)
+            EncodedVector(dense=list(d), sparse=s)
+            for d, s in zip(dense_array, sparse_list)
         ]
 
     def to_qdrant_sparse(self, sparse: dict[int, float]) -> models.SparseVector:

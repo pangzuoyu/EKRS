@@ -1,6 +1,6 @@
 """Unit tests for EmbeddingService facade.
 
-Mock FlagEmbedding.BGEM3FlagModel to avoid loading real ONNX in unit tests.
+Mock OnnxBgeM3 to avoid loading real ONNX in unit tests.
 Heavy integration tests in tests/integration/test_embedding_heavy.py.
 """
 from __future__ import annotations
@@ -20,7 +20,7 @@ from ekrs_rag.retrieval.embedding_service import (
 
 @pytest.fixture
 def mock_flag_model() -> MagicMock:
-    """Mock BGEM3FlagModel with deterministic encode output."""
+    """Mock OnnxBgeM3 with deterministic encode output."""
     mock = MagicMock()
     mock.encode.return_value = {
         "dense_vecs": [[0.1] * 1024, [0.2] * 1024],
@@ -35,11 +35,11 @@ def mock_flag_model() -> MagicMock:
 def test_encode_returns_dense_and_sparse(mock_flag_model: MagicMock, tmp_path: Path) -> None:
     """encode() returns EncodedVector list with dense (1024d) + sparse dict."""
     # Create model.onnx so the existence check in _load() passes and
-    # _load_flag_model (patched) is actually invoked. /fake/path from the
+    # _load_onnx_model (patched) is actually invoked. /fake/path from the
     # brief is unwritable, so we use pytest's tmp_path fixture instead.
     (tmp_path / "model.onnx").write_bytes(b"x")
     with patch(
-        "ekrs_rag.retrieval.embedding_service._load_flag_model",
+        "ekrs_rag.retrieval.embedding_service._load_onnx_model",
         return_value=mock_flag_model,
     ):
         svc = EmbeddingService(model_dir=tmp_path)
@@ -55,7 +55,7 @@ def test_encode_returns_dense_and_sparse(mock_flag_model: MagicMock, tmp_path: P
 def test_encode_handles_empty_list(mock_flag_model: MagicMock) -> None:
     """encode([]) returns [] and does not call model."""
     with patch(
-        "ekrs_rag.retrieval.embedding_service._load_flag_model",
+        "ekrs_rag.retrieval.embedding_service._load_onnx_model",
         return_value=mock_flag_model,
     ):
         svc = EmbeddingService(model_dir=Path("/fake/path"))
@@ -69,7 +69,7 @@ def test_encode_normalizes_dense(mock_flag_model: MagicMock, tmp_path: Path) -> 
     """Encoded dense vectors are L2-normalized (FlagEmbedding behavior)."""
     (tmp_path / "model.onnx").write_bytes(b"x")
     with patch(
-        "ekrs_rag.retrieval.embedding_service._load_flag_model",
+        "ekrs_rag.retrieval.embedding_service._load_onnx_model",
         return_value=mock_flag_model,
     ):
         svc = EmbeddingService(model_dir=tmp_path)
@@ -127,7 +127,7 @@ def test_is_dummy_when_onnx_load_fails(tmp_path: Path) -> None:
     (tmp_path / "model.onnx").write_bytes(b"x")
     # No sha256 file = skip check; load will fail
     with patch(
-        "ekrs_rag.retrieval.embedding_service._load_flag_model",
+        "ekrs_rag.retrieval.embedding_service._load_onnx_model",
         side_effect=RuntimeError("onnx broken"),
     ):
         svc = EmbeddingService(model_dir=tmp_path)
