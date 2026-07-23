@@ -1,9 +1,10 @@
 # Phase 8 — Scope
 
-> Status: planning
+> Status: closed (2026-07-24)
 > Date: 2026-07-23
 > Author: Claude (Sonnet)
 > Predecessor: Phase 7 closed (`phase7` tag at 99c77f5)
+> Closure: `phase8` tag force-moved per Decision §3 precedent; see `CHANGELOG.md` for the full commit list.
 
 ---
 
@@ -378,3 +379,33 @@ git push --force origin refs/tags/phase8:refs/tags/phase8
 - **Rate limit exemption list** — `/healthz` and `/metrics` only;
   `/docs` and `/redoc` are protected by IP rate limit too (low cost;
   prevents Swagger scrapers from exhausting the quota).
+
+---
+
+## Closing (2026-07-24)
+
+All 5 tasks T8-1 through T8-5 merged to master. One cross-phase
+debt cleanup commit (`193b0db` — IngestionOutcome.rag_status Literal
+widening) follows; it clears a 3-error mypy failure pre-dating
+Phase 8.
+
+### Tag force-move
+
+- `phase8` annotated tag created at `193b0db` (HEAD at closure),
+  force-pushed to remote. Represents *delivered state*, not
+  snapshot time, following Decision §3 precedent from Phase 7.
+- `phase8.1` annotated tag at `7151f13` (T8-3a — bge-m3 vendoring
+  milestone) — historical anchor. **Do not move.**
+- `phase7` stays at `99c77f5` (frozen at Phase 7 closure). **Do not move.**
+- `phase7.1` stays at `41c2d54` (T2 historical anchor). **Do not move.**
+
+Full commit list lives in `CHANGELOG.md` under `[phase8]`.
+
+### Open Phase 6+ deferrals (unchanged)
+
+- Qdrant index optimization (PD-1)
+- Multi-region / replication (PD-2)
+- Large-scale batch processing (PD-3)
+- Service-to-service authn / mTLS (PD-4)
+- audit.log remote archival (PD-5)
+- bge-m3 ONNX vendor distribution strategy (PD-6)

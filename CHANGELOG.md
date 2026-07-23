@@ -8,6 +8,88 @@ from the previous phase is readable without consulting the handbook.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
 `Added`, `Changed`, `Fixed`, `Removed` per release.
 
+## [phase8] - 2026-07-24
+
+**Tag moved**: `phase8` created at `193b0db` (HEAD at Phase 8 closure).
+`phase8` represents *delivered state*, not snapshot time — see Phase 8
+plan doc §"Tag strategy" + Phase 7 Decision §3 precedent.
+`phase8.1` placed at `7151f13` (T8-3a, bge-m3 vendoring milestone) as
+a historical anchor — **do not move**.
+`phase7` stays at `99c77f5` and `phase7.1` stays at `41c2d54` (both
+unchanged).
+
+12 commits span the gap from `phase7` to `phase8`: 7 task commits
+(T8-1..T8-5 + T8-3a baseline-pin sub-commit), 1 cross-phase debt
+cleanup (IngestionOutcome Literal widening), and 4 planning/docs
+commits that landed between Phase 7 closure and the first Phase 8
+task. Listed below by category.
+
+### Added
+
+- **Per-IP rate limiting on `/v1/*`** (T8-1, commit `c9bcd70`): hand-
+  rolled sliding-window token bucket (60 req/min default, override
+  via `EKRS_RATE_LIMIT`). Exempt routes: `/healthz`, `/health`,
+  `/metrics`, `/docs`, `/redoc`, `/openapi.json`. Returns `429` with
+  `Retry-After` header. 13 unit tests.
+- **Secret rotation SOP + offline validator** (T8-2, commit
+  `028b2ed`): `docs/SECRET-ROTATION.md` (zero-downtime procedure for
+  `PARSER_TOKEN` + `ADMIN_KEY` via comma-separated token acceptance)
+  + `scripts/validate_rotation.py` (typo-grade similarity check,
+  LCP ≥ 0.80 rejects). 24 unit tests.
+- **bge-m3 ONNX vendored in Docker image** (T8-3a, commit `7151f13`):
+  `rag/Dockerfile` builds with the model baked into
+  `/opt/ekrs/models/bge-m3`. `embedding_service.py` resolves model
+  dir via `EMBEDDING_MODEL_DIR` env var (default = vendored). Build
+  context = repo root; ARG-overridable `PYTHON_BASE_IMAGE` + `PIP_INDEX_URL`
+  for restricted networks. 4/4 heavy + 21/21 unit tests pass.
+- **T8-3a image baseline pinning** (commit `681c253`): `make build-rag-baseline`
+  rebuilds the reference image and writes SHA256 manifest at
+  `deployment/rag-image.baseline.json`. Idempotent rebuilder script
+  + restricted-network ARG overrides.
+- **Ingestion smoke canary** (T8-3b, commit `6f4d9eb`):
+  `scripts/smoke_ingestion.sh` (7-step bash wrapper) +
+  `scripts/lib_smoke.py` (pure-stdlib helpers). Exits non-zero on
+  any of 5 contract violations: preflight, notify, status, audit
+  (`qdrant_write_failed`), callback. 19 unit tests + 484/1 suite.
+  Used post-deploy, not in PR CI.
+- **Golden set extension 42 → 50** (T8-4, commit `5a11824`): 5
+  chunk-level cases in `golden_set.json` (cryogenic Kelvin, scope
+  priority, % elongation, multi-condition T+P, strict-mode happy
+  path) + 3 API-level cases in new `test_api_validation.py`
+  (TestClient + `dependency_overrides` pattern: empty query 4xx,
+  invalid scope 4xx, concurrent replay deterministic). Handbook
+  §9.1 grew 8 TC-* rows + implementation-location note. 191 golden
+  entries pass; 675 unit + golden suite pass.
+- **Chunker perf baseline at 10k docs** (T8-5, commit `763535b`):
+  `benchmarks/test_chunker_10k.py` (`@pytest.mark.heavy`, excluded
+  from PR CI). Runs deterministic synthetic corpus (seed=42,
+  mean 20 blocks/doc) through `chunk_blocks()`, reports p50/p95/p99
+  per-doc latency + chunks/sec + peak RSS. Writes atomic JSON to
+  `benchmarks/results/chunker-10k-<ts>.json`. p99 default threshold
+  5.0s/document (env-var tunable).
+
+### Fixed
+
+- **`IngestionOutcome.rag_status` Literal widened** (commit `193b0db`):
+  Phase 7 T3's `reparse()` added `"duplicate"` (SHA256 idempotent
+  skip) and `"business_failure"` (ops-level error), but the type
+  annotation was still `Literal["success", "failed"]`. Three pre-
+  existing mypy errors at pipeline.py:303/317/340 resolved. Single
+  source of truth via `_VALID_STATUSES` tuple shared between
+  annotation + `__post_init__` validator. +2 outcome tests.
+
+### Planning / docs (in the `phase8` range, not Phase 8 *tasks*)
+
+- `435ae58`: docs — split deferral list (Phase 6+ frozen §6.1 vs
+  Post-deploy registry §6.2).
+- `adbb942`: Phase 8 scope doc — 5 deployment-readiness tasks + 3
+  locked decisions.
+- `097adeb`: Phase 8 acceptance gates tightened per Step 0 review.
+- `ad8c21e`: Phase 7 CHANGELOG entry + Phase 7 plan doc closing
+  (this commit predates Phase 8 by 8 hours but lands in the `phase8`
+  range because `phase7` had already been force-moved to `99c77f5`
+  before it).
+
 ## [phase7] - 2026-07-23
 
 **Tag moved**: `phase7` f50b5e9 (T1) → 99c77f5 (T6 / Phase 7 closure).
