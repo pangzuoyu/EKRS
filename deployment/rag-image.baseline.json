@@ -1,0 +1,14 @@
+{
+  "_comment": "Phase 8 T8-3a baseline: locked-down reference image. Regenerate with scripts/build_rag_baseline.sh after ANY change to rag/models/bge-m3/, rag/Dockerfile, or deployment/docker-compose.yml. T8-3b smoke script reads this manifest to confirm the running image matches.",
+  "tag": "t8-3a-f84251230831-c57ef4dd7f19",
+  "image_sha256": "daacc564399e3310ca88607d27f6bd88db627af65c90f8d4001a706c59a4deb7",
+  "image_size_bytes": 2909523359,
+  "bge_m3_model_sha256_prefix": "f84251230831",
+  "dockerfile_sha256_prefix": "c57ef4dd7f19",
+  "build_args": {
+    "PYTHON_BASE_IMAGE": "docker.m.daocloud.io/library/python:3.11-slim",
+    "PIP_INDEX_URL": "https://mirrors.aliyun.com/pypi/simple/"
+  },
+  "captured_at_utc": "2026-07-23T16:35:36Z",
+  "verify_command": "docker run --rm ekrs-rag:t8-3a-f84251230831-c57ef4dd7f19 cat /opt/ekrs/models/bge-m3/bge-m3.sha256"
+}
