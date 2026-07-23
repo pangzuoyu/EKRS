@@ -144,7 +144,7 @@ async def test_compensation_retry_emitted_on_unwired_handler(repo, audit_writer)
     )
     repo._conn.commit()
 
-    async def handler(task: dict) -> None:  # pragma: no cover — never called
+    async def handler(task: dict) -> bool:  # pragma: no cover — never called
         raise AssertionError("handler must not be invoked when unwired")
 
     scanner = CompensationScanner(

@@ -55,8 +55,9 @@ def lifespan_with_seeded_db(tmp_path, monkeypatch):
     # Monkeypatch the handler lookup so lifespan() picks up our recorder.
     called: list[str] = []
 
-    async def recording_handler(task: dict) -> None:
+    async def recording_handler(task: dict) -> bool:
         called.append(task["request_id"])
+        return True  # Phase 7 T3 (Decision §5): handlers must return bool
 
     monkeypatch.setattr("ekrs_rag.main._get_compensation_handler", lambda: recording_handler)
     monkeypatch.setattr("ekrs_rag.main.COMPENSATION_HANDLER_IMPLEMENTED", True)

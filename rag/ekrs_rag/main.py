@@ -33,22 +33,27 @@ from .storage.documents import DocumentRepo
 
 logger = logging.getLogger(__name__)
 
-# Phase 4.5: real handler will be wired to IngestionPipeline.ingest via
-# callback_url (per Task 7). Until then, the stub handler in lifespan() does
-# no work, so the scanner must NOT claim-and-bump attempts for orphan rows;
-# it must mark them unwired-skipped so attempts stays at 0 and the audit
-# trail reflects that the work never ran.
-COMPENSATION_HANDLER_IMPLEMENTED = False
+# Phase 7 T3 (Decision §1 + §5): handler is now wired to IngestionPipeline
+# via _compensation_reparse_handler (built inside lifespan with closure on
+# app.state.pipeline). COMPENSATION_HANDLER_IMPLEMENTED flipped to True
+# so the scanner actually invokes the handler instead of marking tasks
+# as unwired-skipped. See docs/superpowers/plans/2026-07-23-phase7-scope.md.
+COMPENSATION_HANDLER_IMPLEMENTED = True
 
 
 async def _stub_compensation_handler(task: dict) -> bool:
-    """Stub handler — returns False to signal no work done.
+    """Defensive fallback — used when lifespan fails to construct a pipeline
+    (test fixtures, dev mode without Qdrant). Returns False so the scanner
+    marks the task FAILED with descriptive last_error rather than leaving
+    it dangling.
 
-    Phase 7 T3 (Decision §5): handler now returns ``bool``. The stub
-    returns False because no real re-ingest happened; the scanner marks
-    the task FAILED with descriptive last_error.
+    Phase 7 T3 (Decision §5): handler returns ``bool``. False signals that
+    no real re-ingest happened; True signals success/duplicate.
     """
-    logger.warning("Compensation handler not yet wired for %s", task["request_id"])
+    logger.warning(
+        "Compensation handler fallback (no pipeline): request_id=%s",
+        task["request_id"],
+    )
     return False
 
 
@@ -251,8 +256,45 @@ async def lifespan(app: FastAPI):
         _doc_repo.init()
         app.state.document_repo = _doc_repo
 
+        # Phase 7 T3 (Decision §1): real handler that re-ingests orphan
+        # tasks via IngestionPipeline.reparse(). Defined as a closure
+        # here so it captures app.state.pipeline after Qdrant init.
+        async def _compensation_reparse_handler(task: dict) -> bool:
+            """Re-run ingestion for an orphan task via pipeline.reparse().
+
+            Reads source_path + version from the task row and invokes
+            IngestionPipeline.reparse(). Returns True on success /
+            duplicate, False when source is missing or re-ingest fails.
+            """
+            pipeline = app.state.pipeline
+            if pipeline is None:
+                logger.warning(
+                    "compensation_handler: no pipeline available for %s",
+                    task.get("request_id"),
+                )
+                return False
+            try:
+                outcome = await pipeline.reparse(
+                    source_path=task["source_path"],
+                    doc_hash=task["doc_id"],
+                    version=int(task.get("version", 1)),
+                    callback_url=task.get("callback_url"),
+                    force=False,  # honor hash check; CLI uses --force bypass
+                )
+                return outcome.rag_status in ("success", "duplicate")
+            except Exception:
+                logger.exception(
+                    "compensation_handler: reparse failed for %s",
+                    task.get("request_id"),
+                )
+                return False
+
         # handler lookup is dynamic so tests can patch compensation_handler.
         handler = _get_compensation_handler()
+        # Phase 7 T3: when the stub returns False (no pipeline wired),
+        # use the closure-built reparse handler instead.
+        if handler is _stub_compensation_handler and _pipeline is not None:
+            handler = _compensation_reparse_handler
         _scanner = CompensationScanner(
             task_repo=_task_repo,
             handler=handler,

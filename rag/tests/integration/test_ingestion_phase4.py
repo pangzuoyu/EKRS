@@ -174,8 +174,9 @@ def test_compensation_picks_up_old_failed(client):
 
     counter = {"n": 0}
 
-    async def handler(task: dict) -> None:
+    async def handler(task: dict) -> bool:
         counter["n"] += 1
+        return True  # Phase 7 T3 (Decision §5): handlers must return bool
 
     scanner = CompensationScanner(
         task_repo=repo, handler=handler, max_attempts=3, threshold_sec=60.0
