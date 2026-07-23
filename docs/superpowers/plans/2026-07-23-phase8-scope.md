@@ -391,7 +391,7 @@ Phase 8.
 
 ### Tag force-move
 
-- `phase8` annotated tag created at `193b0db` (HEAD at closure),
+- `phase8` annotated tag created at HEAD at Phase 8 closure,
   force-pushed to remote. Represents *delivered state*, not
   snapshot time, following Decision §3 precedent from Phase 7.
 - `phase8.1` annotated tag at `7151f13` (T8-3a — bge-m3 vendoring

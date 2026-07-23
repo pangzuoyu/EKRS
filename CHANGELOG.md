@@ -10,7 +10,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
 
 ## [phase8] - 2026-07-24
 
-**Tag moved**: `phase8` created at `193b0db` (HEAD at Phase 8 closure).
+**Tag moved**: `phase8` created at HEAD at Phase 8 closure.
 `phase8` represents *delivered state*, not snapshot time — see Phase 8
 plan doc §"Tag strategy" + Phase 7 Decision §3 precedent.
 `phase8.1` placed at `7151f13` (T8-3a, bge-m3 vendoring milestone) as
