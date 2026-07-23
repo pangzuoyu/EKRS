@@ -36,6 +36,20 @@ golden-test:
 mock-notify:
 	bash scripts/mock_parser_notify.sh
 
+# Phase 8 T8-3b: end-to-end happy-path smoke. Requires `make dev` to
+# be running (RAG at http://localhost:8000 with a valid PARSER_TOKEN).
+# Generates a 6-block JSONL, POSTs /v1/ingestion/notify, polls status
+# until terminal, checks audit.log for qdrant_write_failed, verifies
+# the parser-side callback. Exits non-zero on any failure (see script
+# header for exit-code contract).
+smoke-ingestion:
+	@bash scripts/smoke_ingestion.sh
+
+# Phase 8 T8-3a: rebuild the locked-down reference image and capture
+# its SHA256 into deployment/rag-image.baseline.json.
+build-rag-baseline:
+	@bash scripts/build_rag_baseline.sh
+
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true

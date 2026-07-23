@@ -401,8 +401,50 @@ Before declaring a deployment "production ready":
 - [ ] `/healthz` returns 200 from inside the cluster
 - [ ] Prometheus scrape target shows `up`
 - [ ] `make golden-test` passes against a smoke-ingested fixture set
+- [ ] **`make smoke-ingestion` returns PASS** (Phase 8 T8-3b) — see "Post-deploy smoke" below
+- [ ] Image SHA matches `deployment/rag-image.baseline.json` (Phase 8 T8-3a)
 - [ ] Rollback tag identified (see `docs/CHANGELOG.md` §Rollback strategy)
 - [ ] On-call has access to `audit.log` (PVC) and `tasks.db` (PVC)
+
+### Post-deploy smoke
+
+After every deploy, run the ingestion smoke as the canary step. It
+exercises the full happy path in ≤ 60 s and exits non-zero on any
+contract violation:
+
+```bash
+PARSER_TOKEN="$PARSER_TOKEN" bash scripts/smoke_ingestion.sh
+```
+
+The script (Phase 8 T8-3b) does the following:
+
+1. Generates a 6-block mock JSONL at `/tmp/ekrs_smoke/<doc>/<ts>/data.jsonl`.
+2. Starts a local mock callback server (Python, background) that
+   records RAG's parser-side callback POST to a file.
+3. Builds the `/v1/ingestion/notify` payload via
+   `scripts/lib_smoke.py build-payload` (assigns a fresh uuid4
+   `trace_id` for audit-log correlation).
+4. POSTs the payload with `X-Parser-Token` (3 retries on transport
+   errors).
+5. Polls `/v1/ingestion/status/<doc_hash>` every 500 ms (timeout 30 s)
+   until status ∈ {`completed`, `failed`}.
+6. Scans `audit.log` for `qdrant_write_failed` events attributed to
+   the same `trace_id`. Even on HTTP 200, this catches silent write
+   failures (Phase 7 T1).
+7. Verifies the mock callback server received a body with
+   `status == "completed"`.
+
+Each step emits a `[STEP N]` line on stderr so triage doesn't require
+reading the full output. Exit codes (in `smoke_ingestion.sh` header):
+
+| Code | Meaning |
+|------|---------|
+| 0 | Full happy path |
+| 1 | Pre-flight (RAG unreachable, token missing, JSONL generation) |
+| 2 | `/v1/ingestion/notify` returned non-2xx after 3 retries |
+| 3 | Status polling never reached terminal / terminal = `failed` |
+| 4 | `audit.log` contained `qdrant_write_failed` for this `trace_id` |
+| 5 | Callback server did not receive `status=completed` within 10 s |
 
 ---
 
