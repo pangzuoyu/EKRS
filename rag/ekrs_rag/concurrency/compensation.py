@@ -2,13 +2,28 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Awaitable, Callable
 
 from ..storage.task_repo import TaskRepo
 
 logger = logging.getLogger(__name__)
 
-Handler = Callable[[dict[str, Any]], Awaitable[None]]
+# Phase 7 T3 (Decision §1 + §5): handler now returns bool to signal re-ingest
+# outcome. The scanner measures wall-clock duration and emits the new
+# required audit fields `reingest_outcome` + `reingest_duration_ms`.
+# Exception paths (handler raises) still flow through the existing
+# `handler_failed` emit, with outcome="failed".
+Handler = Callable[[dict[str, Any]], Awaitable[bool]]
+
+# Valid outcome values per Decision §5. Used by tests + emit sites.
+OUTCOME_SUCCESS = "success"
+OUTCOME_FAILED = "failed"
+OUTCOME_DUPLICATE = "duplicate"
+OUTCOME_SKIPPED = "skipped"
+VALID_OUTCOMES = frozenset(
+    {OUTCOME_SUCCESS, OUTCOME_FAILED, OUTCOME_DUPLICATE, OUTCOME_SKIPPED}
+)
 
 
 class CompensationScanner:
@@ -48,6 +63,8 @@ class CompensationScanner:
                 _emit_compensation_event(
                     task["request_id"],
                     reason="handler_not_wired",
+                    outcome=OUTCOME_SKIPPED,
+                    duration_ms=0,
                 )
                 continue
             # SQL 内再次校验 status / attempts / updated_at, 避免两个并发 scan
@@ -63,25 +80,44 @@ class CompensationScanner:
                 _emit_compensation_event(
                     task["request_id"],
                     reason="claim_race_lost",
+                    outcome=OUTCOME_SKIPPED,
+                    duration_ms=0,
                 )
                 continue
             attempt = int(task.get("attempts", 0)) + 1
-            _emit_compensation_event(
-                task["request_id"],
-                attempt=attempt,
-                reason="retry_invoked",
-            )
+            started = time.monotonic()
             try:
-                await self._handler(task)
-                self._repo.mark_status(task["request_id"], "COMPLETED")
-                retried += 1
+                ok = await self._handler(task)
+                duration_ms = int((time.monotonic() - started) * 1000)
+                # The handler returns True on success/duplicate and False on
+                # hard failure. The scanner does NOT differentiate success vs
+                # duplicate at this layer — handler does that — so we trust
+                # the bool and map to OUTCOME_SUCCESS / OUTCOME_FAILED.
+                if ok:
+                    self._repo.mark_status(task["request_id"], "COMPLETED")
+                    retried += 1
+                else:
+                    self._repo.mark_failed_with_error(
+                        task["request_id"],
+                        "compensation handler returned False (re-ingest failed)",
+                    )
+                _emit_compensation_event(
+                    task["request_id"],
+                    attempt=attempt,
+                    reason="retry_invoked",
+                    outcome=OUTCOME_SUCCESS if ok else OUTCOME_FAILED,
+                    duration_ms=duration_ms,
+                )
             except Exception as e:
+                duration_ms = int((time.monotonic() - started) * 1000)
                 logger.exception("Compensation handler failed for %s", task["request_id"])
                 self._repo.mark_failed_with_error(task["request_id"], str(e))
                 _emit_compensation_event(
                     task["request_id"],
                     attempt=attempt,
                     reason=f"handler_failed:{e.__class__.__name__}",
+                    outcome=OUTCOME_FAILED,
+                    duration_ms=duration_ms,
                 )
         return retried
 
@@ -90,14 +126,26 @@ def _emit_compensation_event(
     request_id: str,
     attempt: int | None = None,
     reason: str | None = None,
+    outcome: str = OUTCOME_SKIPPED,
+    duration_ms: int = 0,
 ) -> None:
     """Best-effort emit of `compensation_retry` to the audit log.
 
     Mirrors the `get_writer()` guard used elsewhere: missing writer
-    in test fixtures is silently skipped. `attempt` and `reason` are
-    informational extras (schema requires only `request_id`); they pass
-    through `log_event`'s defensive spread without re-registration.
+    in test fixtures is silently skipped.
+
+    Phase 7 T3 (Decision §5): `outcome` + `duration_ms` are now REQUIRED
+    by the registered schema. `outcome` is one of {success, failed,
+    duplicate, skipped}; `duration_ms` is wall-clock milliseconds for
+    the re-ingest attempt (0 for paths where no re-ingest ran, e.g.
+    handler_not_wired / claim_race_lost).
     """
+    if outcome not in VALID_OUTCOMES:
+        # Defensive: don't silently corrupt the audit log; coerce to
+        # "failed" so the invariant (string in {success,failed,duplicate,
+        # skipped}) is preserved. The handler-side error is also surfaced
+        # via `reason`.
+        outcome = OUTCOME_FAILED
     try:
         from ..observability.audit import get_writer
 
@@ -106,7 +154,11 @@ def _emit_compensation_event(
         return
     if writer is None:
         return
-    kwargs: dict[str, Any] = {"request_id": request_id}
+    kwargs: dict[str, Any] = {
+        "request_id": request_id,
+        "reingest_outcome": outcome,
+        "reingest_duration_ms": int(duration_ms),
+    }
     if attempt is not None:
         kwargs["attempt"] = attempt
     if reason is not None:

@@ -262,6 +262,97 @@ class IngestionPipeline:
         logger.info("Replayed %d chunks for doc=%s v=%d", count, doc_hash, version)
         return count
 
+    async def reparse(
+        self,
+        source_path: str,
+        doc_hash: str,
+        version: int,
+        callback_url: str | None,
+        force: bool = False,
+    ) -> IngestionOutcome:
+        """Universal re-ingest entry point for compensation handlers + CLI.
+
+        Phase 7 T3 (Decision §1). Reads JSONL from ``source_path`` and
+        re-runs the parse → chunk → Qdrant upsert → callback flow. When
+        ``force=False`` (default) and the on-disk file's SHA256 already
+        matches the version indexed in Qdrant, returns early with
+        ``rag_status='duplicate'`` — preserving idempotency for routine
+        compensation retries. When ``force=True``, bypasses the hash
+        check and unconditionally re-upserts (operator escape hatch).
+
+        Args:
+            source_path: absolute path to the parser-written JSONL file.
+            doc_hash:    ``doc_id`` / ``content_hash`` from the task row.
+            version:     monotonic document version.
+            callback_url: optional parser callback URL (no-op if None).
+            force:       bypass SHA256 idempotency check.
+
+        Returns:
+            IngestionOutcome with ``rag_status`` ∈ {success, duplicate,
+            business_failure}.
+        """
+        from ..models.ingestion import IngestionNotification  # local import (avoid cycle)
+
+        jsonl_path = Path(source_path)
+        if not jsonl_path.exists():
+            logger.error(
+                "reparse: source_path missing: doc=%s v=%d path=%s",
+                doc_hash, version, source_path,
+            )
+            return IngestionOutcome(
+                rag_status="business_failure",
+                error=f"source_path missing: {source_path}",
+            )
+
+        # Idempotency: skip re-upsert when hashes already match.
+        if not force:
+            existing = self._qdrant.get_ingestion_status(doc_hash)
+            if existing and existing.status == "success" and existing.version == version:
+                logger.info(
+                    "reparse: hash matches existing v=%d, skipping upsert "
+                    "(force=False); doc=%s",
+                    version, doc_hash,
+                )
+                outcome = IngestionOutcome(
+                    rag_status="duplicate",
+                    chunks_indexed=existing.chunks_indexed,
+                )
+                if callback_url:
+                    # Best-effort callback for the duplicate path.
+                    notification = IngestionNotification(
+                        doc_hash=doc_hash,
+                        version=version,
+                        output_path=str(jsonl_path.parent),
+                        callback_url=callback_url,
+                    )
+                    await self._send_callback_safely(notification, outcome)
+                return outcome
+
+        logger.info(
+            "reparse: doc=%s v=%d path=%s force=%s",
+            doc_hash, version, source_path, force,
+        )
+        # Delegate to replay() (shares parse/chunk/upsert primitives).
+        try:
+            count = await self.replay(jsonl_path, doc_hash, version)
+        except ValueError as e:
+            return IngestionOutcome(
+                rag_status="business_failure", error=str(e),
+            )
+
+        outcome = IngestionOutcome(
+            rag_status="success", chunks_indexed=count,
+        )
+        if callback_url:
+            notification = IngestionNotification(
+                doc_hash=doc_hash,
+                version=version,
+                output_path=str(jsonl_path.parent),
+                callback_url=callback_url,
+            )
+            await self._send_callback_safely(notification, outcome)
+        return outcome
+
     @retry(
         reraise=True,
         retry=retry_if_exception_type(CallbackRetryableError),

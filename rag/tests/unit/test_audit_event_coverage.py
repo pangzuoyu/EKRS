@@ -113,8 +113,8 @@ async def test_compensation_retry_emitted_on_handler_invocation(repo, audit_writ
     )
     repo._conn.commit()
 
-    async def handler(task: dict) -> None:
-        pass
+    async def handler(task: dict) -> bool:
+        return True
 
     scanner = CompensationScanner(task_repo=repo, handler=handler, threshold_sec=60.0)
     n = await scanner.scan()
@@ -122,11 +122,14 @@ async def test_compensation_retry_emitted_on_handler_invocation(repo, audit_writ
 
     events = _read_events(audit_path)
     retry_events = [e for e in events if e["event"] == "compensation_retry"]
-    assert len(retry_events) >= 1
+    assert len(retry_events) == 1
     last = retry_events[-1]
     assert last["request_id"] == "req-1"
     assert last.get("reason") == "retry_invoked"
     assert last.get("attempt") == 1
+    # Phase 7 T3 (Decision §5): outcome + duration_ms are required fields.
+    assert last.get("reingest_outcome") == "success"
+    assert last.get("reingest_duration_ms") == 0
 
 
 @pytest.mark.asyncio
@@ -156,6 +159,9 @@ async def test_compensation_retry_emitted_on_unwired_handler(repo, audit_writer)
     assert len(retry_events) == 1
     assert retry_events[0]["request_id"] == "req-2"
     assert retry_events[0].get("reason") == "handler_not_wired"
+    # No re-ingest happened on the unwired path; outcome is "skipped" per spec.
+    assert retry_events[0].get("reingest_outcome") == "skipped"
+    assert retry_events[0].get("reingest_duration_ms") == 0
 
 
 @pytest.mark.asyncio
@@ -181,11 +187,14 @@ async def test_compensation_retry_emitted_on_handler_failure(repo, audit_writer)
 
     events = _read_events(audit_path)
     retry_events = [e for e in events if e["event"] == "compensation_retry"]
-    # Two emissions: retry_invoked on entry, handler_failed on raise.
-    assert len(retry_events) == 2
-    assert retry_events[0].get("reason") == "retry_invoked"
-    assert retry_events[1].get("reason") == "handler_failed:RuntimeError"
-    assert all(e["request_id"] == "req-3" for e in retry_events)
+    # Single emission on handler raise: schema now requires outcome +
+    # duration_ms, so we coalesce retry_invoked + handler_failed into one
+    # event with outcome="failed".
+    assert len(retry_events) == 1
+    last = retry_events[-1]
+    assert last["request_id"] == "req-3"
+    assert last.get("reason") == "handler_failed:RuntimeError"
+    assert last.get("reingest_outcome") == "failed"
 
 
 # ---------------------------------------------------------------------------

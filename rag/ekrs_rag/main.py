@@ -41,10 +41,15 @@ logger = logging.getLogger(__name__)
 COMPENSATION_HANDLER_IMPLEMENTED = False
 
 
-async def _stub_compensation_handler(task: dict) -> None:
-    """重试入队: 重新触发 ingest (需 pipeline 支持重试入口)."""
-    # TODO: wire to IngestionPipeline.ingest via callback_url (Task 7)
+async def _stub_compensation_handler(task: dict) -> bool:
+    """Stub handler — returns False to signal no work done.
+
+    Phase 7 T3 (Decision §5): handler now returns ``bool``. The stub
+    returns False because no real re-ingest happened; the scanner marks
+    the task FAILED with descriptive last_error.
+    """
     logger.warning("Compensation handler not yet wired for %s", task["request_id"])
+    return False
 
 
 def _get_compensation_handler():
@@ -84,7 +89,7 @@ _EVENT_SCHEMAS = {
     "ingestion_replay_started": {"request_id"},
     "ingestion_replay_completed": {"request_id"},
     "ingestion_replay_sha256_mismatch": {"request_id"},
-    "compensation_retry": {"request_id"},
+    "compensation_retry": {"request_id", "reingest_outcome", "reingest_duration_ms"},
     "qdrant_write_failed": {"collection"},
     "lock_acquire_failed": {"lock_key"},
     # Phase 6A (T2 soft-fail audit): registered after Task 2 write-site was
