@@ -256,8 +256,6 @@ async def lifespan(app: FastAPI):
             handler_is_wired=COMPENSATION_HANDLER_IMPLEMENTED,
         )
         app.state.compensation_scanner = _scanner
-        retried = await _scanner.scan()
-        logger.info("Compensation scan completed: retried=%d", retried)
 
         # Phase 5: observability wiring
         audit_path = settings.AUDIT_LOG_PATH
@@ -296,6 +294,14 @@ async def lifespan(app: FastAPI):
         if _audit_index is not None:
             attach_index(_audit_index)
         app.state.audit_index = _audit_index
+
+        # Run compensation scan AFTER AuditWriter is set. The scanner emits
+        # `compensation_retry` events for every retry path (handler_not_wired,
+        # claim_race_lost, retry_invoked, handler_failed); previously this ran
+        # before set_writer() so all events from the cold-start scan were
+        # silently dropped. Moving it here ensures the events survive.
+        retried = await _scanner.scan()
+        logger.info("Compensation scan completed: retried=%d", retried)
 
         yield
     finally:

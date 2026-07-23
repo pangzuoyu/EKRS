@@ -13,6 +13,7 @@ whether dim mismatch triggers automatic delete+recreate.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from typing import Optional
 
@@ -39,17 +40,38 @@ def _emit_qdrant_failure(operation: str, collection: str, exc: BaseException) ->
     Never raises — writer.write() already swallows its own errors. Calling
     sites re-raise the original exception so retry/caller behavior is
     unchanged.
+
+    Rate-limited per (operation, collection, error_type) key to prevent
+    retry storms (tenacity retries up to 3×, so a single Qdrant outage
+    produces N emits per call site — historically 1500+ entries in
+    audit.log from one ingest run). Rate limit: at most one emit per
+    5 seconds per key; later failures within the window are dropped
+    (the original exception still propagates so retry still happens).
     """
     writer = get_writer()
     if writer is None:
         return
+    error_type = type(exc).__name__
+    key = (operation, collection, error_type)
+    now = time.monotonic()
+    last = _QDRANT_EMIT_LAST.get(key)
+    if last is not None and (now - last) < _QDRANT_EMIT_WINDOW_SEC:
+        return
+    _QDRANT_EMIT_LAST[key] = now
     writer.write(
         "qdrant_write_failed",
         collection=collection,
         operation=operation,
-        error=type(exc).__name__,
+        error=error_type,
         message=str(exc)[:200],
     )
+
+
+# Module-level rate-limit state for _emit_qdrant_failure. Cheap dict;
+# process-local (multi-pod each get their own). Key is (operation,
+# collection, error_type); value is monotonic timestamp of last emit.
+_QDRANT_EMIT_LAST: dict[tuple[str, str, str], float] = {}
+_QDRANT_EMIT_WINDOW_SEC = 5.0
 
 logger = logging.getLogger(__name__)
 

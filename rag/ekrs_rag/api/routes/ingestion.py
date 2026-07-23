@@ -213,10 +213,20 @@ async def notify(
     _repo_doc = getattr(request.app.state, "document_repo", None)
     if _doc_meta is not None and _repo_doc is not None:
         try:
+            # scope_path in the v2 parser payload is a JSON array
+            # (e.g. ["national", "industry"]). DocumentRepo stores it as a
+            # TEXT column; SQLite has no native list type, so we join with
+            # commas. The `LIKE` prefix query in DocumentRepo.list() still
+            # matches a leading element (e.g. "national%" finds "national,industry").
+            _raw_scope = _doc_meta.get("scope_path", "")
+            if isinstance(_raw_scope, list):
+                _scope_path_str = ",".join(str(s) for s in _raw_scope)
+            else:
+                _scope_path_str = str(_raw_scope)
             _repo_doc.insert(Document(
                 doc_id=_doc_meta["doc_id"],
                 doc_type=_doc_meta.get("type", "unknown"),
-                scope_path=_doc_meta.get("scope_path", ""),
+                scope_path=_scope_path_str,
                 status=_doc_meta.get("status", "active"),
                 created_at=time.time(),
             ))

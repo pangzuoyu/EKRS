@@ -52,6 +52,22 @@ def dummy_embedding_service() -> EmbeddingService:
     return EmbeddingService(model_dir=Path("/nonexistent"))  # is_dummy=True
 
 
+@pytest.fixture(autouse=True)
+def _reset_qdrant_emit_rate_limit() -> None:
+    """Reset module-level rate-limit dict so each test starts with an empty window.
+
+    Without this, the first emit in one test populates the dict; subsequent
+    tests in the same module that use the same (operation, collection,
+    error_type) key get suppressed by the 5s window even though they expected
+    a fresh emit.
+    """
+    from ekrs_rag.retrieval import qdrant_client as qc_mod
+
+    qc_mod._QDRANT_EMIT_LAST.clear()
+    yield
+    qc_mod._QDRANT_EMIT_LAST.clear()
+
+
 def _make_qdrant(existing_size: int | None = None) -> MagicMock:
     """Build mock QdrantClient that returns CollectionInfo with given size."""
     client = MagicMock()
