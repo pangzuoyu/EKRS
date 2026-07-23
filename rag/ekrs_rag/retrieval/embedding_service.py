@@ -12,21 +12,35 @@ self-similarity pseudo-sparse computed from token embeddings. See
 Falls back to dummy mode when model files are absent (CI without
 model), but blocks upsert in dummy mode (D1) to prevent silent data
 corruption.
+
+Phase 7 T7 (Decision §4): encode() consults an in-process LRU+TTL
+cache keyed on (text_hash, model_version). Cache prevents repeated
+calls to the ONNX export for the same chunk text; flush_cache() is
+exposed for /v1/admin/embedding-cache/flush and on model swap.
 """
 from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 from qdrant_client import models
 
+from ..core.config import settings
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_DIR = Path(__file__).parent.parent.parent / "models" / "bge-m3"
 DENSE_SIZE = 1024  # bge-m3 dense vector dimension
+
+# Module-level knobs read at cache construction time so tests can patch.
+_CACHE_CAPACITY = int(os.environ.get("EKRS_TEST_CACHE_CAPACITY", "10000"))
+_CACHE_TTL_SEC = int(os.environ.get("EKRS_TEST_CACHE_TTL_SEC", "86400"))
 
 
 class EmbeddingUnavailableError(RuntimeError):
@@ -56,6 +70,100 @@ def _load_onnx_model(model_dir: Path):
     return OnnxBgeM3(model_dir)
 
 
+def _compute_model_version(model_dir: Path) -> str:
+    """Compute cache-versioning token for the loaded model.
+
+    Decision §4: when the operator swaps bge-m3 on disk (e.g. upgrades
+    the ONNX export or rotates sparse_linear.pt) the cache MUST drop
+    all entries — otherwise we'd serve stale vectors from the previous
+    model. SHA256 of model.onnx alone is enough for the common case;
+    we add sparse_linear.pt into the mix when present so a sparse-head
+    swap also invalidates cached entries.
+    """
+    digests: list[str] = []
+    for fname in ("model.onnx", "sparse_linear.pt"):
+        fp = model_dir / fname
+        if fp.exists():
+            digests.append(f"{fname}={hashlib.sha256(fp.read_bytes()).hexdigest()[:16]}")
+    if not digests:
+        return "dummy"
+    return "|".join(digests)
+
+
+class _LRUCache:
+    """Thread-unsafe LRU + TTL cache keyed on str.
+
+    Phase 7 T7: ordered by insertion order; oldest evicted on overflow;
+    each entry carries a monotonic timestamp; entries older than ttl
+    are treated as misses on access. The cache is intentionally local
+    to a single EmbeddingService instance — embedder workloads are
+    single-threaded in this service (FastAPI route handlers await
+    independently but `encode` itself does not re-enter itself).
+    """
+
+    __slots__ = ("_entries", "_capacity", "_ttl_sec")
+
+    def __init__(self, capacity: int, ttl_sec: int) -> None:
+        self._entries: "OrderedDict[str, dict[str, object]]" = OrderedDict()
+        self._capacity = capacity
+        self._ttl_sec = ttl_sec
+
+    def get(self, key: str) -> Optional[EncodedVector]:
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        # TTL check first — stale entries fall through to recomputation
+        # without polluting the cache. They are NOT removed here because
+        # touch() would re-position them and we want LRU order to reflect
+        # actual last access (excluding freshness overrides).
+        if time.monotonic() - float(entry["inserted_at"]) > self._ttl_sec:  # type: ignore[arg-type]
+            self._entries.pop(key, None)
+            return None
+        # Move to end on hit — marks as most-recently-used.
+        self._entries.move_to_end(key)
+        return entry["vector"]  # type: ignore[return-value]
+
+    def put(self, key: str, vector: EncodedVector) -> None:
+        # Insertion-order refresh: re-inserting an existing key positions
+        # it at the tail (most-recently-used) without changing capacity.
+        if key in self._entries:
+            self._entries.move_to_end(key)
+        self._entries[key] = {"vector": vector, "inserted_at": time.monotonic()}
+        # Evict oldest until within capacity.
+        while len(self._entries) > self._capacity:
+            self._entries.popitem(last=False)
+
+    def clear(self) -> int:
+        """Drop every entry; return the count that was cleared."""
+        n = len(self._entries)
+        self._entries.clear()
+        return n
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._entries
+
+    def __iter__(self):
+        """Yield keys in insertion order (oldest first).
+
+        Exposed for diagnostics + tests that need to backdate timestamps
+        on cached entries (TTL verification).
+        """
+        return iter(self._entries)
+
+    def _backdate_all(self, secs_ago: float) -> None:
+        """Test-only helper: shift every entry's inserted_at into the past.
+
+        Lets tests force a TTL expiry without sleeping for hours. Production
+        code never calls this — the underscore prefix signals internal.
+        """
+        target = time.monotonic() - secs_ago
+        for entry in self._entries.values():
+            entry["inserted_at"] = target
+
+
 class EmbeddingService:
     """Facade over the bge-m3 ONNX export. Single encode() returns EncodedVector list."""
 
@@ -65,6 +173,15 @@ class EmbeddingService:
         self._model_dir = Path(model_dir) if model_dir else DEFAULT_MODEL_DIR
         self._model = None
         self._is_dummy = False
+        # Phase 7 T7: LRU+TTL cache for encode() output. Capacity and TTL
+        # are read from Settings so operators can tune via .env without
+        # code changes. The cache is empty until encode() runs in
+        # non-dummy mode (dummy mode bypasses the cache entirely).
+        self._cache: _LRUCache = _LRUCache(
+            capacity=_CACHE_CAPACITY,
+            ttl_sec=_CACHE_TTL_SEC,
+        )
+        self._model_version: str = "dummy"
         self._load()
 
     def _load(self) -> None:
@@ -84,7 +201,17 @@ class EmbeddingService:
 
         try:
             self._model = _load_onnx_model(self._model_dir)
-            logger.info("Loaded bge-m3 (ONNX) from %s", self._model_dir)
+            # Phase 7 T7: stamp the loaded model so encode() can include
+            # it in cache keys. If the operator later swaps model.onnx
+            # and the service is not restarted, the next encode() will
+            # see a different model_version → cache miss → recompute.
+            # If the service IS restarted, _load() runs again and rebuilds
+            # the cache from scratch (empty OrderedDict on construction).
+            self._model_version = _compute_model_version(self._model_dir)
+            logger.info(
+                "Loaded bge-m3 (ONNX) from %s, model_version=%s",
+                self._model_dir, self._model_version,
+            )
         except Exception as e:
             logger.warning("Failed to load bge-m3: %s, using dummy", e)
             self._is_dummy = True
@@ -147,25 +274,70 @@ class EmbeddingService:
 
         In dummy mode, returns zero vectors + empty sparse (so reads work in dev).
         Callers must check is_dummy before allowing writes (D1).
+
+        Phase 7 T7: in non-dummy mode, consults the LRU+TTL cache keyed
+        on (sha256(text), model_version). Cache hits return without
+        touching the ONNX export; cache misses trigger a single batched
+        encode() and populate the cache per-input.
         """
         if not texts:
             return []
         if self._is_dummy:
+            # Dummy mode bypasses the cache — there is no real model to
+            # memoize, and writes are already blocked at upsert time (D1).
             return [EncodedVector(dense=[0.0] * self.DENSE_SIZE, sparse={}) for _ in texts]
 
         # _model is non-None when not in dummy mode (set by __init__), but mypy
         # can't follow that invariant through `_is_dummy`.
         assert self._model is not None, "model must be loaded when not in dummy mode"
-        raw = self._model.encode(texts, return_dense=True, return_sparse=True)
-        # OnnxBgeM3 returns dict with 'dense_vecs' (np.ndarray [N, 1024])
-        # and 'lexical_weights' (list[dict[int, float]]), matching the
-        # BGEM3FlagModel.encode shape so existing callers stay compatible.
-        dense_array = raw["dense_vecs"]
-        sparse_list = raw["lexical_weights"]
-        return [
-            EncodedVector(dense=list(d), sparse=s)
-            for d, s in zip(dense_array, sparse_list)
-        ]
+
+        # Phase 7 T7: split texts into cached / uncached, encode only the
+        # misses, then assemble the final list in original order.
+        results: list[Optional[EncodedVector]] = [None] * len(texts)
+        misses: list[tuple[int, str, str]] = []  # (orig_index, text_hash, raw_text)
+        for i, t in enumerate(texts):
+            key = f"{hashlib.sha256(t.encode('utf-8')).hexdigest()}|{self._model_version}"
+            hit = self._cache.get(key)
+            if hit is not None:
+                results[i] = hit
+            else:
+                misses.append((i, key, t))
+
+        if misses:
+            raw = self._model.encode(
+                [t for _, _, t in misses],
+                return_dense=True,
+                return_sparse=True,
+            )
+            dense_array = raw["dense_vecs"]
+            sparse_list = raw["lexical_weights"]
+            for (orig_idx, key, _t), d, s in zip(misses, dense_array, sparse_list):
+                vec = EncodedVector(dense=list(d), sparse=s)
+                results[orig_idx] = vec
+                self._cache.put(key, vec)
+
+        # All slots must be filled by this point — the assert catches any
+        # future refactor that breaks the bookkeeping above.
+        assert all(r is not None for r in results), "encode() produced holes"
+        return results  # type: ignore[return-value]
+
+    def flush_cache(self) -> int:
+        """Drop every cached entry; return how many were cleared.
+
+        Phase 7 T7: backing operation for /v1/admin/embedding-cache/flush
+        and operator recovery after a model swap. Idempotent — safe to
+        call when the cache is empty (returns 0).
+        """
+        return self._cache.clear()
+
+    def cache_size(self) -> int:
+        """Number of distinct (text, model_version) entries currently cached."""
+        return len(self._cache)
+
+    @property
+    def model_version(self) -> str:
+        """Versioning token included in cache keys (Decision §4)."""
+        return self._model_version
 
     def to_qdrant_sparse(self, sparse: dict[int, float]) -> models.SparseVector:
         """Convert {term_id: weight} dict to Qdrant sparse format.

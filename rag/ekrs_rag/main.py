@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import CollectorRegistry, multiprocess, start_http_server
 
 from .api.middleware.observability import ObservabilityMiddleware
-from .api.routes import admin, calculate, constraints, ingestion, trace
+from .api.routes import admin, admin_embedding_cache, calculate, constraints, ingestion, trace
 from .concurrency.compensation import CompensationScanner
 from .concurrency.redis_lock import RedisLock
 from .core.config import settings
@@ -386,6 +386,9 @@ def create_app() -> FastAPI:
     app.include_router(trace.router)
     app.include_router(calculate.router)
     app.include_router(admin.router)
+    # Phase 7 T7 (Decision §4): operator endpoint to flush the embedding
+    # LRU cache after a model swap or suspected corruption.
+    app.include_router(admin_embedding_cache.router)
 
     @app.get("/health", response_class=PlainTextResponse)
     async def health():

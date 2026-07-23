@@ -90,6 +90,12 @@ class Settings(BaseSettings):
     # parser's parse_tasks.error column). Truncated server-side in _send_callback.
     CALLBACK_ERROR_MAX_CHARS: int = 1024
 
+    # Phase 7 T7 (Decision §4): embedding LRU cache.
+    # TTL bounds staleness after a model swap; CAP bounds memory growth.
+    # Both default to Phase 7 plan doc: TTL=24h, CAP=10k entries.
+    EMBEDDING_CACHE_TTL_SEC: int = 86400  # 24 hours
+    EMBEDDING_CACHE_CAPACITY: int = 10000
+
     @field_validator("PARSER_TOKEN")
     @classmethod
     def token_min_length(cls, v: str) -> str:

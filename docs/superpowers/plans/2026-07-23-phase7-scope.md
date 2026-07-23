@@ -1,6 +1,6 @@
 # Phase 7 — Scope
 
-> Status: planning
+> Status: closing
 > Date: 2026-07-23
 > Author: Claude (Sonnet)
 > Predecessor: Phase 6C (`phase6c-closure` tag) + Phase 7 T1/T2 already shipped
@@ -171,3 +171,40 @@ New deferrals identified in audit:
 
 - **Was Task 7 ever written as a spec?** ❌ No. `main.py:46` references "Task 7" but no document exists under `docs/superpowers/plans/`. The reference is purely internal/legacy.
   - ✅ **Spec written 2026-07-23**: [`docs/superpowers/plans/2026-07-23-task7-compensation-retry.md`](2026-07-23-task7-compensation-retry.md) (TDD test list + design + files touched). T3 implementation follows this spec.
+
+---
+
+## Closing — T7 shipped 2026-07-23
+
+T7 (Embedding LRU cache, Decision §4) landed:
+
+- **Cache class** — `ekrs_rag.retrieval.embedding_service._LRUCache`
+  (OrderedDict, capacity + TTL). Module knobs `_CACHE_CAPACITY` /
+  `_CACHE_TTL_SEC` are read at construction; production defaults
+  (10k / 86400s) come from settings, but tests patch them via env vars
+  `EKRS_TEST_CACHE_CAPACITY` / `EKRS_TEST_CACHE_TTL_SEC` and direct
+  `patch.object` overrides.
+- **Cache key** — `sha256(text) | model_version`, where `model_version`
+  is the joined SHA256 prefixes of `model.onnx` and `sparse_linear.pt`
+  (Decision §4 "auto-check"). Cache miss on operator swap → fresh
+  recomputation, no stale vector served.
+- **encode() integration** — splits inputs into cached/missing, calls
+  the model ONLY for the misses, populates per-key. Single batched
+  call per encode(), matching the existing contract.
+- **Admin endpoint** — `POST /v1/admin/embedding-cache/flush` (router
+  `ekrs_rag.api.routes.admin_embedding_cache`, gated by
+  `Depends(require_admin_key)`). Returns `{status, cleared,
+  model_version, cache_size_after}`. 503 if EmbeddingService is None
+  (service started in a mode without the embedder).
+- **Tests** — `tests/unit/test_embedding_cache.py` (10 cases: hit,
+  miss, distinguish, flush, model_version keying, TTL, LRU eviction,
+  dummy bypass, EncodedVector shape, cache_size), and
+  `tests/integration/test_admin_embedding_cache.py` (6 cases: 401
+  missing key, 401 wrong key, 200 happy path, idempotency, 503 no
+  embedder, real EmbeddingService end-to-end). 492 unit + integration
+  tests pass; mypy clean on changed files.
+
+Open follow-ups (out of Phase 7):
+- T6 (handbook §6 Phase 7 entry) — still pending
+- `phase7` tag force-move + CHANGELOG.md entry — pending
+- Qdrant index optimization (Phase 6C deferral) — still deferred
