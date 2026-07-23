@@ -142,7 +142,7 @@ def test_ingestion_notify_persists_document_metadata(
 
     assert response.status_code == 202
     assert response.json()["status"] == "queued"
-    repo = e2e_client.app.state.document_repo
+    repo = e2e_client.app.state.document_repo  # type: ignore[attr-defined]
     assert isinstance(repo, DocumentRepo)
     document = repo.get(doc_id)
     assert document is not None

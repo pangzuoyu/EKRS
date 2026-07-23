@@ -16,6 +16,7 @@ import json
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -186,7 +187,7 @@ class _CallbackCapture(BaseHTTPRequestHandler):
 
 
 @pytest.fixture()
-def callback_server() -> tuple[str, list[dict]]:
+def callback_server() -> Iterator[tuple[str, list[dict]]]:
     _CallbackCapture.received = []
     server = HTTPServer(("127.0.0.1", 0), _CallbackCapture)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

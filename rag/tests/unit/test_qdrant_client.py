@@ -9,6 +9,7 @@ Mock FlagEmbedding via EmbeddingService; mock QdrantClient.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -37,9 +38,9 @@ def mock_embedding_service() -> EmbeddingService:
     """EmbeddingService in real mode (not dummy), with fixed vectors."""
     svc = EmbeddingService(model_dir=Path("/fake/path"))
     svc._is_dummy = False  # Force real mode
-    svc._model = MagicMock()
+    svc._model = MagicMock()  # type: ignore[assignment]
     # Real encode returns 1024d dense + sparse
-    svc._model.encode.return_value = {
+    svc._model.encode.return_value = {  # type: ignore[attr-defined]
         "dense_vecs": [[0.1] * 1024, [0.2] * 1024],
         "lexical_weights": [{1: 0.5, 2: 0.3}, {3: 0.4}],
     }
@@ -53,7 +54,7 @@ def dummy_embedding_service() -> EmbeddingService:
 
 
 @pytest.fixture(autouse=True)
-def _reset_qdrant_emit_rate_limit() -> None:
+def _reset_qdrant_emit_rate_limit() -> Iterator[None]:
     """Reset module-level rate-limit dict so each test starts with an empty window.
 
     Without this, the first emit in one test populates the dict; subsequent
@@ -164,8 +165,8 @@ def test_upsert_chunks_encodes_via_embedding_service(
 
     assert n == 2
     # Verify the mock model was called with chunk texts
-    mock_embedding_service._model.encode.assert_called_once()
-    args, _ = mock_embedding_service._model.encode.call_args
+    mock_embedding_service._model.encode.assert_called_once()  # type: ignore[attr-defined]
+    args, _ = mock_embedding_service._model.encode.call_args  # type: ignore[attr-defined]
     assert args[0] == ["hello", "world"]
     # Verify upsert received NamedVectors with dense + sparse
     upsert_call = client.upsert.call_args
@@ -254,7 +255,7 @@ def test_search_encodes_query_text_via_service(
         )
         mgr.search(query_text="user query", top_k=10)
 
-    encode_args = mock_embedding_service._model.encode.call_args[0]
+    encode_args = mock_embedding_service._model.encode.call_args[0]  # type: ignore[attr-defined]
     assert "user query" in encode_args[0]
 
 
@@ -337,6 +338,7 @@ def test_get_ingestion_status_returns_indexed_count(
         )
         status = mgr.get_ingestion_status(doc_hash="abc123")
 
+    assert status is not None
     assert status.status == "success"
     assert status.chunks_indexed == 42
     assert status.version == 2

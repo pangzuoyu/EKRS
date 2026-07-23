@@ -45,7 +45,6 @@ def mock_flag_model() -> MagicMock:
         return {"dense_vecs": dense_vecs, "lexical_weights": lex_weights}
 
     mock.encode.side_effect = fake_encode
-    mock.call_count = lambda: call_count["n"]  # type: ignore[attr-defined]
     return mock
 
 
@@ -74,14 +73,14 @@ def test_cache_hit_does_not_call_model(
 ) -> None:
     """Second encode() of the same text MUST NOT invoke the underlying model."""
     initial = embedding_svc.encode(["hello"])
-    n_after_first = mock_flag_model.call_count()
+    n_after_first = mock_flag_model.encode.call_count
 
     again = embedding_svc.encode(["hello"])
-    n_after_second = mock_flag_model.call_count()
+    n_after_second = mock_flag_model.encode.call_count
 
     # Same vector returned (by reference even — cache returns the same EncodedVector).
     assert again == initial
-    assert mock_flag_model.call_count() == n_after_first, (
+    assert mock_flag_model.encode.call_count == n_after_first, (
         f"Cache miss on second encode: model called {n_after_second - n_after_first} extra times"
     )
 
@@ -91,10 +90,10 @@ def test_cache_miss_calls_model(
 ) -> None:
     """Unseen text MUST trigger model invocation."""
     embedding_svc.encode(["hello"])
-    n1 = mock_flag_model.call_count()
+    n1 = mock_flag_model.encode.call_count
 
     embedding_svc.encode(["world"])
-    n2 = mock_flag_model.call_count()
+    n2 = mock_flag_model.encode.call_count
 
     assert n2 == n1 + 1, f"Expected 1 model call for new text, got {n2 - n1}"
 
@@ -105,7 +104,7 @@ def test_cache_distinguishes_texts(
     """Two different texts produce two cache misses → two model calls."""
     embedding_svc.encode(["alpha"])
     embedding_svc.encode(["beta"])
-    assert mock_flag_model.call_count() == 2
+    assert mock_flag_model.encode.call_count == 2
 
 
 def test_cache_flush_invalidates_entries(
@@ -113,11 +112,11 @@ def test_cache_flush_invalidates_entries(
 ) -> None:
     """flush_cache() forces re-computation on next encode() of same text."""
     embedding_svc.encode(["hello"])
-    n_before = mock_flag_model.call_count()
+    n_before = mock_flag_model.encode.call_count
 
     embedding_svc.flush_cache()
     embedding_svc.encode(["hello"])
-    n_after = mock_flag_model.call_count()
+    n_after = mock_flag_model.encode.call_count
 
     assert n_after == n_before + 1, "flush_cache did not invalidate cached entry"
 
@@ -139,14 +138,14 @@ def test_cache_key_includes_model_version(tmp_path: Path, mock_flag_model: Magic
     ):
         svc = EmbeddingService(model_dir=tmp_path)
     svc.encode(["hello"])
-    n_v1 = mock_flag_model.call_count()
+    n_v1 = mock_flag_model.encode.call_count
 
     # Simulate operator swapping model.onnx out-of-band — flush cache and
     # re-encode. The test asserts the cache has been flushed, so the next
     # encode WILL hit the model (proving flush works at the entry level).
     svc.flush_cache()
     svc.encode(["hello"])
-    n_after_flush = mock_flag_model.call_count()
+    n_after_flush = mock_flag_model.encode.call_count
     assert n_after_flush == n_v1 + 1
 
 
@@ -160,7 +159,7 @@ def test_ttl_expiry_forces_recompute(
 ) -> None:
     """Cached entry older than TTL_SEC must be re-computed on next access."""
     embedding_svc.encode(["hello"])
-    n_before = mock_flag_model.call_count()
+    n_before = mock_flag_model.encode.call_count
 
     # Backdate every cached entry to make them stale.
     cache = embedding_svc._cache
@@ -168,7 +167,7 @@ def test_ttl_expiry_forces_recompute(
     cache._backdate_all(secs_ago=100000)
 
     embedding_svc.encode(["hello"])
-    n_after = mock_flag_model.call_count()
+    n_after = mock_flag_model.encode.call_count
 
     assert n_after == n_before + 1, (
         "Stale cache entry was returned instead of being recomputed"

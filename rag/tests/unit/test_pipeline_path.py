@@ -30,4 +30,4 @@ async def test_pipeline_ingest_rejects_output_outside_root(tmp_path: Path) -> No
     outcome = await pipeline.ingest(notification)
     assert outcome.rag_status == "failed"
     assert outcome.error_code == "output_path_out_of_scope"
-    assert "SHARED_STORAGE_PATH" in outcome.error
+    assert outcome.error is not None and "SHARED_STORAGE_PATH" in outcome.error
