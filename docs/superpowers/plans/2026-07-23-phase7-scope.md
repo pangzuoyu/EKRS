@@ -1,6 +1,6 @@
 # Phase 7 — Scope
 
-> Status: closing
+> Status: closed
 > Date: 2026-07-23
 > Author: Claude (Sonnet)
 > Predecessor: Phase 6C (`phase6c-closure` tag) + Phase 7 T1/T2 already shipped
@@ -205,6 +205,6 @@ T7 (Embedding LRU cache, Decision §4) landed:
   tests pass; mypy clean on changed files.
 
 Open follow-ups (out of Phase 7):
-- T6 (handbook §6 Phase 7 entry) — still pending
-- `phase7` tag force-move + CHANGELOG.md entry — pending
-- Qdrant index optimization (Phase 6C deferral) — still deferred
+- T6 (handbook §6 Phase 7 entry) — done (commit 99c77f5, pushed)
+- `phase7` tag force-move + CHANGELOG.md entry — done in this task
+- Qdrant index optimization (Phase 6C deferral) — still deferred per §6.1
