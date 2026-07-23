@@ -72,8 +72,9 @@ Recommended order: T8-1, T8-2, T8-3a, T8-3b, T8-4, T8-5.
 
 **Scope.** Add SlowAPI as a runtime dependency and apply a default
 rate limit (`60/minute` per peer IP) to all `/v1/*` routes, with
-explicit exemption for `/healthz` and `/metrics` (high-frequency
-probes that would otherwise trip the limiter).
+explicit exemption for `/healthz`, `/metrics`, `/docs`, `/redoc`,
+`/openapi.json` (high-frequency probes + Swagger UI scrapers that
+would otherwise trip the limiter).
 
 **Files touched.**
 - `rag/pyproject.toml` — add `slowapi>=0.1.9` to `[project]`
@@ -89,8 +90,9 @@ probes that would otherwise trip the limiter).
   behavior so operators know to expect 429.
 
 **Acceptance.** `tests/unit/test_rate_limit.py` passes; `/v1/*`
-returns 429 after the configured burst; `/healthz` and `/metrics`
-unaffected; mypy clean on changed files; full test suite green.
+returns 429 after the configured burst; `/healthz`, `/metrics`,
+`/docs`, `/redoc`, `/openapi.json` unaffected; mypy clean on changed
+files; full test suite green.
 
 **Out of scope.** Per-user limits (would need auth — outside the
 threat model since the service uses `X-Parser-Token` for write paths
@@ -151,10 +153,18 @@ place for it.
   verifies the model file is present + SHA matches.
 - `docs/DEPLOYMENT.md` — document the image build arg + the new env
   var.
+- `.github/workflows/build-rag-image.yml` (new, or amend existing)
+  — trigger on change to `rag/models/bge-m3/**` OR `bge-m3.sha256`.
+  Without this trigger, model edits that don't rebuild the image
+  would silently bypass the new vendored path. The cache-bust
+  pattern from Phase 7 T7 (`sha256(model.onnx)|sha256(sparse_linear.pt)`)
+  auto-invalidates runtime cache when SHA changes; the new image
+  build trigger extends that to "image rebuilt when SHA changes".
 
 **Acceptance.** `docker compose up` produces a RAG image with
-bge-m3 ONNX baked in; integration test confirms SHA256 match; heavy
-tests in CI nightly run pass; mypy clean on changed files.
+bge-m3 ONNX baked in; integration test confirms SHA256 match; CI
+rebuilds the image on model file change; heavy tests in CI nightly
+run pass; mypy clean on changed files.
 
 **Out of scope.** Model quantization / compression (different concern;
 post-deploy optimization per §6.2 PD-1). Multi-arch images
@@ -180,6 +190,23 @@ from T8-3a) and produce a structured PASS/FAIL report.
 `make dev` stack produces `PASS` end-to-end within 60s; failures
 return non-zero exit + cite which step failed; no token logged
 (uses the same safe-piping pattern as `make mock-notify`).
+
+**Failure-signal contract.** The script MUST exit non-zero when any
+of the following are observed (not just network failures):
+1. `/v1/ingestion/notify` returns non-2xx after the configured
+   retries (cover transport-level + parser-scheme-level errors).
+2. `/v1/ingestion/status` polling never reaches a `completed`
+   terminal state within the timeout (default 30s).
+3. The terminal status reports a `qdrant_write_failed` audit
+   event in `audit.log` even if HTTP returned 200 (silent write
+   failure path caught by Phase 7 T1 integration test).
+4. The callback `POST /v1/ingestion/notify/callback` (real or
+   mock) returns non-2xx OR the mock callback received a payload
+   with `status != "completed"`.
+
+Each step emits a clearly attributed error line
+(`[STEP N] <message>` format) so triage doesn't require reading
+the full output.
 
 **Out of scope.** Production smoke against real Parser (that belongs
 to a separate ops deployment runbook, not the repo).
@@ -233,6 +260,17 @@ excluded from default `make test`) that:
 **Acceptance.** Heavy test runs cleanly on Python 3.11 + vendored
 bge-m3 environment; baseline JSON written; threshold assertion passes
 on the current chunker; CI nightly reports the number.
+
+**Calibration note.** The `5s/document` threshold is a placeholder.
+Before committing the assertion, run the benchmark once locally on
+the dev machine, capture the actual p99 from the JSON report, and
+either:
+- (a) accept the placeholder and tighten later (fine for Phase 8 —
+  the goal is a baseline number, not a tightened SLA), or
+- (b) set the threshold to 1.5 × observed p99 so the assertion
+  guards against regressions without false-failing.
+Either way, the baseline JSON report is the deliverable; the
+threshold is a guardrail, not a target.
 
 **Out of scope.** Comparing alternative chunking strategies
 (sentence-aware vs token-aware) — that's a research question, not a
