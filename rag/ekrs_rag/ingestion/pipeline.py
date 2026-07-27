@@ -153,7 +153,11 @@ class IngestionPipeline:
                 await self._send_callback_safely(notification, outcome)
                 return outcome
 
-            chunks = chunk_blocks(blocks, doc_hash, version)
+            chunks = chunk_blocks(
+                blocks, doc_hash, version,
+                max_tokens=settings.MAX_CHUNK_TOKENS,
+                payload_version=2,
+            )
             if not chunks:
                 logger.warning("No chunks produced from %d blocks", len(blocks))
                 outcome = self._failed_outcome("no_chunks", "No chunks produced")
@@ -252,7 +256,11 @@ class IngestionPipeline:
             if not blocks:
                 raise ValueError(f"Empty JSONL: {jsonl_path}")
 
-            chunks = chunk_blocks(blocks, doc_hash, version)
+            chunks = chunk_blocks(
+                blocks, doc_hash, version,
+                max_tokens=settings.MAX_CHUNK_TOKENS,
+                payload_version=2,
+            )
             if not chunks:
                 raise ValueError("No chunks produced")
         except IRParseError as e:

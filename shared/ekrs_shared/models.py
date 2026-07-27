@@ -191,6 +191,11 @@ class Chunk(BaseModel):
     version: int = 0
     page_numbers: List[int] = Field(default_factory=list)
     numeric_hints: List[NumericHint] = Field(default_factory=list)
+    # Phase 9: payload_version forces Qdrant to treat chunks from a new
+    # chunker algorithm as a different payload (idempotency key change)
+    # without bumping the on-disk document version. Default=1 preserves
+    # legacy behavior; chunker passes 2 to force index rebuild on refactor.
+    payload_version: int = 1
 
 
 # --- API request/response models ---

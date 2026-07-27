@@ -79,8 +79,9 @@ _DEFAULT_SEED = 42
 _BLOCKS_PER_DOC_MEAN = 20
 _BLOCKS_PER_DOC_STDDEV = 8
 
-# Max tokens per chunk (matches chunk_blocks default).
-_MAX_TOKENS = 500
+# Max tokens per chunk (matches chunk_blocks default; Phase 9 raised 500→768
+# to align with the bge-m3 sweet spot of 512–1024 tokens).
+_MAX_TOKENS = 768
 
 # Report schema version. Bump when the JSON shape changes.
 _REPORT_SCHEMA = "chunker-10k-1.0"

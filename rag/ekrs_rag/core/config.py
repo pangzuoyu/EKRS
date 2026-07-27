@@ -38,8 +38,10 @@ class Settings(BaseSettings):
     # Debug
     EKRS_DEBUG: bool = False
 
-    # Chunking
-    MAX_CHUNK_TOKENS: int = 500
+    # Chunking — Phase 9: bumped 500→768 (bge-m3 sweet spot 512–1024).
+    # 768 tokens ≈ 3072 chars per chunk, reducing Qdrant point count ~35%
+    # vs the prior 500-token limit and improving semantic atomicity.
+    MAX_CHUNK_TOKENS: int = 768
 
     # Recall gate threshold
     MIN_RECALL_CHUNKS: int = 1

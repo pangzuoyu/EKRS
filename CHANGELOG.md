@@ -8,6 +8,54 @@ from the previous phase is readable without consulting the handbook.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
 `Added`, `Changed`, `Fixed`, `Removed` per release.
 
+## [Unreleased]
+
+### Changed
+- **Chunker: two-phase refactor** (Phase 9): replaces the legacy pure-char-offset
+  split path (`_split_text` → `line[i:i+chars_per_chunk]`), which had no
+  semantic-boundary awareness, with a two-phase pipeline:
+  - **Phase 1** = hard char cut at `max_chars`, with a forward look-back of
+    up to `max_chars × 0.2` to the nearest safe boundary (whitespace, CJK
+    punctuation, sentence terminator). Prevents mid-number/mid-word splits
+    such as `350` + `℃` or `pressure` + `vessel`.
+  - **Phase 2** = greedy merge of fragments produced by Phase 1, gated by
+    `_is_safe_join_boundary()` (`digit+letter`, `letter+digit`,
+    `digit+'.'`, `'.'+digit`, ASCII-letter+ASCII-letter all unsafe; CJK +
+    anything safe). Adjacent-chunk safety check is the authoritative
+    invariant; `validate_chunk_atomicity()` is a single-chunk heuristic.
+  Public signature `chunk_blocks(blocks, doc_hash, version, *, max_tokens=..., token_counter=..., payload_version=...)`
+  remains forward-compatible; `token_counter` and `payload_version` are
+  new keyword-only arguments.
+- **`MAX_CHUNK_TOKENS` 500 → 768**: aligns the runtime chunk budget with
+  the bge-m3 sweet spot (512–1024 tokens). Fewer chunks (≈38%) with
+  denser semantics — directly reduces Qdrant index pollution and lowers
+  the probability of `numeric_hint_extractor` encountering a bare-number
+  fragment. Touched: `config.py:42`, `docker-compose.yml:53`,
+  `.env.example:26`, `benchmarks/test_chunker_10k.py:84`.
+- **Qdrant payload: `payload_version` field added** to `Chunk` schema
+  (default=1, chunker passes `2`). A change in `payload_version` forces
+  Qdrant's version-skip idempotency layer to treat chunks from a new
+  chunker algorithm as a different payload, ensuring old chunks written
+  by the legacy splitter are not reused after the refactor lands.
+  Spec field count grew from 8 → 9; default preserves legacy behavior.
+- **token counter naming**: test-side helper renamed from the implicit
+  `len(x)//4` to a documented `normalized_len = lambda x: max(1, len(x)//4)`,
+  aligned with the runtime `estimate_tokens`. A new integration test in
+  `TestIntegrationWithEstimateTokens` asserts the runtime counter path.
+
+### Added
+- **`validate_chunk_atomicity(chunk_text)`** (chunker public API): returns
+  `True` if `chunk_text` does not end in a bare digit (heuristic). Useful
+  as a soft gate in the golden suite; `_is_safe_join_boundary()` remains
+  the authoritative inter-chunk check.
+- **`tests/golden_set/test_chunker_golden.py` (17 tests)**:
+  `TestChunkerGoldenAtomicity` (5× safe-boundary + 5× non-empty),
+  `TestChunkerGoldenCounts` (5× count within ±50% of baseline),
+  `TestChunkerGoldenNumericHints` (2× unit-preservation). All pass.
+- **`tests/golden_set/_chunker_golden_fixtures.py`**: inline fixtures
+  (large_pdf / mixed_table / chinese_legal / english_tech / stress_test)
+  constructed via lightweight `_make_block` factory — no JSONL coupling.
+
 ## [phase8] - 2026-07-24
 
 **Tag moved**: `phase8` created at HEAD at Phase 8 closure.

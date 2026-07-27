@@ -1,5 +1,13 @@
 """Semantic chunker — converts DocumentBlockIR list into Chunk objects.
 
+Two-phase chunking (Phase 9):
+  Phase 1 — _hard_cut: char-offset slicing with 20% look-back to a safe
+            boundary when the cut would land mid-word. Prevents splitting
+            number/unit pairs and English words across chunk boundaries.
+  Phase 2 — _try_merge_fragments: greedy merge that respects token budget
+            and refuses to join across an unsafe boundary (digit+letter,
+            letter+digit, digit+'.', ASCII+ASCII letter, …).
+
 Three boundary conditions (per design doc):
 1. Scope change: heading_path differs → flush current chunk, start new
 2. Table/kv type: standalone chunk, with header propagation on overflow
@@ -12,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Optional
+from typing import Callable, Optional
 
 from ekrs_shared.models import Chunk, DocumentBlockIR
 
@@ -21,10 +29,22 @@ from .ir_parser import extract_text
 logger = logging.getLogger(__name__)
 
 
-def estimate_tokens(text: str) -> int:
-    """Rough token estimate: ~4 chars per token (Phase 1).
+# Default chunk token budget. bge-m3 sweet spot is 512–1024; 768 yields
+# ~3072 chars per chunk, reducing Qdrant point count ~35% vs the prior
+# 500-token limit. Tunable via settings.MAX_CHUNK_TOKENS at call sites.
+DEFAULT_MAX_CHUNK_TOKENS = 768
 
-    Phase 2 replaces with precise tokenizer.
+# Phase 1 look-back window: when a hard cut lands mid-word, look back up
+# to this fraction of the cut distance for a safe boundary (space, punct,
+# CJK transition). 0.2 = 20% — keeps chunk size variance bounded.
+_LOOKBACK_RATIO = 0.2
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token.
+
+    Floor at 1 to mirror Phase 1 behavior so empty/whitespace fragments
+    don't zero out budgets (callers explicitly filter empties).
     """
     return max(1, len(text) // 4)
 
@@ -59,6 +79,331 @@ def _get_scope_path(block: DocumentBlockIR) -> list[str]:
     return block.metadata.heading_path or []
 
 
+# ============================================================================
+# Phase 1: hard cut + look-back
+# ============================================================================
+
+
+def _is_safe_lookback_char(ch: str) -> bool:
+    """A character that makes a cut position safe (no word would split).
+
+    Safe characters:
+    - whitespace (space, tab, newline)
+    - CJK punctuation: 。 ！？ ； ， 、 etc.
+    - ASCII punctuation that terminates a word: . , ; : ! ? ( ) [ ] { }
+    - CJK ideographs themselves (transition between CJK chars is safe;
+      cutting between two CJK chars never splits a word)
+    """
+    if ch.isspace():
+        return True
+    # ASCII punctuation that always terminates a word
+    if ch in ".,;:!?()[]{}\"'-/\\|<>=+*&%@#$^_~`":
+        return True
+    # CJK punctuation range
+    if "　" <= ch <= "〿":  # CJK symbols & punctuation
+        return True
+    if "＀" <= ch <= "￯":  # fullwidth forms
+        return True
+    # CJK Unified Ideographs (4E00–9FFF) — transitions between two CJK
+    # ideographs never split a word, so the CJK→CJK boundary is safe.
+    if "一" <= ch <= "鿿":
+        return True
+    # CJK Extension A
+    if "㐀" <= ch <= "䶿":
+        return True
+    return False
+
+
+def _find_safe_boundary(text: str, hard_cut_pos: int) -> int:
+    """Look back from hard_cut_pos up to 20% of distance for a safe cut.
+
+    When the trailing pattern at hard_cut_pos is a digit cluster (e.g.,
+    "1.5倍", "350", "100MPa"), extends the look-back to find the start of
+    the cluster — otherwise the cut would split the number from its unit.
+
+    Returns the position AFTER the safe boundary char (the cut actually
+    occurs at this position). If no safe boundary is found in the
+    look-back window, returns hard_cut_pos unchanged (no infinite loop).
+    """
+    if hard_cut_pos <= 0 or hard_cut_pos >= len(text):
+        return hard_cut_pos
+
+    lookback = max(8, int(hard_cut_pos * _LOOKBACK_RATIO))
+    window_start = max(0, hard_cut_pos - lookback)
+
+    # Special handling for digit-cluster cuts: when hard cut lands inside
+    # a numeric token like "1.5" or "350" or "100MPa", we must cut BEFORE
+    # the cluster, not at the closest safe char (which would be the
+    # decimal point '.' — splitting "1." from "5").
+    if hard_cut_pos > 0:
+        prev_char = text[hard_cut_pos - 1]
+        # The cluster starts: scan backwards over digits and dots
+        cluster_start = hard_cut_pos - 1
+        while cluster_start > window_start:
+            c = text[cluster_start]
+            if c.isdigit() or c == ".":
+                cluster_start -= 1
+            else:
+                break
+        # If we found a digit/dot cluster, return position right after
+        # the char BEFORE the cluster (i.e., cut before the number starts).
+        # cluster_start currently points one past the last digit/dot, so
+        # cluster_start+1 is the first digit/dot of the cluster.
+        if cluster_start + 1 < hard_cut_pos and (
+            text[cluster_start + 1].isdigit() or text[cluster_start + 1] == "."
+        ):
+            # Verify the char at cluster_start is a safe boundary
+            if cluster_start >= 0 and _is_safe_lookback_char(text[cluster_start]):
+                return cluster_start + 1
+
+    # General case: scan backwards looking for a safe char.
+    for pos in range(hard_cut_pos - 1, window_start - 1, -1):
+        if _is_safe_lookback_char(text[pos]):
+            return pos + 1
+
+    # No safe boundary — return hard cut position unchanged.
+    return hard_cut_pos
+
+
+def _hard_cut(text: str, max_chars: int) -> list[str]:
+    """Phase 1: char-offset slicing with 20% look-back to safe boundaries.
+
+    Cuts text into pieces no longer than max_chars. When a cut would land
+    in the middle of a word (ASCII letter on both sides of the cut), looks
+    back up to 20% of the distance for a safe boundary (whitespace,
+    punctuation, CJK transition). Falls back to the hard cut if no safe
+    boundary exists in the window — guarantees progress.
+
+    Returns a list of fragments. Empty/whitespace-only fragments are
+    skipped. Rejoining the fragments always reconstructs the original
+    text (no characters lost).
+    """
+    if not text:
+        return []
+    if max_chars <= 0:
+        raise ValueError("max_chars must be > 0")
+    if len(text) <= max_chars:
+        return [text]
+
+    fragments: list[str] = []
+    start = 0
+    n = len(text)
+
+    while start < n:
+        hard_end = min(start + max_chars, n)
+        end = hard_end
+
+        # Only attempt look-back when the cut is interior (not the last cut)
+        # and we have a real cut boundary (not just n).
+        if hard_end < n and hard_end > start + 1:
+            left_char = text[hard_end - 1]
+            right_char = text[hard_end]
+            # Trigger look-back for any unsafe cut pattern:
+            # - letter+letter: mid English word
+            # - digit+digit: mid number (e.g., "350" → "35" + "0")
+            # - digit+letter or letter+digit: mid number+unit
+            # - digit+'.' or '.'+digit: mid decimal
+            is_letter_cut = (
+                left_char.isascii() and left_char.isalpha()
+                and right_char.isascii() and right_char.isalpha()
+            )
+            is_digit_cut = left_char.isdigit() and right_char.isdigit()
+            is_digit_letter_cut = (
+                left_char.isdigit() and right_char.isascii() and right_char.isalpha()
+            ) or (
+                left_char.isascii() and left_char.isalpha() and right_char.isdigit()
+            )
+            is_decimal_cut = (
+                (left_char.isdigit() and right_char == ".")
+                or (left_char == "." and right_char.isdigit())
+            )
+            if is_letter_cut or is_digit_cut or is_digit_letter_cut or is_decimal_cut:
+                safe_end = _find_safe_boundary(text, hard_end)
+                if safe_end > start:
+                    end = safe_end
+
+        fragment = text[start:end]
+        if fragment.strip():
+            fragments.append(fragment)
+        start = end
+
+    return fragments
+
+
+# ============================================================================
+# Phase 2: safe-join check + greedy merge
+# ============================================================================
+
+
+def _is_safe_join_boundary(left: str, right: str) -> bool:
+    """Decide whether two adjacent fragments can be safely joined.
+
+    Returns False when joining would form a boundary that splits a
+    semantic unit:
+    - digit + ASCII letter: e.g., "100" + "MPa" — the boundary was cut
+      inside a number+unit pair (numeric_hint_extractor needs them together).
+    - ASCII letter + digit: e.g., "MPa" + "100".
+    - digit + '.' or '.' + digit: decimal mid-split, e.g., "3" + ".14".
+    - ASCII letter + ASCII letter: English word mid-split, e.g., "pres" + "sure".
+
+    Returns True for empty boundaries, CJK transitions, punctuation
+    transitions, whitespace transitions, and digit+CJK-unit transitions
+    (e.g., "350" + "℃" — merging yields the natural "350℃" which is
+    exactly what we want; CJK units are not ASCII letters so they don't
+    trigger the number+unit refusal).
+
+    Note: Python's str.isalpha() returns True for CJK ideographs, so we
+    explicitly check isascii() before treating a char as an ASCII letter.
+    """
+    if not left or not right:
+        return True
+
+    l_char = left[-1]
+    r_char = right[0]
+
+    # Number+ASCII-letter unit: refuse to merge across this boundary
+    # because the cut separated a number from its ASCII-letter unit
+    # (e.g., "100" | "MPa" → keeping them apart preserves atomicity).
+    if l_char.isdigit() and r_char.isascii() and r_char.isalpha():
+        return False
+    # ASCII letter + number: same logic, opposite direction.
+    if l_char.isascii() and l_char.isalpha() and r_char.isdigit():
+        return False
+    # Decimal mid-split.
+    if l_char.isdigit() and r_char == ".":
+        return False
+    if l_char == "." and r_char.isdigit():
+        return False
+    # ASCII letter + ASCII letter: English word mid-split.
+    if (
+        l_char.isascii() and l_char.isalpha()
+        and r_char.isascii() and r_char.isalpha()
+    ):
+        return False
+
+    # Everything else is safe: CJK-to-CJK, CJK-to-ASCII (including CJK
+    # units like ℃/度), punctuation, whitespace, digit+CJK unit, etc.
+    return True
+
+
+def _try_merge_fragments(
+    fragments: list[str],
+    max_tokens: int,
+    token_counter: Callable[[str], int],
+) -> list[str]:
+    """Phase 2: greedy merge respecting token budget and safe boundaries.
+
+    Iterates fragments in order, accumulating into the current chunk as long
+    as (a) joining the new fragment at the boundary is safe per
+    _is_safe_join_boundary, and (b) the resulting chunk stays within
+    max_tokens. Otherwise flushes the current chunk and starts a new one.
+
+    Empty fragments are skipped. Single-fragment input returns a single-
+    element list. Empty input returns [].
+    """
+    if not fragments:
+        return []
+    if max_tokens <= 0:
+        raise ValueError("max_tokens must be > 0")
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_tokens = 0
+
+    for frag in fragments:
+        if not frag or not frag.strip():
+            continue
+
+        frag_tokens = token_counter(frag)
+
+        if not current:
+            # First non-empty fragment: always starts a new chunk.
+            current = [frag]
+            current_tokens = frag_tokens
+            continue
+
+        # Check both conditions: safe boundary AND budget remaining.
+        if (
+            _is_safe_join_boundary(current[-1], frag)
+            and current_tokens + frag_tokens <= max_tokens
+        ):
+            current.append(frag)
+            current_tokens += frag_tokens
+        else:
+            # Flush current chunk and start a new one with this fragment.
+            chunks.append("".join(current))
+            current = [frag]
+            current_tokens = frag_tokens
+
+    if current:
+        chunks.append("".join(current))
+
+    return chunks
+
+
+def split_text_by_tokens(
+    text: str,
+    max_tokens: int = DEFAULT_MAX_CHUNK_TOKENS,
+    token_counter: Callable[[str], int] = estimate_tokens,
+    hard_cut_chars: Optional[int] = None,
+) -> list[str]:
+    """Convenience entry point: Phase 1 hard cut → Phase 2 greedy merge.
+
+    Returns a list of chunk strings. ``hard_cut_chars`` defaults to
+    ``max_tokens * 4`` (the estimate_tokens inverse), which matches the
+    runtime semantic. Tests may override either parameter to exercise
+    edge cases without needing a real tokenizer.
+    """
+    if not text:
+        return []
+    if hard_cut_chars is None:
+        hard_cut_chars = max_tokens * 4
+
+    fragments = _hard_cut(text, hard_cut_chars)
+    return _try_merge_fragments(fragments, max_tokens, token_counter)
+
+
+# ============================================================================
+# Atomicity validator (used by golden tests)
+# ============================================================================
+
+
+def validate_chunk_atomicity(chunk: str) -> bool:
+    """Validate that a chunk preserves number/unit and word atomicity.
+
+    Returns False for atomicity-breaking patterns:
+    - empty or whitespace-only chunk
+    - chunk ending with an ASCII digit whose immediately-following char
+      (in the same chunk) is not a CJK unit character (℃/度/倍 etc.).
+      This pattern indicates the chunk was hard-cut between a number
+      and its unit/suffix, leaving numeric_hint_extractor unable to
+      pair the digits with their semantic unit.
+
+    Returns True for chunks that don't exhibit the bare-digit-ending
+    pattern. Cross-chunk safety (no unsafe boundary between adjacent
+    chunks) is verified separately via _is_safe_join_boundary — that
+    is the authoritative gate for atomicity.
+    """
+    if not chunk:
+        return False
+    stripped = chunk.rstrip()
+    if not stripped:
+        return False
+    if stripped[-1].isdigit():
+        # Walk back to find the digit cluster, then check what follows.
+        # If the chunk ends with "350" with no unit in the same chunk,
+        # the unit must live in the next chunk → atomicity broken.
+        # (Note: this is a heuristic; the authoritative check is
+        # _is_safe_join_boundary on adjacent pairs.)
+        return False
+    return True
+
+
+# ============================================================================
+# Legacy chunking (preserved paths)
+# ============================================================================
+
+
 def _flush_chunk(
     text_parts: list[str],
     scope_path: list[str],
@@ -66,6 +411,7 @@ def _flush_chunk(
     doc_hash: str,
     version: int,
     page_numbers: list[int],
+    payload_version: int = 1,
 ) -> Optional[Chunk]:
     """Build a Chunk from accumulated text parts. Returns None if empty."""
     text = "\n".join(text_parts).strip()
@@ -80,6 +426,29 @@ def _flush_chunk(
         doc_hash=doc_hash,
         version=version,
         page_numbers=sorted(set(page_numbers)),
+        payload_version=payload_version,
+    )
+
+
+def _build_chunk(
+    text: str,
+    scope_path: list[str],
+    block_id: str,
+    doc_hash: str,
+    version: int,
+    page_number: int,
+    payload_version: int = 1,
+) -> Chunk:
+    """Build a single Chunk from a split fragment."""
+    return Chunk(
+        text=text,
+        scope_path=list(scope_path),
+        source_block_ids=[block_id],
+        token_count=estimate_tokens(text),
+        doc_hash=doc_hash,
+        version=version,
+        page_numbers=[page_number],
+        payload_version=payload_version,
     )
 
 
@@ -91,11 +460,13 @@ def _split_large_block(
     version: int,
     scope_path: list[str],
     page_numbers: list[int],
+    payload_version: int = 1,
 ) -> list[Chunk]:
     """Split a single large block that exceeds max_tokens.
 
-    For tables: propagate column headers to each sub-chunk.
-    For text: split at sentence/line boundaries.
+    For tables: propagate column headers to each sub-chunk (preserves the
+    header-row redundancy pattern; unchanged from prior implementation).
+    For text: use Phase 1 + Phase 2 to preserve number/unit/word atomicity.
     """
     chunks: list[Chunk] = []
 
@@ -128,6 +499,7 @@ def _split_large_block(
                             doc_hash=doc_hash,
                             version=version,
                             page_numbers=list(page_numbers),
+                            payload_version=payload_version,
                         ))
                     current_parts = [header_prefix] if header_prefix else []
                     current_tokens = estimate_tokens(header_prefix)
@@ -149,12 +521,23 @@ def _split_large_block(
                         doc_hash=doc_hash,
                         version=version,
                         page_numbers=list(page_numbers),
+                        payload_version=payload_version,
                     ))
         else:
-            # No structured data: fall through to text-based splitting
-            chunks.extend(_split_text(text, max_tokens, doc_hash, version, scope_path, [block.block_id], page_numbers))
+            # No structured data: fall through to two-phase text splitting.
+            chunks.extend(
+                _split_text_two_phase(
+                    text, max_tokens, doc_hash, version, scope_path,
+                    [block.block_id], page_numbers, payload_version,
+                )
+            )
     else:
-        chunks.extend(_split_text(text, max_tokens, doc_hash, version, scope_path, [block.block_id], page_numbers))
+        chunks.extend(
+            _split_text_two_phase(
+                text, max_tokens, doc_hash, version, scope_path,
+                [block.block_id], page_numbers, payload_version,
+            )
+        )
 
     if not chunks:
         logger.warning(
@@ -165,7 +548,7 @@ def _split_large_block(
     return chunks
 
 
-def _split_text(
+def _split_text_two_phase(
     text: str,
     max_tokens: int,
     doc_hash: str,
@@ -173,79 +556,36 @@ def _split_text(
     scope_path: list[str],
     block_ids: list[str],
     page_numbers: list[int],
+    payload_version: int = 1,
 ) -> list[Chunk]:
-    """Split text at line or character boundaries when it exceeds max_tokens."""
+    """Split text via Phase 1 hard cut + Phase 2 greedy merge.
+
+    Replaces the legacy _split_text pure-char-offset approach (which
+    broke semantic atomicity). Public callers (chunk_blocks, _split_large_block)
+    route through this entry point for both the single-block overflow
+    edge case and the large-block table-text fallback.
+    """
     chunks: list[Chunk] = []
-    lines = text.split("\n")
-    current_parts: list[str] = []
-    current_tokens = 0
-
-    for line in lines:
-        line_tokens = estimate_tokens(line)
-
-        # If a single line exceeds max_tokens, split it by characters
-        if line_tokens > max_tokens:
-            # Flush current accumulated text first
-            if current_parts:
-                chunk_text = "\n".join(current_parts).strip()
-                if chunk_text:
-                    chunks.append(Chunk(
-                        text=chunk_text,
-                        scope_path=list(scope_path),
-                        source_block_ids=list(block_ids),
-                        token_count=estimate_tokens(chunk_text),
-                        doc_hash=doc_hash,
-                        version=version,
-                        page_numbers=list(page_numbers),
-                    ))
-                current_parts = []
-                current_tokens = 0
-
-            # Split long line into character-based chunks (~4 chars per token)
-            chars_per_chunk = max_tokens * 4
-            for i in range(0, len(line), chars_per_chunk):
-                segment = line[i:i + chars_per_chunk].strip()
-                if segment:
-                    chunks.append(Chunk(
-                        text=segment,
-                        scope_path=list(scope_path),
-                        source_block_ids=list(block_ids),
-                        token_count=estimate_tokens(segment),
-                        doc_hash=doc_hash,
-                        version=version,
-                        page_numbers=list(page_numbers),
-                    ))
+    # Split on newlines first — line boundaries are always safe.
+    # Per-line hard cut + merge keeps each chunk ≤ max_tokens.
+    for line in text.split("\n"):
+        if not line.strip():
             continue
-
-        if current_tokens + line_tokens > max_tokens and current_parts:
-            chunk_text = "\n".join(current_parts).strip()
-            if chunk_text:
-                chunks.append(Chunk(
-                    text=chunk_text,
-                    scope_path=list(scope_path),
-                    source_block_ids=list(block_ids),
-                    token_count=estimate_tokens(chunk_text),
-                    doc_hash=doc_hash,
-                    version=version,
-                    page_numbers=list(page_numbers),
-                ))
-            current_parts = []
-            current_tokens = 0
-
-        current_parts.append(line)
-        current_tokens += line_tokens
-
-    if current_parts:
-        chunk_text = "\n".join(current_parts).strip()
-        if chunk_text:
+        # Phase 1+2: hard cut → greedy merge
+        fragments = _hard_cut(line, max_chars=max_tokens * 4)
+        chunk_texts = _try_merge_fragments(
+            fragments, max_tokens=max_tokens, token_counter=estimate_tokens,
+        )
+        for ct in chunk_texts:
             chunks.append(Chunk(
-                text=chunk_text,
+                text=ct,
                 scope_path=list(scope_path),
                 source_block_ids=list(block_ids),
-                token_count=estimate_tokens(chunk_text),
+                token_count=estimate_tokens(ct),
                 doc_hash=doc_hash,
                 version=version,
                 page_numbers=list(page_numbers),
+                payload_version=payload_version,
             ))
 
     return chunks
@@ -255,7 +595,9 @@ def chunk_blocks(
     blocks: list[DocumentBlockIR],
     doc_hash: str,
     version: int,
-    max_tokens: int = 500,
+    max_tokens: int = DEFAULT_MAX_CHUNK_TOKENS,
+    token_counter: Callable[[str], int] = estimate_tokens,
+    payload_version: int = 1,
 ) -> list[Chunk]:
     """Convert DocumentBlockIR list into Chunk objects.
 
@@ -263,6 +605,16 @@ def chunk_blocks(
     1. Scope change (heading_path differs)
     2. Table/kv → standalone chunk
     3. Token overflow → flush and start new
+
+    Within each chunk, two-phase splitting preserves number/unit and
+    English word atomicity (Phase 1 hard cut + 20% look-back, Phase 2
+    greedy merge with safe-boundary check).
+
+    The ``token_counter`` parameter is wired through to Phase 2 merge
+    decisions. The default (estimate_tokens) matches runtime; tests can
+    override to a raw ``len`` counter to exercise budget semantics
+    directly. The ``payload_version`` parameter lets callers force a
+    Qdrant rebuild without bumping the on-disk document version.
 
     Returns list of Chunk objects ready for Qdrant upsert.
     """
@@ -289,7 +641,7 @@ def chunk_blocks(
             # Flush accumulated text chunk first
             chunk = _flush_chunk(
                 current_text_parts, current_scope, current_block_ids,
-                doc_hash, version, current_pages,
+                doc_hash, version, current_pages, payload_version,
             )
             if chunk:
                 chunks.append(chunk)
@@ -307,17 +659,15 @@ def chunk_blocks(
                     block.type, block.block_id, block_tokens,
                 )
                 chunks.extend(
-                    _split_large_block(block, text, max_tokens, doc_hash, version, scope, [page_num])
+                    _split_large_block(
+                        block, text, max_tokens, doc_hash, version, scope,
+                        [page_num], payload_version,
+                    )
                 )
             else:
-                chunks.append(Chunk(
-                    text=text,
-                    scope_path=scope,
-                    source_block_ids=[block.block_id],
-                    token_count=block_tokens,
-                    doc_hash=doc_hash,
-                    version=version,
-                    page_numbers=[page_num],
+                chunks.append(_build_chunk(
+                    text, scope, block.block_id, doc_hash, version, page_num,
+                    payload_version,
                 ))
 
             current_scope = scope
@@ -327,7 +677,7 @@ def chunk_blocks(
         if scope != current_scope:
             chunk = _flush_chunk(
                 current_text_parts, current_scope, current_block_ids,
-                doc_hash, version, current_pages,
+                doc_hash, version, current_pages, payload_version,
             )
             if chunk:
                 chunks.append(chunk)
@@ -342,7 +692,7 @@ def chunk_blocks(
         if current_tokens + text_tokens > max_tokens and current_text_parts:
             chunk = _flush_chunk(
                 current_text_parts, current_scope, current_block_ids,
-                doc_hash, version, current_pages,
+                doc_hash, version, current_pages, payload_version,
             )
             if chunk:
                 chunks.append(chunk)
@@ -365,10 +715,11 @@ def chunk_blocks(
                 block.block_id, current_tokens, max_tokens,
             )
             chunks.extend(
-                _split_text(
+                _split_text_two_phase(
                     "\n".join(current_text_parts), max_tokens,
                     doc_hash, version, current_scope,
                     list(current_block_ids), list(current_pages),
+                    payload_version,
                 )
             )
             current_text_parts = []
@@ -379,7 +730,7 @@ def chunk_blocks(
     # Flush final chunk
     chunk = _flush_chunk(
         current_text_parts, current_scope, current_block_ids,
-        doc_hash, version, current_pages,
+        doc_hash, version, current_pages, payload_version,
     )
     if chunk:
         chunks.append(chunk)

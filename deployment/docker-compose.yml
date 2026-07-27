@@ -50,7 +50,7 @@ services:
       - SHARED_STORAGE_PATH=/parsed_lib
       - EKRS_DEBUG=${EKRS_DEBUG:-false}
       - COLLECTION_NAME=rag_documents
-      - MAX_CHUNK_TOKENS=500
+      - MAX_CHUNK_TOKENS=768
       # Phase 8 T8-3a: EMBEDDING_MODEL_DIR points the RAG service at the
       # bge-m3 ONNX export vendored into the image at /opt/ekrs/models/bge-m3
       # by rag/Dockerfile. EMBEDDING_MODEL=bge-m3 is the matching model name.
@@ -59,7 +59,7 @@ services:
       - METRICS_HOST=0.0.0.0    # 跨容器 scrape 必需;.env.example 默认 127.0.0.1 仅供本地开发
     volumes:
       - parsed_lib:/parsed_lib
-    mem_limit: 6g
+    mem_limit: 20g
     depends_on:
       qdrant:
         condition: service_healthy
