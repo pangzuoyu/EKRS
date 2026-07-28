@@ -42,7 +42,13 @@ STATUS_TIMEOUT_S = 35.0
 # total ≤54/min, comfortably under the 60/min EKRS_RATE_LIMIT bucket.
 # Even if dispatch+poll ever overlapped, 54/min stays under the bucket.
 STATUS_POLL_S = 2.5
-NOTIFY_HTTP_TIMEOUT_S = 60.0
+NOTIFY_HTTP_TIMEOUT_S = 90.0
+# Retry budget for transport-level failures on /v1/ingestion/notify.
+# 200-doc stress surfaced a 12% TimeoutError rate from intermittent
+# uvicorn listen-socket slow-accept (Phase 9 follow-up). 2 retries with
+# 1s + 2s backoff absorb the flake without retrying forever.
+NOTIFY_RETRY_MAX = 2
+NOTIFY_RETRY_BACKOFF_S = (1.0, 2.0)
 # Real corpus docs (from --corpus-root) ingest much slower than the
 # synthetic 2k-char templates because each block carries real bge-m3
 # embedding work. Default 90s allows up to ~300 chunks/doc ingest
@@ -371,17 +377,35 @@ def notify_one(
     token: str,
     payload: dict,
 ) -> tuple[int, dict, float]:
+    """POST a notify and return (status_code, body, elapsed_ms).
+
+    Retries up to NOTIFY_RETRY_MAX times on transport-level failures
+    (code=0: URLError/TimeoutError/OSError) with backoff from
+    NOTIFY_RETRY_BACKOFF_S. HTTP 4xx/5xx responses are NOT retried —
+    those are server-decided outcomes. Each retry reuses the same
+    payload and accumulates elapsed time across attempts.
+    """
     body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "X-Parser-Token": token,
+    }
+    url = f"{rag_url}/v1/ingestion/notify"
     t0 = time.perf_counter()
-    code, resp = _http(
-        "POST", f"{rag_url}/v1/ingestion/notify",
-        headers={
-            "Content-Type": "application/json",
-            "X-Parser-Token": token,
-        },
-        body=body,
-        timeout=NOTIFY_HTTP_TIMEOUT_S,
-    )
+    code, resp = 0, ""
+    for attempt in range(NOTIFY_RETRY_MAX + 1):
+        code, resp = _http("POST", url, headers=headers, body=body,
+                           timeout=NOTIFY_HTTP_TIMEOUT_S)
+        if code != 0:
+            break  # HTTP-layer response (2xx/4xx/5xx); stop retrying
+        if attempt < NOTIFY_RETRY_MAX:
+            backoff = NOTIFY_RETRY_BACKOFF_S[min(attempt, len(NOTIFY_RETRY_BACKOFF_S) - 1)]
+            sys.stderr.write(
+                f"[STRESS] notify TRANSIENT FAIL doc={payload.get('doc_id','?')[:20]} "
+                f"attempt={attempt + 1}/{NOTIFY_RETRY_MAX + 1} err={str(resp)[:80]} "
+                f"backoff={backoff:.1f}s\n"
+            )
+            time.sleep(backoff)
     return code, resp if isinstance(resp, dict) else {"raw": str(resp)}, (time.perf_counter() - t0) * 1000
 
 
