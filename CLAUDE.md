@@ -69,9 +69,9 @@ Minimal set in `.env.example`:
 - Debug log: only when `EKRS_DEBUG=true`, rotatable, max 100MB x 5 backups
 - `shared/` installed as editable dep from both `rag/` and `dev_ui/`
 
-## Current State (as of 2026-07-14)
+## Current State (as of 2026-07-29)
 
-Phases 1-5 all complete. 346 tests passing, 1 skipped.
+Phases 1-9 complete; Phase 10 in progress.
 
 - **Phase 1 — Foundation**: shared/ekrs_shared/ (Pydantic models, normalizer, audit base); rag/ekrs_rag/ingestion/ (IR parser, scope-aware chunker, pipeline); rag/ekrs_rag/retrieval/ (Qdrant client); notify/status routes
 - **Phase 2 — Solver core (V2)**: hint extractor, evidence builder, interval solver (`portion`), context manager, IR V2 multi-branch, golden set
@@ -81,8 +81,12 @@ Phases 1-5 all complete. 346 tests passing, 1 skipped.
 - **Phase 5.5 D** — `/metrics` sidecar exporter (`prometheus_client` multiproc mode on :9090), docker-compose prometheus service, dropped in-process `/metrics` route
 - **Phase 5.5 E** — Module globals → FastAPI `Depends` migration (`get_retriever`, `get_audit_index`, `get_pipeline`, `get_redis_lock`, `get_task_repo`); removed 5 setters
 - **Phase 5.5 F** — `audit.log` rotation 100 MB × 5 gzip backups via `RebuildingRotatingFileHandler`; `/healthz` audit suppression via `ContextVar` skip flag; on-rollover callback rebuilds `AuditIndex` so replay offsets stay valid
+- **Phase 8 — Production hardening**: /v1/* rate-limit (60 req/min/IP, token bucket), secret rotation SOP + offline validator, vendored bge-m3 ONNX into Docker, ingestion smoke canary, golden set 42→50, 10k chunker bench baseline p99=279µs
+- **Phase 9 — Stress tooling**: scripts/live_stress_60.py 3 modes (offline / retry-failed / stress), 60/60 + 200/200 verified, NOTIFY_HTTP_TIMEOUT_S 60, sequential pacing
+- **Phase 10 T10b-1 — Chunker refactor**: `_route_accumulated_group` helper unifies Boundary 2 (scope-change) + Boundary 3 (token-overflow); 8 unit tests + 60-doc stress + 10k bench p99=155µs (44% faster than Phase 8 baseline). Tag `phase10.1` locked at commit `1c44eee`.
+- **Phase 10 T10a-1 — FTSManager**: SQLite FTS5 BM25 keyword retrieval; `rag/ekrs_rag/retrieval/fts_manager.py` with `generate_chunk_id` + `delete_by_chunk_id` + R7/R8/H2/T10a-5 invariants; 23 unit + 8 integration tests; mypy clean; 552 unit suite + 1 skipped (no regression).
 
-Tags: `phase5.5-d-metrics-exporter`, `phase5.5-e-retriever-depends`, `phase5.5-f-audit-rotation`, `phase5-observability`.
+Tags: `phase5.5-d-metrics-exporter`, `phase5.5-e-retriever-depends`, `phase5.5-f-audit-rotation`, `phase5-observability`, `phase8`, `phase9`, `phase10.1` (T10b-1 do-not-move anchor at `1c44eee`).
 
 ## Development Phases (from spec §6)
 

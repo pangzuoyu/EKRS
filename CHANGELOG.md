@@ -11,6 +11,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
 ## [Unreleased]
 
 ### Added
+- **FTSManager — BM25 keyword retrieval via SQLite FTS5**
+  (T10a-1, Phase 10): new module
+  `rag/ekrs_rag/retrieval/fts_manager.py`. Schema is
+  `CREATE VIRTUAL TABLE blocks_fts USING fts5(...)` with 7 columns
+  (`chunk_id`, `block_id`, `text`, `scope_path`, `status`, `doc_hash`,
+  `payload_json`); tokenizer `unicode61 remove_diacritics 2` (no porter,
+  per Phase 10 plan §Context lock). `payload_json` is UNINDEXED so JSON
+  keys do not contaminate MATCH. `generate_chunk_id(doc_hash, index)`
+  emits `{doc_hash[:8]}-{index:04d}` (T10a-1 owns the generator;
+  T10a-5 owns the retriever-side timing). 23 unit tests +
+  8 integration tests cover: BM25 normalization `|bm25|/(1+|bm25|)`
+  floor 0.01, R7 scope_path OR-filter (column-restricted MATCH syntax),
+  R8 `status != 'illegal'` filter, H2 `delete_by_chunk_id` single-row
+  rollback primitive, T10a-5 bidirectional `get_chunk_id(block_id)`
+  invariant, T10a-6 3 engineering-identifier smoketest
+  (`A312-TP316` / `GB-T 12459` / `1.6MPa`). T10a-1 boundary: schema +
+  CRUD + BM25 归一化 only; pipeline ingest wiring = T10a-2,
+  retriever fusion = T10a-4, audit events = T10a-7.
 - **`--mode offline` for production first-deploy ingestion**
   (`scripts/live_stress_60.py`): 3s pace, 2 retries with 2s/4s backoff,
   180s status timeout, 3s poll interval, no `_r<run_id>` suffix (relies
