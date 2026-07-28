@@ -71,9 +71,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
   SHA-based idempotency so repeat runs produce measurable delta),
   and trace_id threading through `run_stress()` → audit-log
   `qdrant_write_failed` scan (closes Phase 6C D7 review finding
-  for the stress harness). Verified on real ASME SEC V B SE-432
-  leak-testing PDF: 3/3 docs completed, +21 chunks indexed,
-  0 qdrant_write_failed, atomicity 5/5 + adjacent-chunk safety 4/4.
+  for the stress harness). Sequential-pacing discipline: defaults
+  `--concurrency 1 --pace-ms 2000` keep the dispatch rate at
+  ~30 req/min so the Phase 8 T8-1 60/min per-IP bucket stays
+  unbreached; `POLL_CONCURRENCY=1` + `STATUS_POLL_S=2.5s` adds
+  ~24 req/min during the polling phase (phases do NOT overlap).
+  `NOTIFY_HTTP_TIMEOUT_S=60s` (raised from 30s) absorbs intermittent
+  uvicorn listen-socket slow-accept on real-corpus docs — local
+  urllib hits `HTTP 0` when the TCP SYN queues behind a busy worker.
+  stderr logging added to the paced dispatch path so rejection
+  reasons surface in CI logs. Verified end-to-end on the
+  doc-to-md corpus (60 real PDF dirs): **60/60 completed,
+  0 qdrant_write_failed, +268 qdrant chunks (1245→1513),
+  dispatch 144s, max completion latency 35s**; earlier 3/3 smoke
+  on ASME SEC V B SE-432 leak-testing PDF also documented.
 - **Phase 9 research** (7 planning documents under
   `docs/superpowers/research/2026-07-24-*`): MinerU-Document-Explorer
   deep-dive + feature-mapping + integration-feasibility; design drafts

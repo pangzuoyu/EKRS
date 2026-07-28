@@ -36,20 +36,33 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 DEFAULT_RAG_URL = os.environ.get("RAG_URL", "http://localhost:8000")
 DEFAULT_TOKEN_VAR = "PARSER_TOKEN"
 STATUS_TIMEOUT_S = 35.0
-STATUS_POLL_S = 1.5  # ~40 polls/min/worker × N workers must stay below
-                     # the 600/min EKRS_RATE_LIMIT budget. With 10 poll
-                     # workers we issue ~400 polls/min aggregate.
-NOTIFY_HTTP_TIMEOUT_S = 20.0
+# Polling cadence: 1 worker × 1/2.5s = 24 polls/min. Combined with
+# sequential dispatch (30 req/min during the dispatch phase only;
+# phases do NOT overlap — dispatch finishes before polling starts),
+# total ≤54/min, comfortably under the 60/min EKRS_RATE_LIMIT bucket.
+# Even if dispatch+poll ever overlapped, 54/min stays under the bucket.
+STATUS_POLL_S = 2.5
+NOTIFY_HTTP_TIMEOUT_S = 60.0
 # Real corpus docs (from --corpus-root) ingest much slower than the
 # synthetic 2k-char templates because each block carries real bge-m3
 # embedding work. Default 90s allows up to ~300 chunks/doc ingest
 # budget; raise further for very large corpora.
 STATUS_TIMEOUT_CORPUS_S = 90.0
+# Sequential-pacing defaults (Plan §6 验证 6 corrected approach).
+# Concurrent dispatch floods the bge-m3 queue when each real-corpus doc
+# carries dozens of blocks: 60 parallel notifys → queue exhaustion →
+# 503/OOM instead of 429s. Sequential pacing (~25-30 req/min) gives
+# the embedding worker time per doc and keeps the audit trail clean.
+DEFAULT_PACE_MS_CORPUS = 2000   # 1 doc every 2s → 30 req/min
 # Concurrent notify requests; pacing is the better knob. Even with the
 # per-IP /v1/* limiter raised to 600/min, keeping the cluster small
 # avoids swamping the parser-side ingest worker pool.
-NOTIFY_CONCURRENCY = 8
-POLL_CONCURRENCY = 10
+NOTIFY_CONCURRENCY = 1
+# Sequential-pacing discipline: with default rate-limit 60/min on /v1/*,
+# polling at >60 req/min starves the dispatch budget. 1 poll worker ×
+# 1 poll / 2.5s = 24/min, plus 30/min from sequential notify dispatch =
+# 54/min total. Below the 60/min bucket with margin.
+POLL_CONCURRENCY = 1
 N_DOCS_DEFAULT = 60
 
 
@@ -430,7 +443,11 @@ def dispatch_with_pacing(
                     if on_result:
                         on_result(out[-1])
                     continue
-                out.append(_make_outcome(_doc_hash, code, resp, ms))
+                oc = _make_outcome(_doc_hash, code, resp, ms)
+                out.append(oc)
+                if oc.status == "rejected":
+                    sys.stderr.write(f"[STRESS] notify REJECTED doc={_doc_hash} "
+                                     f"reason={oc.failure_reason}\n")
                 if on_result:
                     on_result(out[-1])
                 if pace_ms:
@@ -522,6 +539,9 @@ def run_stress(
           f"needs >35s for multi-chunk docs)")
     if corpus_root is not None:
         print(f"[STRESS] corpus-root={corpus_root} (real PDF data; max_blocks/doc={max_blocks_per_doc})")
+        if concurrency == 1 and pace_ms >= DEFAULT_PACE_MS_CORPUS:
+            print(f"[STRESS] pacing=sequential (concurrency=1 + pace_ms={pace_ms}ms); "
+                  f"respects bge-m3 per-doc processing budget")
     else:
         print(f"[STRESS] corpus=synthetic (3 profiles × repeated text)")
 
@@ -661,12 +681,16 @@ def main() -> int:
     ap.add_argument("--audit-path", default="/var/log/ekrs/audit.log")
     ap.add_argument("--qdrant-host", default="localhost")
     ap.add_argument("--qdrant-port", type=int, default=6333)
-    ap.add_argument("--concurrency", type=int, default=NOTIFY_CONCURRENCY,
-                    help=f"parallel notify workers (default={NOTIFY_CONCURRENCY}).")
-    ap.add_argument("--pace-ms", type=int, default=0,
+    ap.add_argument("--concurrency", type=int, default=1,
+                    help="parallel notify workers. Default 1 (sequential) — "
+                         "concurrent dispatch floods the bge-m3 queue when "
+                         "real-corpus docs have dozens of blocks each.")
+    ap.add_argument("--pace-ms", type=int, default=DEFAULT_PACE_MS_CORPUS,
                     help="per-worker sleep between submissions, ms. "
-                         "0 = no pacing (can trip the 60/min rate limit). "
-                         "Try 1100 for sustained 1 req/s per worker.")
+                         "Default 2000 (sequential pacing, ~30 req/min) when "
+                         "--corpus-root is set; 0 for synthetic corpus. "
+                         "Sequential pacing respects bge-m3's per-doc "
+                         "processing budget and avoids 503/OOM under load.")
     ap.add_argument("--docker-target", default=os.environ.get("STRESS_DOCKER_TARGET"),
                     help="Container name to write JSONL files into via "
                          "`docker exec`. Required when SHARED_STORAGE_PATH is "
