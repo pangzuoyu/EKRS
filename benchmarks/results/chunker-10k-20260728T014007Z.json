@@ -1,0 +1,17 @@
+{
+  "blocks_per_doc_mean": 20,
+  "chunks_per_second": 312339.35,
+  "max_rss_bytes": 1111535616,
+  "n_documents": 10000,
+  "per_doc_max_seconds": 0.000176,
+  "per_doc_p50_seconds": 3.8e-05,
+  "per_doc_p95_seconds": 6.9e-05,
+  "per_doc_p99_seconds": 9.7e-05,
+  "platform_note": "ru_maxrss in KB (Linux), converted to bytes",
+  "schema": "chunker-10k-1.0",
+  "seed": 42,
+  "threshold_p99_seconds": 5.0,
+  "threshold_passed": true,
+  "timestamp": "2026-07-28T01:40:07Z",
+  "total_seconds": 0.3979
+}
