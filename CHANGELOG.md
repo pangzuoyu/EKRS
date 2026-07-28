@@ -10,7 +10,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
 
 ## [Unreleased]
 
+### Added
+- **`--mode offline` for production first-deploy ingestion**
+  (`scripts/live_stress_60.py`): 3s pace, 2 retries with 2s/4s backoff,
+  180s status timeout, 3s poll interval, no `_r<run_id>` suffix (relies
+  on Qdrant SHA-dedup for idempotency). `--resume` filter (default on)
+  queries `/v1/ingestion/status/{doc_hash}` per candidate AND reads
+  `ingestion_completed` events from the audit log (via
+  `--audit-via-docker CONTAINER` because `/app/rag/audit.log` is not
+  bind-mounted per `docker-compose.yml`). Writes failed/pending docs to
+  `failed_docs.txt` (atomic tmp+rename, sorted, replace-semantics).
+- **`--mode retry-failed`**: reads `failed_docs.txt` (one doc_hash per
+  line), re-processes only those docs with 5s pace + 4s/8s backoff +
+  180s timeout. Strips `_r<run_id>` suffix (precise regex
+  `_r\d{8}T\d{6}Z$`) to match against `<corpus-root>/<id>/data.jsonl`.
+  Re-notifies docs that may already be in Qdrant; relies on the RAG
+  service's `get_ingestion_status` short-circuit for idempotency
+  (operators wanting script-level skip should use `--mode offline
+  --resume` instead).
+- **`--audit-via-docker CONTAINER`**: reads the audit log inside the
+  rag container via `docker exec` (active `audit.log` + rotated
+  `audit.log.{1..5}.gz` per `audit.py:44-50`). Required for the
+  offline mode resume check unless `--audit-path` is host-accessible.
+
+### Fixed
+- **`scan_audit_for_failures()` bug** (`live_stress_60.py`): the audit
+  log uses `event` as the JSON key (verified at `2026-07-28`), not
+  `event_type`. The function silently returned 0 even when failures
+  existed (false-negative only — no false-positive risk). Fixed in
+  the same commit as the new audit-log scan pattern to reduce future
+  tech debt.
+
 ### Changed
+- **Chunker: two-phase refactor** (Phase 9): replaces the legacy pure-char-offset
 - **Chunker: two-phase refactor** (Phase 9): replaces the legacy pure-char-offset
   split path (`_split_text` → `line[i:i+chars_per_chunk]`), which had no
   semantic-boundary awareness, with a two-phase pipeline:
