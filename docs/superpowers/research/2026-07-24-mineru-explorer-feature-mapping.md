@@ -224,7 +224,10 @@ Phase 8 closed 2026-07-24 (tag force-moved per Decision §3). Phase 9 has no sco
 
 ### Open questions for Phase 9 planning
 
-1. **FTS5 sync mechanism.** Qdrant already writes go through `AuditWriter`. Should FTS5 be a co-write (in the same transaction) or an async follow-up event? Async risks drift; sync risks latency. The `qdrant_write_failed` integration test pattern (Phase 7 T1) suggests the sync approach is tractable.
+1. **FTS5 sync mechanism — [已裁决见 ADR] 同步双写。** Qdrant upsert + FTS5 insert
+   在同一摄取事务内完成（同步双写）。FTS 写入失败通过 `fts_sync_failed` 审计事件
+   记录，不阻断 Qdrant 写入。异步事件驱动方案推迟至 Phase 10+（如需更高吞吐再评估）。
+   裁决依据：[`2026-07-24-phase9-cross-doc-adjudication.md`](2026-07-24-phase9-cross-doc-adjudication.md) 冲突 2。
 2. **MCP transport choice.** stdio (per-client process — model reload each time, expensive) vs Streamable HTTP (shared daemon — Phase 8 T8-3a's image baseline pinning already requires daemon patterns). QMD's docs show both; what's right for EKRS?
 3. **Reranker model selection.** qwen3-reranker-0.6b is QMD's choice. Engineering documents have CJK content; should EKRS evaluate multilingual rerankers? Phase 7 T3a baseline pin pattern applies.
 4. **Schema migration framework choice.** Hand-rolled (~100 LOC) vs Alembic / yoyo-migrations (more deps, more learning curve). EKRS's aiosqlite is small enough that hand-rolled is probably sufficient.

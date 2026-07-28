@@ -57,9 +57,17 @@ CREATE VIRTUAL TABLE blocks_fts USING fts5(
     text,
     scope_path,
     status UNINDEXED,  -- R8: filter illegal status
-    tokenize = 'porter unicode61'
+    tokenize = 'unicode61 remove_diacritics 2'  -- [已裁决见 ADR] 见下方分词器说明
 );
 ```
+
+**[已裁决见 ADR] 中文分词器选择**：Phase 9 FTS5 表使用 `tokenize='unicode61
+remove_diacritics 2'`（不使用 porter 词干提取，因为 porter 对中文无效且可能破坏
+CJK token）。`unicode61` 对 CJK 字符做逐字切分，对英文做空格+标点切分。
+可选启用 jieba 前置分词（`config.yaml: retrieval.fts_tokenizer: jieba`），
+在摄取时对 chunk.text 做词级预分词再写入 FTS5，提升中文工程术语召回率。
+Phase 9a 先用 unicode61 验证基线，Phase 9b 评估是否启用 jieba。
+裁决依据：[`2026-07-24-phase9-cross-doc-adjudication.md`](2026-07-24-phase9-cross-doc-adjudication.md) 不一致 2。
 
 Sync mechanism (the main design question): sync via the existing `AuditWriter` pipeline. Each Qdrant upsert emits a paired FTS insert in the same atomic write. Phase 7 T1's `qdrant_write_failed` integration test pattern extends to `fts_write_failed`.
 
@@ -80,6 +88,11 @@ Sync mechanism (the main design question): sync via the existing `AuditWriter` p
 4. Apply position-aware blending: top 1-3 blocks = 75% reranker / 25% composite score (preserve scope matches); top 11+ = 40% reranker / 60% composite score (trust structural modifier).
 
 **Iron Rule check.** R2 (solver is pure): the reranker is in *retrieval*, not the solver. The solver receives a `RetrievalResult` with reranked blocks; it doesn't know the reranker exists. R2 ok.
+
+**[已裁决见 ADR] strict 模式门控**：`strict=True` 时**强制跳过重排**（不可配置覆盖）。
+Cross-encoder 模型推理引入浮点级非确定性，与 R2 的确定性要求直接冲突。strict 模式
+是 R2 的硬保证入口，任何允许 strict+rerank 的代码路径都是 R2 违规的潜在入口。
+裁决依据：[`2026-07-24-phase9-cross-doc-adjudication.md`](2026-07-24-phase9-cross-doc-adjudication.md) 冲突 1。
 
 **Tradeoff.** T8-5 baseline chunker p99 = 279µs per doc. Reranker adds ~50-200ms per (query, block) pair at K=40 ≈ 2-8s per query. This eats into the 5s solver budget if applied to the constraint pipeline. **Mitigation:** apply reranker only on the top-40 candidate set after BM25 + vector + scope filter; the solver then sees the reranked blocks.
 
@@ -365,6 +378,12 @@ QMD's `index.md`: content catalog with one-line summaries per page.
 - If summaries = LLM-generated: violates R2.
 
 **Recommendation.** Ship catalog without summaries first (just title + metadata). Add summaries only if a concrete user need surfaces. The agent can read the first block via `GET /v1/blocks/{block_id}` for context if needed.
+
+**[已裁决见 ADR] LLM 摘要 Phase 归属**：Phase 9 **不实现** LLM 摘要生成。
+catalog 端点仅返回 title + metadata（来自 Parser JSONL），不生成 LLM 摘要。
+LLM 摘要/查询扩展推迟至 Phase 10+。Phase 9 保留此接口设计作为 no-op stub
+（接口存在但 summary 字段始终返回 null）。
+裁决依据：[`2026-07-24-phase9-cross-doc-adjudication.md`](2026-07-24-phase9-cross-doc-adjudication.md) 冲突 3。
 
 **Effort.** Medium. 1-2 tasks. Endpoint + aiosqlite query + golden set regression.
 
