@@ -430,6 +430,61 @@ def _flush_chunk(
     )
 
 
+def _route_accumulated_group(
+    text_parts: list[str],
+    scope_path: list[str],
+    block_ids: list[str],
+    doc_hash: str,
+    version: int,
+    page_numbers: list[int],
+    max_tokens: int,
+    token_counter: Callable[[str], int],
+    payload_version: int = 1,
+) -> list[Chunk]:
+    """Route accumulated text_parts to _flush_chunk or _split_text_two_phase.
+
+    Boundary 2 (scope-change) and Boundary 3 (token-overflow) use this helper
+    instead of calling _flush_chunk directly. Decision order:
+
+    1. Any unsafe adjacent pair (per _is_safe_join_boundary) → _split_text_two_phase
+       (even if token count is within budget; defends against future seams
+       removal that would re-introduce mid-atom splits).
+    2. token_counter("\\n".join(text_parts)) > max_tokens → _split_text_two_phase
+       (replaces the pre-T10b-1 "force-merge into one oversized chunk" behavior).
+    3. Default → _flush_chunk (whole-group merge to 1 chunk; preserves the
+       pre-T10b-1 happy-path behavior for groups that fit).
+
+    Replaces the prior "_flush_chunk with conditional route" inline code at
+    chunk_blocks:676 (Boundary 2) and chunk_blocks:690 (Boundary 3). Both
+    sites share this helper so the two boundaries stay synchronized (T10b-1
+    finding: deep nesting triggers token-overflow more often than scope-change).
+    """
+    # Guard 1: unsafe adjacent pair → safe-split path
+    for prev, nxt in zip(text_parts[:-1], text_parts[1:]):
+        if not _is_safe_join_boundary(prev, nxt):
+            return _split_text_two_phase(
+                "\n".join(text_parts), max_tokens,
+                doc_hash, version, scope_path, block_ids,
+                page_numbers, payload_version,
+            )
+
+    # Guard 2: token budget overflow → safe-split path
+    full_text = "\n".join(text_parts)
+    if token_counter(full_text) > max_tokens:
+        return _split_text_two_phase(
+            full_text, max_tokens,
+            doc_hash, version, scope_path, block_ids,
+            page_numbers, payload_version,
+        )
+
+    # Default: whole-group merge (preserves pre-T10b-1 behavior)
+    chunk = _flush_chunk(
+        text_parts, scope_path, block_ids,
+        doc_hash, version, page_numbers, payload_version,
+    )
+    return [chunk] if chunk else []
+
+
 def _build_chunk(
     text: str,
     scope_path: list[str],
@@ -602,9 +657,12 @@ def chunk_blocks(
     """Convert DocumentBlockIR list into Chunk objects.
 
     Semantic chunking with three boundary conditions:
-    1. Scope change (heading_path differs)
+    1. Scope change (heading_path differs) — routed via ``_route_accumulated_group``
+       (T10b-1): unsafe adjacent pairs OR token-budget overflow split via
+       ``_split_text_two_phase``; otherwise the group merges to a single chunk.
     2. Table/kv → standalone chunk
-    3. Token overflow → flush and start new
+    3. Token overflow → flush and start new — also routed via
+       ``_route_accumulated_group`` (T10b-1), synchronized with Boundary 2.
 
     Within each chunk, two-phase splitting preserves number/unit and
     English word atomicity (Phase 1 hard cut + 20% look-back, Phase 2
@@ -673,29 +731,34 @@ def chunk_blocks(
             current_scope = scope
             continue
 
-        # Boundary 2: Scope change → flush
+        # Boundary 2: Scope change → route accumulated group
+        # T10b-1: replaces pre-fix _flush_chunk with _route_accumulated_group
+        # so unsafe adjacent pairs OR token overflow route to _split_text_two_phase
+        # instead of force-merging into one oversized chunk.
         if scope != current_scope:
-            chunk = _flush_chunk(
-                current_text_parts, current_scope, current_block_ids,
-                doc_hash, version, current_pages, payload_version,
-            )
-            if chunk:
-                chunks.append(chunk)
+            if current_text_parts:
+                chunks.extend(_route_accumulated_group(
+                    current_text_parts, current_scope, current_block_ids,
+                    doc_hash, version, current_pages,
+                    max_tokens, token_counter, payload_version,
+                ))
             current_text_parts = []
             current_block_ids = []
             current_tokens = 0
             current_pages = []
             current_scope = scope
 
-        # Boundary 3: Token overflow
+        # Boundary 3: Token overflow → route accumulated group
+        # T10b-1: synchronized with Boundary 2 to keep the two "force-merge"
+        # edges consistent. Deep-nesting docs trigger token-overflow more often
+        # than scope-change (Phase 10 plan §GSTACK REVIEW [HIGH] finding).
         text_tokens = estimate_tokens(text)
         if current_tokens + text_tokens > max_tokens and current_text_parts:
-            chunk = _flush_chunk(
+            chunks.extend(_route_accumulated_group(
                 current_text_parts, current_scope, current_block_ids,
-                doc_hash, version, current_pages, payload_version,
-            )
-            if chunk:
-                chunks.append(chunk)
+                doc_hash, version, current_pages,
+                max_tokens, token_counter, payload_version,
+            ))
             current_text_parts = []
             current_block_ids = []
             current_tokens = 0

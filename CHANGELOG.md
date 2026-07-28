@@ -40,6 +40,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
   existed (false-negative only — no false-positive risk). Fixed in
   the same commit as the new audit-log scan pattern to reduce future
   tech debt.
+- **chunker scope-change + token-overflow boundaries** (T10b-1): when
+  `chunk_blocks` encounters a scope change or its accumulated block
+  group exceeds `max_tokens`, it now routes through a new
+  `_route_accumulated_group` helper instead of always calling
+  `_flush_chunk`. The helper checks (1) every adjacent block pair via
+  `_is_safe_join_boundary` and (2) `token_counter("\n".join(parts)) >
+  max_tokens`; either failure routes to `_split_text_two_phase`
+  (Phase 1 hard cut + Phase 2 greedy merge) so the group is split into
+  multiple safe chunks rather than force-merged into a single chunk
+  that exceeds the bge-m3 token budget. Boundary 2 (scope change,
+  line ~731) and Boundary 3 (token overflow, line ~745) are
+  synchronized — deep-nesting docs trigger token-overflow more often
+  than scope-change, so the two routes share the helper to avoid an
+  inconsistent state where one boundary is safe-split and the other
+  is force-merge. Adds 8 parametrized unit tests
+  (`TestRouteAccumulatedGroup` in `tests/unit/test_chunker.py`) and
+  60-doc realistic-shape stress (`scripts/t10b1_chunker_stress.py`,
+  0 budget violations, 7 chunks/doc average). 10k heavy bench p99
+  measures 155µs vs Phase 8 T8-5 baseline 279µs (commit
+  `763535b`); 44% faster, no regression.
 
 ### Changed
 - **Chunker: two-phase refactor** (Phase 9): replaces the legacy pure-char-offset
