@@ -42,6 +42,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
   `len(x)//4` to a documented `normalized_len = lambda x: max(1, len(x)//4)`,
   aligned with the runtime `estimate_tokens`. A new integration test in
   `TestIntegrationWithEstimateTokens` asserts the runtime counter path.
+- **Chunker 10k-doc benchmark re-baseline** (Phase 9, replaces Phase 8 T8-5
+  baseline at `279µs`): new `p99 = 97µs` (-65%), `chunks/sec = 312k`
+  (+89% over Phase 8), `total = 0.40s` for 10k docs, RSS flat at 1.06 GB.
+  Schema `chunker-10k-1.0`, seed=42, n=10000, threshold 5s/doc.
+  Baseline JSON: `benchmarks/results/chunker-10k-20260728T014007Z.json`.
 
 ### Added
 - **`validate_chunk_atomicity(chunk_text)`** (chunker public API): returns
@@ -55,6 +60,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
 - **`tests/golden_set/_chunker_golden_fixtures.py`**: inline fixtures
   (large_pdf / mixed_table / chinese_legal / english_tech / stress_test)
   constructed via lightweight `_make_block` factory — no JSONL coupling.
+- **`scripts/live_stress_60.py`** (Phase 9 Plan §6 验证 6): stdlib-only
+  live-ingest stress runner for the running RAG service. Features
+  `--corpus-root` (read real `DocumentBlockIR` records from
+  doc-to-md-style `output/<doc_id>/data.jsonl` dirs), `--max-blocks-per-doc`
+  (cap per-doc block count for docker-exec payload safety),
+  `--status-timeout` (auto-defaults to 90s for real corpus vs 35s
+  synthetic — real PDF ingestion runs async bge-m3 embedding on
+  large blocks), `_r<run_id>` doc_hash suffix (bypasses Qdrant
+  SHA-based idempotency so repeat runs produce measurable delta),
+  and trace_id threading through `run_stress()` → audit-log
+  `qdrant_write_failed` scan (closes Phase 6C D7 review finding
+  for the stress harness). Verified on real ASME SEC V B SE-432
+  leak-testing PDF: 3/3 docs completed, +21 chunks indexed,
+  0 qdrant_write_failed, atomicity 5/5 + adjacent-chunk safety 4/4.
+- **Phase 9 research** (7 planning documents under
+  `docs/superpowers/research/2026-07-24-*`): MinerU-Document-Explorer
+  deep-dive + feature-mapping + integration-feasibility; design drafts
+  for retrieval-port, enhanced-logging, enhanced-ui; cross-document
+  adjudication notes (Karpathy LLM Wiki vs QMD vs MinerU synthesis).
+  Filed at Phase 9 boundary so subsequent code work can pull from
+  them without orphaning the planning artifacts.
 
 ## [phase8] - 2026-07-24
 
