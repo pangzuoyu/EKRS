@@ -20,6 +20,9 @@ dependencies = [
     "transformers>=4.37,<6.0",
     "tokenizers>=0.15",
     "numpy>=1.24.0,<2.0.0",
+    # Phase 10 T10d — MCP (Model Context Protocol) SDK. stdio transport
+    # for AI Agent (Claude Code / MCP inspector) integration.
+    "mcp>=1.0",
 ]
 
 [build-system]
@@ -47,4 +50,6 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "heavy: marks tests as heavy (require real bge-m3 model, run in nightly job only)",
+    # Phase 10 T10d — MCP stdio round-trip test spawns a subprocess
+    "integration: marks tests that spawn subprocesses or use real infra",
 ]

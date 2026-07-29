@@ -220,6 +220,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
   mypy clean. **No new tag** — ``phase10`` already locked at
   closure commit ``2e1d9fa``; T10b-3 is an incremental commit inside
   the ``phase10`` tag.
+- **MCP (Model Context Protocol) adapter — minimal viable**
+  (T10d Td.1, Phase 10 incremental, same tag discipline as T10b-3):
+  new module ``rag/ekrs_rag/mcp/server.py`` exposes 2 tools via
+  the official Python ``mcp>=1.0`` SDK (``FastMCP`` high-level API):
+    - ``ekrs_search(query, top_k=40, active_scope=None)`` —
+      broad-spectrum retrieval (vector + FTS + RRF). Direct reuse
+      of internal ``EKRSRetriever.retrieve()`` — no internal HTTP
+      round-trip, no double rate-limit, no double audit.
+    - ``ekrs_status()`` — healthz dependency payload, no retriever
+      needed (server can boot before retriever is ready).
+  Both return ``list[TextContent]`` (MCP wire format); JSON shape
+  documented in ``tests/unit/test_mcp_server_td1.py`` doctring.
+  Chunk serialization truncates ``chunk.text`` to 200 chars
+  (``CHUNK_TEXT_PREVIEW_CHARS``) to keep payloads small; consumers
+  needing full text fall back to ``/v1/blocks/{id}`` (Td.2+, not
+  in Td.1). Resilient: retriever exceptions caught and returned as
+  ``{"error": "..."}`` MCP content — never crash the server
+  (parent §204). CLI entrypoint: ``python -m ekrs_rag.mcp.server``
+  for stdio transport (Claude Code / MCP inspector / Desktop all
+  support stdio). Pyproject: ``mcp>=1.0`` added to
+  ``[project.dependencies]`` (production dep, not dev-only).
+  8 unit tests cover: module imports, tool registration, retriever
+  dispatch + kwargs pass-through, JSON TextContent output, exception
+  isolation, empty-chunks handling, status independence from
+  retriever. 1 integration test
+  (``tests/integration/test_mcp_stdio_roundtrip_td1.py``) spawns
+  stdio subprocess and verifies ``initialize`` handshake +
+  ``list_tools`` + ``call_tool('ekrs_status')`` +
+  ``call_tool('ekrs_search')`` error-path wire round-trip.
+  ``PytestUnknownMarkWarning`` cleared by registering
+  ``integration`` mark in pyproject ``[tool.pytest.ini_options]``.
+  Full suite **849 unit + 1 stdio integration + 1 skip pass 0
+  regression**; mypy ``ekrs_rag/mcp/`` clean (1 dict-item error
+  closed via explicit ``Dict[str, Any]`` annotation). **No new tag**
+  — ``phase10`` remains at ``2e1d9fa`` closure; T10d Td.1 is an
+  incremental commit inside the ``phase10`` tag (precedent:
+  T10b-3 same pattern). Td.2 (extend to ``ekrs_query`` +
+  ``ekrs_get_block``) deferred until MCP consumer demonstrates
+  concrete need (Claude Code integration or external Agent).
 
 ### Fixed
 - **`scan_audit_for_failures()` bug** (`live_stress_60.py`): the audit
