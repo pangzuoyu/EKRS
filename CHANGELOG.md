@@ -257,8 +257,93 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
   — ``phase10`` remains at ``2e1d9fa`` closure; T10d Td.1 is an
   incremental commit inside the ``phase10`` tag (precedent:
   T10b-3 same pattern). Td.2 (extend to ``ekrs_query`` +
-  ``ekrs_get_block``) deferred until MCP consumer demonstrates
-  concrete need (Claude Code integration or external Agent).
+  ``ekrs_get_block`) **shipped as post-closure incremental**
+  (see Td.2 entry below).
+
+- **T10d Td.2 — MCP adapter extended with `ekrs_query` +
+  `ekrs_get_block`** (Phase 10 incremental, no new tag —
+  `phase10` stays at `2e1d9fa`). Adds 2 more MCP tools + new
+  HTTP route, with `evaluate_constraints` helper extracted from
+  the constraints route handler so both the HTTP layer and the
+  MCP layer share the R3 three-gate pipeline without an
+  internal HTTP round-trip:
+
+    - **`ekrs_query(query, context, scope, policy,
+      overlay_hints, strict, top_k=40)`** — full constraint
+      solve via the R3 three-gate pipeline. Direct internal call
+      to `evaluate_constraints` (no HTTP, no double rate-limit,
+      no double audit). Returns `[TextContent]` with the
+      `ConstraintQueryResponse` shape (branches, mode, conflicts)
+      on success or `{"error": {...}}` MCP content on failure.
+      Iron Rules R3 / R4 / R6 / R7 honored transparently (solver
+      is R2 pure; helper does no translation).
+
+    - **`ekrs_get_block(block_id)`** — document deep-read by
+      `block_id` (UUID from ir_parser). Direct internal call to
+      `QdrantManager.get_payload_by_block_id`. Returns the full
+      block payload (text NOT truncated; this is a deep-read
+      endpoint, not a search preview) with `numeric_hints`
+      projected to count-only (full list would blow past MCP
+      message-size limits). Not-found → `{"error": "block_id not
+      found", "block_id": "..."}` MCP content (parent §204).
+
+    - **`GET /v1/blocks/{block_id}`** — new HTTP route in
+      `rag/ekrs_rag/api/routes/blocks.py`. Same auth as
+      `/v1/constraints` (`require_parser_token`). Returns
+      `BlockResponse` (Pydantic: `block_id, doc_hash, text,
+      scope_path, page_numbers, token_count, version,
+      source_block_ids, numeric_hints_count`). 404 on missing
+      block_id, 503 on uninitialized qdrant, 500 on qdrant
+      transport error (exception isolation).
+
+  Naming consistency (user feedback during GREEN): unified on
+  `block_id` (UUID) for the new route + MCP tool param, matching
+  FTS5 PK, Qdrant payload, and audit event field naming — rather
+  than the T10a-5 `chunk_id={doc_hash[:8]}-{idx:04d}` parallel
+  field (which stays in the Qdrant payload for legacy /
+  self-describing reasons per the parent §[M2] naming-space
+  coexistence rule).
+
+  **`build_server` DI extended** from 2 args `(retriever,
+  dependencies)` to 4 args `(retriever, qdrant, solver,
+  dependencies)`. CLI entrypoint (`python -m ekrs_rag.mcp.server`)
+  still passes `None` for all 3 deps — PoC zero-config; production
+  wiring is Td.3 work (Claude Code `.mcp.json` integration).
+
+  **Tdd changes**:
+    - `QdrantManager.get_payload_by_block_id(block_id) -> Optional[Dict]`
+      — scroll+filter on `block_id` (UUID) payload field, reuses
+      `get_ingestion_status` pattern (lines 274-289), limit=1
+      (UUID uniqueness).
+    - `evaluate_constraints(retriever, ...)` helper in
+      `rag/ekrs_rag/api/routes/constraints.py` — returns an
+      envelope dict (success/error) instead of raising
+      HTTPException, so both HTTP and MCP callers can translate
+      to their native wire format. The route handler
+      `query_constraints` now delegates to this helper; audit
+      emission (`constraint_solve_started` / `_failed` /
+      `_solved`) stays in the route layer (parent §204: helper
+      is pure, no audit emission).
+    - `mcp/server.py` extended with `ekrs_query`, `ekrs_get_block`,
+      and the 4-tool `build_server` (closure capture DI).
+
+  Tests: **9 mcp unit + 4 blocks-route unit + 1 stdio
+  integration = 14 new tests**. The Td.1 `build_server` test +
+  Td.1 stdio roundtrip test were refactored to the broader
+  "at-least 2 tools" contract (the "exactly 2 tools" assertion
+  was invalidated by Td.2's registry extension). 0 regressions
+  in unit suite (**656 unit pass, 1 skip**); 10 pre-existing
+  integration test failures (`await RetrievalResult` mismatch in
+  Phase 5/7 replay test stubs) verified unrelated via `git
+  stash` round-trip. Mypy clean across all production +
+  Td.1/Td.2 test files (the `mcp.TextContent | ImageContent |
+  ...` union narrowing was addressed via `_as_text(content_block)
+  -> TextContent` helper in both stdio roundtrip tests).
+
+  **Tag discipline preserved**: `phase10` stays at `2e1d9fa`
+  (T10a-7 closure, parent §111 do-not-move); `phase10.1` stays
+  at `1c44eee` (T10b-1 do-not-move). Td.2 is incremental inside
+  `phase10` per the T10b-3 / Td.1 precedent.
 
 ### Fixed
 - **`scan_audit_for_failures()` bug** (`live_stress_60.py`): the audit

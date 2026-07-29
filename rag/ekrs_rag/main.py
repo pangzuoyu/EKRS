@@ -18,7 +18,7 @@ from prometheus_client import CollectorRegistry, multiprocess, start_http_server
 
 from .api.middleware.observability import ObservabilityMiddleware
 from .api.middleware.rate_limit import install_rate_limiter
-from .api.routes import admin, admin_embedding_cache, calculate, constraints, ingestion, trace
+from .api.routes import admin, admin_embedding_cache, blocks, calculate, constraints, ingestion, trace
 from .concurrency.compensation import CompensationScanner
 from .concurrency.redis_lock import RedisLock
 from .core.config import settings
@@ -410,6 +410,9 @@ def create_app() -> FastAPI:
     # Phase 7 T7 (Decision §4): operator endpoint to flush the embedding
     # LRU cache after a model swap or suspected corruption.
     app.include_router(admin_embedding_cache.router)
+    # Phase 10 T10d Td.2 — GET /v1/blocks/{block_id} (document deep-read
+    # backing the ekrs_get_block MCP tool).
+    app.include_router(blocks.router)
 
     @app.get("/health", response_class=PlainTextResponse)
     async def health():

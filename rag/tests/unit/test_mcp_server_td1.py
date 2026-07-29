@@ -4,7 +4,7 @@ Contract under test:
 - ``ekrs_rag.mcp.server`` module exposes:
     * ``ekrs_search(retriever, query, top_k=40, active_scope=None) -> list[TextContent]``
     * ``ekrs_status(dependencies) -> list[TextContent]``
-    * ``build_server(retriever, dependencies) -> FastMCP``
+    * ``build_server(retriever, qdrant, solver, dependencies) -> FastMCP`` (Td.2: extended from 2 to 4 args)
 - Server registers exactly 2 tools: ``ekrs_search`` + ``ekrs_status`` (named
   exactly, MCP wire-protocol name).
 - ``ekrs_search`` dispatches to ``retriever.retrieve(query, *, top_k, active_scope)``
@@ -93,12 +93,25 @@ def test_mcp_server_module_imports() -> None:
 # ---------------------------------------------------------------------------
 # Test 2: build_server registers exactly 2 tools with wire-protocol names
 # ---------------------------------------------------------------------------
-def test_build_server_registers_two_named_tools(stub_retriever: _StubRetriever) -> None:
+def test_build_server_registers_td1_named_tools(stub_retriever: _StubRetriever) -> None:
     from ekrs_rag.mcp.server import build_server
 
-    server = build_server(stub_retriever, dependencies={"status": "ok"})
+    # Td.2 extended build_server to 4 args (retriever, qdrant, solver,
+    # dependencies) and added 2 tools. The Td.1 contract was "exactly
+    # 2 tools" — Td.2 broadened that to "AT LEAST these 2 tools are
+    # always registered". Full 4-tool coverage is in test_mcp_server_td2.py.
+    server = build_server(
+        retriever=stub_retriever,
+        qdrant=None,
+        solver=None,
+        dependencies={"status": "ok"},
+    )
     tools = _list_tool_names(server)
-    assert tools == {"ekrs_search", "ekrs_status"}, f"unexpected tools: {tools}"
+    # Td.1 minimum set — both must be registered regardless of Td.2
+    # additions (extending the registry can't remove wire-contract names).
+    assert {"ekrs_search", "ekrs_status"}.issubset(tools), (
+        f"Td.1 tools missing: {tools}"
+    )
 
 
 # ---------------------------------------------------------------------------

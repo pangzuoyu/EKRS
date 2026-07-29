@@ -4,11 +4,16 @@ POST /v1/constraints — query engineering constraints via the three-gate pipeli
   Gate 1 (Recall):    retrieval returns < MIN_RECALL_CHUNKS → 404
   Gate 2 (Extract):  no constraints extracted → 404
   Gate 3 (Solve):    solver reports CONFLICT → 200 + conflict in response
+
+Phase 10 T10d Td.2 — also exposes ``evaluate_constraints(retriever, ...)``
+helper (lower in this module) so the ``ekrs_query`` MCP tool can reuse
+the same three-gate pipeline without an internal HTTP round-trip.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, model_validator
@@ -81,6 +86,108 @@ class ConstraintQueryResponse(BaseModel):
                 f"primary_branch '{self.primary_branch}' must be one of the branch keys: {list(self.branches.keys())}"
             )
         return self
+
+
+# ---------------------------------------------------------------------------
+# Internal helper (Phase 10 T10d Td.2)
+# ---------------------------------------------------------------------------
+
+
+async def evaluate_constraints(
+    retriever: EKRSRetriever,
+    *,
+    query: str,
+    context: Dict[str, Any],
+    scope_path: Optional[List[str]],
+    strict: bool,
+    top_k: int,
+) -> Dict[str, Any]:
+    """Pure helper for the R3 three-gate pipeline.
+
+    Shared by the HTTP route ``POST /v1/constraints`` and the MCP tool
+    ``ekrs_query`` (Td.2.2). Returns an envelope rather than raising
+    so each caller can translate the envelope to its native wire format
+    (HTTPException vs. MCP content).
+
+    Envelope shapes:
+        Success → ``{"status": "success", "response": ConstraintQueryResponse}``
+        Error   → ``{"status": "error", "error": {"type": str,
+                  "status_code": int, "detail": Any}}``
+
+    ``type`` is one of: ``insufficient_recall``, ``no_constraints_extracted``,
+    ``strict_inferred``, ``conflict``.
+    """
+    active_scope = scope_path
+
+    # --- Step 1: Retrieval ---
+    retrieval_result: RetrievalResult = await retriever.retrieve(
+        query, top_k=top_k, active_scope=active_scope,
+    )
+
+    # --- Gate 1: Recall check ---
+    if len(retrieval_result.chunks) < MIN_RECALL_CHUNKS:
+        return {
+            "status": "error",
+            "error": {
+                "type": "insufficient_recall",
+                "status_code": 404,
+                "detail": "Insufficient recall",
+            },
+        }
+
+    # --- Step 2: Evidence building ---
+    constraints = EvidenceBuilder.build(retrieval_result.chunks)
+
+    # --- Gate 2: Extraction check ---
+    if len(constraints) == 0:
+        return {
+            "status": "error",
+            "error": {
+                "type": "no_constraints_extracted",
+                "status_code": 404,
+                "detail": "No constraints extracted",
+            },
+        }
+
+    # --- Strict mode validation (R6) ---
+    if strict:
+        for c in constraints:
+            if c.inferred:
+                return {
+                    "status": "error",
+                    "error": {
+                        "type": "strict_inferred",
+                        "status_code": 400,
+                        "detail": "missing_context: inferred constraint not allowed in strict mode",
+                    },
+                }
+
+    # --- Step 3: Solving ---
+    result = IntervalSolver.solve(constraints, active_scope=active_scope)
+
+    # --- Gate 3: Conflict check ---
+    if result["status"] == "CONFLICT":
+        return {
+            "status": "error",
+            "error": {
+                "type": "conflict",
+                "status_code": 409,
+                "detail": {"conflicts": result.get("conflicts", [])},
+            },
+        }
+
+    mode = "multi_branch" if active_scope else "single"
+
+    return {
+        "status": "success",
+        "response": ConstraintQueryResponse(
+            branches=result.get("branches", {}),
+            primary_branch=result.get("primary_branch"),
+            conflicts=result.get("conflicts", []),
+            trace=result.get("trace", []),
+            mode=mode,
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -199,97 +306,43 @@ async def query_constraints(
             scope_path=active_scope,
         )
 
-    # --- Gate 0: context merge (placeholder, doc/inferred contexts empty) ---
-    # In Phase 2b doc_context and inferred_context are empty dicts.
-    # The user_context is query.context and is passed through as-is.
-    merged_context = _context_merge(query.context, {}, {})
-
-    # --- Step 2: Retrieval ---
-    retrieval_result: RetrievalResult = await retriever.retrieve(
-        query.query,
+    # --- Delegate to the shared helper (Phase 10 T10d Td.2). ---
+    # The helper runs R3 gates and returns an envelope; we translate
+    # error envelopes to HTTPException and emit audit. The helper itself
+    # is pure (no audit emission) so the MCP wrapper can reuse it
+    # without double-writing.
+    envelope = await evaluate_constraints(
+        retriever,
+        query=query.query,
+        context=query.context,
+        scope_path=active_scope,
+        strict=query.strict,
         top_k=query.top_k,
-        active_scope=active_scope,
     )
 
-    # --- Gate 1: Recall check ---
-    if len(retrieval_result.chunks) < MIN_RECALL_CHUNKS:
-        logger.warning("Gate 1 trigger: insufficient recall chunks=%d", len(retrieval_result.chunks))
+    if envelope["status"] == "error":
+        err = envelope["error"]
         if _writer is not None:
             _writer.write(
                 "constraint_solve_failed",
                 trace_id=_trace_id,
-                error_type="insufficient_recall",
-                status_code=404,
+                error_type=err["type"],
+                status_code=err["status_code"],
             )
-        raise HTTPException(status_code=404, detail="Insufficient recall")
+        raise HTTPException(status_code=err["status_code"], detail=err["detail"])
 
-    # --- Step 4: Evidence building ---
-    constraints = EvidenceBuilder.build(retrieval_result.chunks)
-
-    # --- Gate 2: Extraction check ---
-    if len(constraints) == 0:
-        logger.warning("Gate 2 trigger: no constraints extracted")
-        if _writer is not None:
-            _writer.write(
-                "constraint_solve_failed",
-                trace_id=_trace_id,
-                error_type="no_constraints_extracted",
-                status_code=404,
-            )
-        raise HTTPException(status_code=404, detail="No constraints extracted")
-
-    # --- Strict mode validation (R6) ---
-    if query.strict:
-        for c in constraints:
-            if c.inferred:
-                if _writer is not None:
-                    _writer.write(
-                        "constraint_solve_failed",
-                        trace_id=_trace_id,
-                        error_type="strict_inferred",
-                        status_code=400,
-                    )
-                raise HTTPException(
-                    status_code=400,
-                    detail="missing_context: inferred constraint not allowed in strict mode",
-                )
-
-    # --- Step 6: Solving ---
-    result = IntervalSolver.solve(constraints, active_scope=active_scope)
-
-    # --- Gate 3: Conflict check ---
-    conflicts: list[dict] = []
-    if result["status"] == "CONFLICT":
-        conflicts = result.get("conflicts", [])
-        logger.info("Gate 3 CONFLICT: %d conflict(s)", len(conflicts))
-        if _writer is not None:
-            _writer.write(
-                "constraint_solve_failed",
-                trace_id=_trace_id,
-                error_type="conflict",
-                status_code=409,
-            )
-        raise HTTPException(status_code=409, detail={"conflicts": conflicts})
-
-    # Determine mode
-    mode = "multi_branch" if active_scope else "single"
+    response = envelope["response"]
 
     # --- Audit: constraint_solved (Phase 7 T2) ---
     if _writer is not None:
         _writer.write(
             "constraint_solved",
             trace_id=_trace_id,
-            branches_count=len(result.get("branches", {})),
-            conflict_details=conflicts or None,
+            branches_count=len(response.branches),
+            conflict_details=response.conflicts or None,
         )
 
-    return ConstraintQueryResponse(
-        branches=result.get("branches", {}),
-        primary_branch=result.get("primary_branch"),
-        conflicts=conflicts,
-        trace=result.get("trace", []),
-        mode=mode,
-    )
+    return response
 
 
 # ---------------------------------------------------------------------------

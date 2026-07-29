@@ -91,13 +91,131 @@ async def ekrs_status(dependencies: Dict[str, str]) -> List[TextContent]:
     return [TextContent(type="text", text=json.dumps(dependencies, ensure_ascii=False))]
 
 
-def build_server(retriever: Any, dependencies: Dict[str, str]) -> FastMCP:
-    """Construct a FastMCP server with the 2 Td.1 tools wired up.
+async def ekrs_query(
+    solver: Any,
+    *,
+    query: str,
+    context: Optional[Dict[str, Any]] = None,
+    scope: Optional[List[str]] = None,
+    policy: Optional[str] = None,
+    overlay_hints: Optional[List[Any]] = None,
+    strict: bool = False,
+    top_k: int = 40,
+) -> List[TextContent]:
+    """Full R3 three-gate constraint solve.
 
-    Closure capture — ``retriever`` and ``dependencies`` are frozen at
-    construction time. Re-call ``build_server`` if the retriever changes.
-    The MCP tool names are wire-protocol names: must match exactly with
-    what clients (Claude Code, MCP inspector, etc.) call.
+    Direct internal call to ``solver.evaluate_constraints`` — no HTTP
+    round-trip, no double rate-limit, no double audit. Mirrors
+    ``POST /v1/constraints`` semantics.
+
+    The solver contract is the ``evaluate_constraints`` helper exposed
+    by ``ekrs_rag.api.routes.constraints`` — the same helper the HTTP
+    route delegates to, so R3/R4/R6/R7 are honored transparently.
+
+    Returns ``[TextContent]`` with JSON:
+        Success → ``{"branches": {...}, "primary_branch": ..., "mode":
+        ..., "conflicts": [...]}``
+        Error   → ``{"error": {"type": ..., "status_code": int,
+                  "message": ..., "detail": ...}}``
+    """
+    ctx: Dict[str, Any] = context or {}
+    try:
+        envelope = await solver.evaluate_constraints(
+            query,
+            context=ctx,
+            scope=scope,
+            policy=policy,
+            overlay_hints=overlay_hints,
+            strict=strict,
+            top_k=top_k,
+        )
+    except Exception as exc:  # noqa: BLE001 — top-level isolation
+        payload: Dict[str, Any] = {
+            "error": {
+                "message": f"solver raised: {exc}",
+                "type": "solver_exception",
+            }
+        }
+        return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
+
+    if envelope.get("status") == "error":
+        err = dict(envelope["error"])
+        err["message"] = err.get("detail", "solver returned error envelope")
+        payload = {"error": err}
+        return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
+
+    response = envelope["response"]
+    # ConstraintQueryResponse is a Pydantic BaseModel — use model_dump.
+    if hasattr(response, "model_dump"):
+        payload = response.model_dump()
+    else:  # pragma: no cover — defensive for dataclass fallbacks
+        payload = dict(response.__dict__)
+    return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
+
+
+async def ekrs_get_block(
+    qdrant: Any,
+    *,
+    block_id: str,
+) -> List[TextContent]:
+    """Document deep-read by ``block_id`` (UUID).
+
+    Direct internal call to ``qdrant.get_payload_by_block_id`` — no HTTP
+    round-trip. Returns the full Qdrant payload (text NOT truncated;
+    this is a deep-read, not a search preview).
+
+    Returns ``[TextContent]`` with JSON:
+        Success → ``{"block_id": ..., "doc_hash": ..., "text": ...,
+        "scope_path": [...], ...}``
+        Not-found → ``{"error": "block_id not found", "block_id": ...}``
+        Qdrant error → ``{"error": {"message": ..., "type":
+        "qdrant_exception", "block_id": ...}}``
+
+    The ``block_id`` naming is consistent with the FTS5 PK, Qdrant
+    payload, and audit event field name.
+    """
+    try:
+        payload = qdrant.get_payload_by_block_id(block_id)
+    except Exception as exc:  # noqa: BLE001 — top-level isolation
+        err_payload: Dict[str, Any] = {
+            "error": {
+                "message": f"qdrant raised: {exc}",
+                "type": "qdrant_exception",
+                "block_id": block_id,
+            }
+        }
+        return [TextContent(type="text", text=json.dumps(err_payload, ensure_ascii=False))]
+
+    if payload is None:
+        not_found_payload: Dict[str, Any] = {
+            "error": "block_id not found",
+            "block_id": block_id,
+        }
+        return [TextContent(type="text", text=json.dumps(not_found_payload, ensure_ascii=False))]
+
+    # Project numeric_hints to count-only for the wire payload (full list
+    # could blow past MCP message-size limits on dense docs).
+    if "numeric_hints" in payload and isinstance(payload["numeric_hints"], list):
+        payload = {**payload, "numeric_hints": len(payload["numeric_hints"])}
+    return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
+
+
+def build_server(
+    retriever: Any,
+    qdrant: Any,
+    solver: Any,
+    dependencies: Dict[str, str],
+) -> FastMCP:
+    """Construct a FastMCP server with the 4 Td.1+Td.2 tools wired up.
+
+    Closure capture — ``retriever``, ``qdrant``, ``solver``, and
+    ``dependencies`` are frozen at construction time. Re-call
+    ``build_server`` if any dependency changes. The MCP tool names are
+    wire-protocol names: must match exactly with what clients (Claude
+    Code, MCP inspector, etc.) call.
+
+    Production wiring is the caller's responsibility — the CLI
+    entrypoint below passes ``None`` for all deps (zero-config PoC).
     """
     server = FastMCP("ekrs")
 
@@ -122,12 +240,59 @@ def build_server(retriever: Any, dependencies: Dict[str, str]) -> FastMCP:
     async def _status() -> List[TextContent]:
         return await ekrs_status(dependencies)
 
+    @server.tool(
+        name="ekrs_query",
+        description=(
+            "Full constraint solve via the R3 three-gate pipeline "
+            "(recall → extract → solve). Returns branches, mode, and "
+            "conflicts as JSON. Same semantics as POST /v1/constraints."
+        ),
+    )
+    async def _query(
+        query: str,
+        context: Optional[Dict[str, Any]] = None,
+        scope: Optional[List[str]] = None,
+        policy: Optional[str] = None,
+        overlay_hints: Optional[List[Any]] = None,
+        strict: bool = False,
+        top_k: int = 40,
+    ) -> List[TextContent]:
+        return await ekrs_query(
+            solver,
+            query=query,
+            context=context,
+            scope=scope,
+            policy=policy,
+            overlay_hints=overlay_hints,
+            strict=strict,
+            top_k=top_k,
+        )
+
+    @server.tool(
+        name="ekrs_get_block",
+        description=(
+            "Document deep-read by block_id (UUID). Returns the full "
+            "block payload (text NOT truncated, numeric_hints as count "
+            "only). Returns {\"error\": \"block_id not found\", ...} when "
+            "the block_id is unknown."
+        ),
+    )
+    async def _get_block(block_id: str) -> List[TextContent]:
+        return await ekrs_get_block(qdrant, block_id=block_id)
+
     return server
 
 
 if __name__ == "__main__":  # pragma: no cover
     # CLI entrypoint: ``python -m ekrs_rag.mcp.server`` starts stdio
-    # transport. Real deployments wire retriever+dependencies through
-    # build_server() before calling run().
-    server = build_server(retriever=None, dependencies={"status": "starting"})
+    # transport. Real deployments wire retriever+qdrant+solver+dependencies
+    # through build_server() before calling run(). CLI default is
+    # zero-config (all deps None) — every tool call surfaces the
+    # exception-isolation path through real stdio transport.
+    server = build_server(
+        retriever=None,
+        qdrant=None,
+        solver=None,
+        dependencies={"status": "starting"},
+    )
     server.run(transport="stdio")

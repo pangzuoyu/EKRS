@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ApiException, UnexpectedResponse
@@ -322,6 +322,50 @@ class QdrantManager:
                 chunks_indexed=0,
                 error=str(e),
             )
+
+    def get_payload_by_block_id(self, block_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a single point's payload by ``block_id`` (UUID).
+
+        Phase 10 T10d Td.2 — supports the ``GET /v1/blocks/{block_id}``
+        HTTP route and the ``ekrs_get_block`` MCP tool. ``block_id`` is
+        the canonical identifier (UUID from ir_parser) shared across
+        the FTS5 PK, Qdrant payload, and audit events.
+
+        Returns ``None`` when no point matches. Caller is responsible
+        for translating ``None`` into an HTTP 404 or MCP ``{"error":
+        "block_id not found"}`` payload — this method does no
+        translation (it is R2-pure — no exception swallowing for the
+        happy 404 path, but still raises on Qdrant transport errors
+        so the caller's audit/exception isolation layer can run).
+
+        Reuses the scroll+filter pattern from ``get_ingestion_status``
+        (lines 274-289). Limit=1 because ``block_id`` is unique per
+        chunk (ir_parser guarantees UUID uniqueness).
+        """
+        try:
+            results, _ = self._client.scroll(
+                collection_name=self._collection_name,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="block_id",
+                            match=models.MatchValue(value=block_id),
+                        ),
+                    ],
+                ),
+                limit=1,
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as exc:
+            _emit_qdrant_failure("read", self._collection_name, exc)
+            raise
+        if not results:
+            return None
+        payload = results[0].payload
+        # payload may be None even with with_payload=True if Qdrant omits
+        # the field; treat as missing for downstream typing.
+        return dict(payload) if payload is not None else None
 
     def search(
         self,
