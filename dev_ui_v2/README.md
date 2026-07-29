@@ -1,0 +1,61 @@
+# EKRS Dev UI v2
+
+> Phase 11 T11-1 scaffold. Replaces the Streamlit `dev_ui/` debug tool with a
+> production-grade React SPA. 1:1 port of 4 existing tabs (Ingest /
+> Constraints / Golden Set / Overlays) with production polish (typed API
+> client, X-Admin-Key localStorage, ErrorBoundary, skeleton loaders).
+
+**Stack**: React 18.3 + TypeScript 5 strict + Vite 5 + TanStack Query 5 +
+React Router 6 + Zod 3 + Playwright + ESLint + Prettier.
+
+**Phase plan**: [`docs/superpowers/plans/2026-07-29-phase11-react-ui.md`](../../docs/superpowers/plans/2026-07-29-phase11-react-ui.md).
+
+## Quick commands
+
+```bash
+npm install           # install (uses .nvmrc; Node 20.20+)
+npm run dev           # Vite dev server + /v1/* proxy to localhost:8000
+npm run build         # type-check + production build
+npm run preview       # serve dist/ at http://127.0.0.1:4173
+npm run typecheck     # tsc -b --noEmit
+npm run lint          # ESLint, max-warnings 0
+npm run format        # Prettier write
+npm run format:check  # Prettier check (CI gate)
+npm run check:bundle  # CI gate: dist/assets/*.js gzipped ≤ 500 KB
+```
+
+## Layout
+
+```
+dev_ui_v2/
+├── index.html             Vite entry HTML
+├── package.json           deps + npm scripts
+├── tsconfig.json          project-references root
+├── tsconfig.app.json      src/ strict TS config
+├── tsconfig.node.json     vite.config + scripts config
+├── vite.config.ts         Vite + React plugin + /v1/* dev proxy
+├── scripts/
+│   └── check-bundle-size.mjs   CI gate: 500 KB gzipped hard cap
+├── src/
+│   ├── main.tsx           React root + QueryClientProvider + BrowserRouter
+│   ├── App.tsx            App shell skeleton (T11-3 fills this in)
+│   └── vite-env.d.ts      Vite ambient types
+└── .eslintrc.cjs          ESLint config (react + TS rules)
+└── .prettierrc.json       Prettier config
+```
+
+T11-2 adds `src/api/` (per-endpoint typed client + Zod schemas), `src/lib/`
+(auth helpers). T11-3 adds `src/views/{Ingest,Constraints,Golden,Overlays}.tsx`
++ Playwright `tests/e2e/`.
+
+## Bundle budget (CI gate)
+
+Hard cap: **500 KB gzipped** for `dist/assets/*.js` total. Per parent scope
+decision Q#1. The check script fails CI if exceeded; a chart library or
+markdown editor inflate blows the cap within a single PR.
+
+## Coexistence with `dev_ui/`
+
+Streamlit `dev_ui/` is preserved as a 1-quarter fallback. Both can be
+installed side-by-side. Once ops confirms the React UI is the primary
+tool, T11-5 retires the Streamlit path entirely.
