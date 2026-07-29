@@ -462,6 +462,112 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
   Filed at Phase 9 boundary so subsequent code work can pull from
   them without orphaning the planning artifacts.
 
+## [phase11] - 2026-07-30
+
+**Tag**: `phase11` (annotated, force-moved to T11-5 closure commit per
+parent plan §111). **Version**: 0.1.0 → 0.2.0 (minor bump — Phase 11
+ships a new user-facing component per Keep-a-Changelog). **Phase 11
+delivered as 5 tasks (T11-1..T11-5)** all under the React UI plan
+`docs/superpowers/plans/2026-07-29-phase11-react-ui.md`.
+
+**Sub-tag**: `phase11.1` stays locked at `534f0fc` (T11-1 do-not-move,
+scaffold anchor). This release covers the full dev_ui_v2/ tree
+(scaffold + typed client + views + E2E + Dockerize + deprecate dev_ui).
+
+### Added — T11-1 (dev_ui_v2 scaffold)
+
+New `dev_ui_v2/` directory with React 18.3 + TypeScript 5.5 strict +
+Vite 5.3.5 + TanStack Query 5.51 + React Router 6.26 + Zod 3.23 +
+Playwright (T11-3 only). **No chart library, no OpenAPI auto-gen**
+(parent Q#1–Q#8 locked; rationale in T11-1 plan). 17 files + 6013 LOC.
+Smoke 5/5 PASS (typecheck + build + lint + format:check + check:bundle).
+Bundle 55.7 KB gz (9× headroom vs 500 KB cap = parent Q#1 CI gate).
+`phase11.1` annotated tag force-moved + locked at `534f0fc` (T11-1
+scaffold anchor, do-not-move).
+
+### Added — T11-2 (typed API client + auth + MSW mock backend)
+
+`src/api/{schemas,client,hooks,context}` + `src/lib/auth` +
+`tests/mocks/handlers`. 6 Zod schemas mirror the Pydantic wire format
+(REQUEST uses `.default()` so optional; RESPONSE uses `.default()` only
+when the backend actually emits defaults). 5 TanStack Query hooks
+(`useNotifyIngestion`, `useIngestionStatus`, `useQueryConstraints`,
+`useGoldenSet`, `useAdminFlushCache`). `X-Admin-Key` header only on
+`/v1/admin/*` calls. MSW handlers (wildcard-host patterns so same set
+serves vitest + Playwright) act as the wire-format contract spec
+(parent Q#6). `useAdminKey = useSyncExternalStore + storage event +
+same-tab custom event` (`localStorage.setItem` doesn't fire the
+`storage` event in the writer tab). 56/56 tests pass (19 schema +
+14 client + 10 auth + 13 MSW). Bundle 70.1 KB gz (7× headroom).
+
+### Added — T11-3 (4 views + React Router + Playwright E2E)
+
+4 routes: `/ingest` (notify form + status check), `/constraints`
+(query textarea + strict + top_k + trace_id, mode-badge + branches
+JSON + conflicts + trace expander), `/golden` (3-case fixture +
+progress bar + results table), `/overlays` (placeholder banner
+admin-keyed via `useAdminKey`). `Sidebar` (NavLink × 4 + admin key
+input with `defaultValue` from `useAdminKey` + clear button + health
+dot). `ErrorBoundary` per route, `Skeleton` loading state. `App.tsx`
+`BrowserRouter` + `NotFound` with `&apos;t` escaped for ESLint.
+Playwright E2E × 6 specs (4 views + 2 overlays) using MSW browser
+worker, MSW guard `if (import.meta.env.DEV)` so Vite tree-shakes the
+dynamic import in production. Bundle 82.5 KB gz (6× headroom).
+72 unit + 6 E2E pass. 7 bugs caught+fixed (notify.data?.doc_hash,
+context:{} required, unescaped entity, JSDoc `*/`, MSW chunk leak,
+MSW dead-in-preview, vitest `__tests__` dir crash).
+
+### Added — T11-4 (Dockerize + nginx reverse proxy)
+
+Multi-stage `dev_ui_v2/Dockerfile` (node:20-alpine build → nginx:1.27-
+alpine runtime, ~40 MB final). `nginx.conf` SPA fallback
+`try_files $uri $uri/ /index.html` for React Router 6 + reverse proxy
+`/v1/*` and `/healthz` to `rag:8000` (compose service name). Security
+headers (`X-Content-Type-Options nosniff`, `Referrer-Policy strict-
+origin-when-cross-origin`). Build gotchas captured: lockfile pinned
+564 `mirrors.cloud.tencent.com` URLs rewritten to
+`registry.npmmirror.com`; npm 10.8.2 "Exit handler never called!" bug
+requires npm 11 upgrade; `--include=dev` for the build-time
+typescript/vite/eslint deps; `!tests/mocks/` whitelist in
+`.dockerignore` (tsc -b still resolves the dynamic import path at
+type-check). Compose `dev_ui_v2` service on host port 5173,
+`depends_on: rag healthy`. `NODE_BASE_IMAGE` / `NGINX_BASE_IMAGE` ARGs
+overridable in `docker-compose.override.yml` for restricted-network
+mirrors (daocloud.io — same pattern as rag's `PYTHON_BASE_IMAGE` /
+`PIP_INDEX_URL`). Smoke verified standalone + through full stack
+(proxy returns 503 on admin paths and 403 on parser-token paths —
+auth layer intact).
+
+### Changed — T11-5 (compose healthchecks)
+
+Pre-existing baseline: `qdrant/qdrant:latest` and `deployment-rag`
+images ship **without `curl`**. Compose healthchecks using
+`["CMD", "curl", "-f", ...]` failed forever (qdrant streak 19928, rag
+streak 4318) and blocked `depends_on: service_healthy`. Replaced
+both with bash `/dev/tcp` (`/bin/sh` dash does NOT support `/dev/tcp` —
+must invoke `bash -c` explicitly). Both services healthy within 25s.
+
+### Deprecated — T11-5
+
+- **`dev_ui/` (Streamlit)**: banner in `dev_ui/README.md` pointing at
+  `dev_ui_v2/`; `dev_ui/app.py` module docstring now declares
+  `.. deprecated::`. Kept as 1-quarter fallback. Full removal
+  (scrub `ekrs-handbook.md`, `docs/ARCHITURE.md`, `ekrs.md`,
+  `CLAUDE.md`) deferred — multi-doc work, out of scope for Phase 11.
+
+### Notes
+
+- **`phase11` tag force-moved** to T11-5 closure commit (parent §111).
+  `phase11.1` stays at `534f0fc` (T11-1 do-not-move).
+- **Caveats / known limits**:
+  - dev_ui_v2 MSW worker is dev/E2E only — production container does
+    not ship `mockServiceWorker.js`. Nginx does not special-case it.
+  - `dev_ui/` removal is a follow-up; the Streamlit app still resolves
+    all `/v1/*` endpoints and is a working fallback.
+  - The Playwright E2E suite uses `npm run dev` (NOT `npm run
+    preview`) so MSW's `import.meta.env.DEV` guard is alive during
+    the test. CI gate is `npm run test:e2e`.
+
 ## [phase10] - 2026-07-29
 
 **Tag**: `phase10` (annotated, force-moved to T10a-7 closure commit per

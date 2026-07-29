@@ -1,4 +1,9 @@
-"""EKRS RAG — Streamlit debug UI (Phase 7 T5).
+"""EKRS RAG — Streamlit debug UI (Phase 7 T5, deprecated Phase 11 T11-5).
+
+.. deprecated::
+    Use the React SPA at ``dev_ui_v2/`` (Phase 11). This Streamlit app
+    is kept as a 1-quarter fallback; removal is a follow-up after the
+    multi-doc scrub (handbook, architecture, README, CLAUDE.md).
 
 Decision §2: folded into rag/[dev] extra (not dev_ui/pyproject.toml) so
 production Docker images stay slim. Run with:

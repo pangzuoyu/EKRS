@@ -1,5 +1,14 @@
 # dev_ui — Streamlit debug UI
 
+> ⚠️ **DEPRECATED as of Phase 11 T11-5 (2026-07-30).**
+> The React SPA at [`dev_ui_v2/`](../dev_ui_v2/) is the supported debug
+> UI. It runs inside the same docker-compose stack, talks to the same
+> `/v1/*` API, and ships with typed Zod schemas + Playwright E2E.
+> This Streamlit app is kept only as a 1-quarter fallback for anyone who
+> can't run the Node.js build. Removal tracked as a follow-up; the
+> multi-doc scrub (handbook, architecture, README, CLAUDE.md) is out of
+> scope for Phase 11.
+
 Phase 7 T5 (Decision §2). Folded into `rag/` as a dev-only extra so
 production Docker images stay slim.
 
