@@ -137,6 +137,30 @@ def build_heading_path(block, outline_tree):
 | 5 | **历史 batch 修复策略**: 已入库的 745 docs 是否需要 re-process? 还是新 batch 修即可 (历史 chunk 已在 Qdrant 里, 重处理需触发 T8-3b ingestion smoke) | P2 | EKRS (决定 re-ingest 策略) |
 | 6 | **schema 校验**: doc-to-md 端 `DocumentBlockIR` schema 应将 `heading_path: Optional[List[str]]` 标记为 "应该被填充" (warning if None for text blocks where outline exists) | P3 | doc-to-md |
 
+## 已裁决项 (user 2026-07-30)
+
+### Q1 (doc-type classifier 字段): 方案 B — ingest 时基于 source filename 推断
+
+不新增 `metadata.scope_classifier` 字段。在 pipeline 增加 `_classify_doc_type(source_filename: str) -> str` 静态函数 + 可配置映射规则 (e.g. `r"^GB[/-T]"` → national_standard, `r"^SA-"` → project_spec)。映射规则可独立调整, 不重新部署 doc-to-md。
+
+执行时机: heading_path 修复验证通过后, Phase 12 单独 task (不捆绑本轮修复)。
+
+### Q5 (历史 745 docs re-ingest): 必须执行, 三段式 (修复 → 验证 → 决策 → 执行)
+
+**触发条件 (4 验证标准全过才执行)**:
+1. 30-doc sample: ≥80% blocks non-empty heading_path
+2. chunker output: ≥50% chunks `scope_path != []`
+3. 50-case golden set: 全过
+4. T10b-2 trigger re-test: cond#1 heading-less % 从 100% 降到 < 50%
+
+**执行方式**: 批量 re-ingest 脚本按 doc_hash 列表逐文档重新摄取, 触发 Qdrant 重建 (upsert 覆盖) + FTS re-sync。
+
+**风险窗口**: re-ingest 期间 Qdrant + FTS5 索引变更, 外部查询可能读到中间状态。**低流量窗口执行**, 提前通过 CHANGELOG / 手册通知。
+
+**验收**: re-ingest 后跑 golden set 全量 + T10b-2 重测, 0 退化。
+
+执行时机: heading_path 修复 + Q1 doc-type classifier 落地后, Phase 12 独立步骤。
+
 ## 触发本报告的工作
 
 - Plan: `docs/superpowers/plans/2026-07-28-phase10-broad-spectrum-retrieval.md` §T10b-2
