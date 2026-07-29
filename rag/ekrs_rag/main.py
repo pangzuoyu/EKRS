@@ -108,6 +108,14 @@ _EVENT_SCHEMAS = {
     "callback_best_effort_failed": {"doc_hash", "version", "rag_status", "error"},
     # Phase 10 T10a-2: FTS ↔ Qdrant drift detector.
     "fts_consistency_drift": {"drift_count"},
+    # Phase 10 T10a-7: FTS pipeline-side audit events. ``fts_synced``
+    # emitted by ``pipeline.ingest`` after Step 5.6 Qdrant write (T10a-2
+    # already had the emit code; T10a-7 registered the schema).
+    # ``fts_searched`` emitted by ``EKRSRetriever.retrieve`` after RRF
+    # fusion when FTS is configured (with FusionStats fields).
+    # Event count: 20 → 22.
+    "fts_synced": {"doc_hash", "version", "chunks_written"},
+    "fts_searched": {"vector_hits", "fts_hits", "both_hits"},
 }
 
 
@@ -231,8 +239,13 @@ async def lifespan(app: FastAPI):
 
         # Phase 2b: retriever (no longer takes embedder — qdrant.search
         # handles embedding internally via injected EmbeddingService).
+        # Phase 10 T10a-7: also pass audit_writer so retriever emits
+        # ``fts_searched`` after each RRF fusion (with FusionStats).
         if _qdrant is not None:
-            _retriever = EKRSRetriever(qdrant=_qdrant)
+            _retriever = EKRSRetriever(
+                qdrant=_qdrant,
+                audit_writer=_audit_writer,
+            )
             app.state.retriever = _retriever
             _pipeline = IngestionPipeline(
                 _qdrant,

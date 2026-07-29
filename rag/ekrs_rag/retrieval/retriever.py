@@ -52,11 +52,17 @@ class EKRSRetriever:
         self,
         qdrant: QdrantManager,
         fts: Optional["object"] = None,  # type: ignore[type-arg]  # FTSManager | None
+        audit_writer: Optional["object"] = None,  # type: ignore[type-arg]  # AuditWriter | None
     ) -> None:
         # ``fts`` is duck-typed (needs ``search_with_payload(query)``). Using a
         # forward-reference avoids a circular import with FTSManager.
+        # ``audit_writer`` (Phase 10 T10a-7) is duck-typed (needs ``.write()``);
+        # it may also be the shared AuditLogger base if a future caller
+        # wires a non-writer. ``None`` (default) preserves the Phase 9
+        # byte-level baseline — no audit emit.
         self._qdrant = qdrant
         self._fts = fts
+        self._audit_writer = audit_writer
 
     async def retrieve(
         self,
@@ -146,6 +152,21 @@ class EKRSRetriever:
         # fusion_stats: only populated when FTS was active (R4 invariant —
         # fts=None path is byte-level Phase 9 → fusion_stats=None).
         result_fusion_stats: Optional[FusionStats] = fusion_stats if self._fts is not None else None
+
+        # Phase 10 T10a-7: emit ``fts_searched`` audit event when FTS is
+        # configured (i.e. RRF actually ran). Audit emit is best-effort —
+        # a failing write must not propagate to the retriever caller
+        # (parent §204 "审计永远不阻塞业务").
+        if self._audit_writer is not None and self._fts is not None and result_fusion_stats is not None:
+            try:
+                self._audit_writer.write(  # type: ignore[attr-defined]
+                    "fts_searched",
+                    vector_hits=result_fusion_stats.vector_hits,
+                    fts_hits=result_fusion_stats.fts_hits,
+                    both_hits=result_fusion_stats.both_hits,
+                )
+            except Exception as audit_err:
+                logger.warning("fts_searched_audit_emit_failed: %s", audit_err)
 
         logger.debug(
             "Retrieved %d chunks (fts=%s), scope=%s",

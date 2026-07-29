@@ -136,6 +136,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
   T10c 触发条件 (parent §6.1): 决策数据 3/3 满, 不强制触发
   cross-encoder; T10c 留待后续 plan 评估. 无新 tag
   (`phase10` 留给 T10a-7 closure).
+- **Audit events `fts_synced` + `fts_searched` registration**
+  (T10a-7, Phase 10 closure): wires the FTS pipeline-side audit
+  writes that were already in place at T10a-2/T10a-4 to the schema
+  registry. `fts_synced` schema `{doc_hash, version, chunks_written}`
+  registered for the `pipeline.ingest()` Step 5.6 emit (already in
+  code); `fts_searched` schema `{vector_hits, fts_hits, both_hits}`
+  registered for the new retriever-side emit. `EKRSRetriever` gained
+  `audit_writer: Optional[AuditWriter] = None` kwarg (mirrors Phase
+  5.5 E DI pattern); `audit_writer=None` preserves Phase 9 byte-level
+  (no emit). When FTS is configured and `audit_writer` is set, the
+  retriever emits `fts_searched` after RRF fusion with `FusionStats`
+  fields consumed directly from T10a-3 `reciprocal_rank_fusion`.
+  Emit is **best-effort** — `try/except` isolates write failures so
+  audit disk-full / schema-mismatch never blocks retrieval (parent
+  §204 "审计永远不阻塞业务"). `main.py` lifespan wires
+  `_audit_writer` into `EKRSRetriever(qdrant=..., audit_writer=...)`
+  via Phase 5.5 E DI pattern (no module-global `get_writer()` —
+  avoids Phase 5.5 E migration rollback). **Event count 20 → 22**.
+  Parent plan §204 explicitly closes: these events do NOT enter the
+  `IngestionOutcome` enum — they are intermediate signals, not
+  ingestion terminal states. 14 unit tests in
+  `tests/unit/test_audit_event_coverage_t10a7.py` (8 in
+  Section 4 schema validation + 6 in retriever-emit). T10a-7
+  closes Phase 10: full `phase10` tag force-moved to T10a-7 commit
+  (per parent §111 annotated-tag force-move to closure commit).
 - **`--mode offline` for production first-deploy ingestion**
   (`scripts/live_stress_60.py`): 3s pace, 2 retries with 2s/4s backoff,
   180s status timeout, 3s poll interval, no `_r<run_id>` suffix (relies
@@ -274,6 +299,124 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
   adjudication notes (Karpathy LLM Wiki vs QMD vs MinerU synthesis).
   Filed at Phase 9 boundary so subsequent code work can pull from
   them without orphaning the planning artifacts.
+
+## [phase10] - 2026-07-29
+
+**Tag**: `phase10` (annotated, force-moved to T10a-7 closure commit per
+parent plan §111). **Version**: 0.0.5 → 0.1.0 (minor bump — Phase 10
+introduces new retrieval capability per Keep-a-Changelog). **Phase 10
+delivered as 8 tasks (T10a-1..T10a-7 + T10b-1)** all under the broad-
+spectrum-retrieval plan
+`docs/superpowers/plans/2026-07-28-phase10-broad-spectrum-retrieval.md`.
+
+**Sub-tag**: `phase10.1` stays locked at `1c44eee` (T10b-1 do-not-move).
+This release covers T10a-1..7. T10b-2 (heading-less 上限) /
+T10b-3 (强信号短路) / T10c (cross-encoder rerank) remain deferred —
+decision data collected in T10a-6 (3/3 BM25 identifier recall@1); no
+cross-encoder trigger per parent §6.1.
+
+### Added — T10a-1 (BM25 keyword retrieval)
+
+`FTSManager` (SQLite FTS5 mirror of Qdrant payload) — see [Unreleased]
+above for full description. 30 unit + integration tests. Path
+`/app/rag/fts.sqlite`, sync `sqlite3` with `check_same_thread=False`.
+Tokenizer `unicode61 remove_diacritics 2`. Schema 7 columns with
+`payload_json UNINDEXED`. `generate_chunk_id` owner (T10a-5 reader).
+
+### Added — T10a-2 (FTS pipeline sync + drift)
+
+`IngestionPipeline.ingest()` Step 5.6 paired-write Qdrant + FTS with
+`replace_doc` (atomic delete+upsert for re-ingest idempotency).
+`FTSManager.count_active` + `QdrantManager.count_points` + 5min
+`ConcurrencyChecker` background (detect-only, never auto-repair).
+Event count 19 → 20 (`fts_consistency_drift`). 15 tests. `fts=None`
+kwarg keeps Phase 9 baseline byte-level.
+
+### Added — T10a-3 (RRF pure function + FusionStats)
+
+`rag/ekrs_rag/retrieval/rank_fusion.py` ships
+`reciprocal_rank_fusion(ranked_lists, key_fn, k=60) -> (fused_results,
+FusionStats)` — R2 pure function, deterministic. `FusionStats` frozen
+dataclass (`vector_hits`/`fts_hits`/`both_hits`) consumed by T10a-7
+audit emit. 17 unit tests cover empty/single/dual/N=3 lists, k param,
+duplicate-key semantics, set-arithmetic invariant, frozen enforcement.
+
+### Added — T10a-4 (Retriever RRF integration)
+
+`EKRSRetriever.async retrieve()` with `fts: FTSManager | None = None`
+kwarg. `asyncio.gather(..., return_exceptions=True)` parallel vector +
+FTS with FTS exception isolation (log warning + degrade to vector-
+only). `RetrievalResult.fusion_stats: Optional[FusionStats]`. RRF key
+`{doc_hash}:{source_block_ids[0]}` (T10a-5 → `chunk_id`). 18 tests.
+
+### Added — T10a-5 (chunk_id round-trip)
+
+`QdrantManager.upsert_chunks` writes `chunk_id={doc_hash[:8]}-{idx:04d}`
+into Qdrant payload via `FTSManager.generate_chunk_id`. `Chunk.chunk_id:
+Optional[str] = None` (legacy preserved). `FTSManager.get_block_id_by_chunk_id`
+new (inverse of T10a-1 `get_chunk_id`). Retriever `key_fn` switches to
+`c.chunk_id or fallback`. **Naming-space coexistence** (parent §[M2]):
+`block_id` (UUID) + `source_block_ids` (list) preserved; `chunk_id` is
+parallel. 13 tests.
+
+### Added — T10a-6 (Golden regression + BM25 identifier recall@1)
+
+50-case golden set regression (208 pass 0 退化). 4 BM25-only identifier
+recall@1 smoke (`A312-TP316` / `GB/T 12459` / `1.6MPa`): **3/3 = 1.0**.
+T10c cross-encoder decision data collected; trigger condition not met.
+
+### Added — T10a-7 (Audit events fts_synced + fts_searched)
+
+`main.py` `_EVENT_SCHEMAS` registers both events (count 20 → 22):
+- `fts_synced {doc_hash, version, chunks_written}` — emitted by
+  `pipeline.ingest()` after Step 5.6 FTS write (parent §T10a-7 line 32
+  acceptance).
+- `fts_searched {vector_hits, fts_hits, both_hits}` — emitted by
+  `EKRSRetriever.retrieve()` after RRF (T10a-3 `FusionStats` fields
+  consumed directly). `EKRSRetriever.audit_writer` kwarg (DI pattern;
+  `None` = Phase 9 byte-level). Best-effort emit
+  (`try/except` isolation — audit never blocks retrieval, parent §204).
+`main.py` lifespan injects `_audit_writer` into `_retriever = EKRSRetriever(...)`.
+Both audit test files cover schema registration, retriever emit, and
+fusion-stats field correctness. 14 unit tests + 2 Phase 6A regression
+update (count 20 → 22, names `fts_synced` + `fts_searched`).
+**IngestionOutcome enum NOT extended** (parent §204 explicit close;
+these are intermediate signals, not ingestion terminal states).
+
+### Changed — Phase 10
+
+- **`pipeline.py` Step 5.5 → 5.6**: FTS sync added between Qdrant
+  upsert and outcome emit. FTS failure → warning + continue
+  (Qdrant is truth-of-record; drift detected by T10a-2
+  `ConcurrencyChecker`).
+- **`retrieval/retriever.py`**: `retrieve()` → `async def`; constructor
+  gains `fts` and `audit_writer` kwargs (both `None`-default preserve
+  Phase 9 byte-level). RRF key_fn uses `chunk_id` first then fallback.
+- **`retrieval/qdrant_client.py`**: payload gains `chunk_id` field.
+  Generated by EKRS-side during upsert (not by IR parser).
+- **`shared/ekrs_shared/models.py`**: `Chunk.chunk_id: Optional[str]`.
+- **22 audit event schemas** (was 20): +2 FTS events at T10a-7.
+
+### Fixed — Phase 10
+
+- **chunker deep-nesting token-overflow** (T10b-1, in `phase10.1`
+  sub-tag): Boundary 2 + Boundary 3 synchronized via
+  `_route_accumulated_group` helper; 0 budget violations on 60-doc
+  stress; p99=155µs vs Phase 8 baseline 279µs (-44%).
+
+### Notes
+
+- **`phase10` tag force-moved** to T10a-7 closure commit (parent
+  §111); T10a-2 has a transient T10a-2 commit under the same tag,
+  replaced by force-move. Old tag SHA recorded in
+  `~/.claude/projects/.../memory/phase10-closure.md`.
+- **Caveats / known limits**:
+  - FTS5 `unicode61 remove_diacritics 2` does not tokenize CJK
+    (CJK-as-run). Phase 6+ decision: add `jieba` tokenizer optionally
+    OR live with the limitation. Engineering identifiers (Latin+digit+
+    连字符/斜杠/点) recall cleanly (T10a-6 3/3 = 1.0).
+  - `AuditIndex` full rebuild is O(current file only) — does not
+    scan `.gz` history. Cross-history replay is deferred.
 
 ## [phase8] - 2026-07-24
 

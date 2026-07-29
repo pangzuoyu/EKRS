@@ -46,8 +46,9 @@ def test_event_schemas_exclude_phase6a_fields_from_required_set():
     # Phase 6A expanded the count from 15 to 16 by registering
     # `document_metadata_failed`. Doc-to-MD integration (T6/T9) added 3
     # callback best-effort events, bringing the count to 19. Phase 10 T10a-2
-    # added 1 drift event (fts_consistency_drift), count → 20.
-    assert len(_EVENT_SCHEMAS) == 20, "Event count is 20 after Phase 10 T10a-2"
+    # added 1 drift event (fts_consistency_drift), count → 20. Phase 10
+    # T10a-7 added 2 FTS events (fts_synced + fts_searched), count → 22.
+    assert len(_EVENT_SCHEMAS) == 22, "Event count is 22 after Phase 10 T10a-7"
 
     # No event's required schema should list the 2 optional Phase 6A fields.
     for ev, required in _EVENT_SCHEMAS.items():
@@ -62,9 +63,10 @@ def test_event_schemas_exclude_phase6a_fields_from_required_set():
 
 
 def test_event_names_are_unchanged():
-    """Audit event name set is frozen at 20 (15 pre-6A + document_metadata_failed
-    added by Phase 6A T2 + 3 callback events added by doc-to-md T6/T9 + fts_consistency_drift
-    added by Phase 10 T10a-2)."""
+    """Audit event name set is frozen at 22 (15 pre-6A + document_metadata_failed
+    added by Phase 6A T2 + 3 callback events added by doc-to-md T6/T9 +
+    fts_consistency_drift added by Phase 10 T10a-2 + fts_synced + fts_searched
+    added by Phase 10 T10a-7)."""
     from ekrs_rag.main import _EVENT_SCHEMAS
     expected_names = {
         "endpoint_started", "endpoint_completed",
@@ -76,6 +78,7 @@ def test_event_names_are_unchanged():
         "document_metadata_failed",
         "callback_url_blocked", "callback_auth_missing", "callback_best_effort_failed",
         "fts_consistency_drift",
+        "fts_synced", "fts_searched",
     }
     assert set(_EVENT_SCHEMAS) == expected_names
 
