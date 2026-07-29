@@ -165,6 +165,70 @@ class FTSManager:
         self._conn.commit()
         return cur.rowcount
 
+    def count_active(self) -> int:
+        """Count rows with status='active' (excludes status='illegal').
+
+        Used by consistency checker to compare with Qdrant total count.
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM blocks_fts WHERE status = 'active'"
+        ).fetchone()
+        return int(row[0])
+
+    def replace_doc(
+        self,
+        doc_hash: str,
+        chunks: list[Chunk],
+        *,
+        version: int,
+    ) -> int:
+        """Atomically replace all FTS rows for a doc_hash.
+
+        delete_by_doc + bulk upsert. Re-ingest of the same doc_hash produces
+        the same row count (no duplicates) — T10a-2 H4 idempotency fix.
+        FTS5 virtual tables have no PRIMARY KEY constraint; without delete
+        first, repeated upsert would create duplicate rows.
+
+        Args:
+            doc_hash: document identifier (matches Chunk.doc_hash)
+            chunks: chunks to insert after wiping stale rows
+            version: document version (stored in payload_json for diagnostics)
+
+        Returns:
+            number of rows written
+        """
+        self.delete_by_doc(doc_hash)
+        import json as _json
+
+        written = 0
+        for idx, chunk in enumerate(chunks):
+            chunk_id = FTSManager.generate_chunk_id(doc_hash, idx)
+            block_id = chunk.source_block_ids[0] if chunk.source_block_ids else ""
+            scope_str = " ".join(chunk.scope_path) if chunk.scope_path else ""
+            payload = {
+                "chunk_id": chunk_id,
+                "doc_hash": chunk.doc_hash,
+                "version": chunk.version,
+                "payload_version": chunk.payload_version,
+            }
+            self._conn.execute(
+                "INSERT INTO blocks_fts "
+                "(chunk_id, block_id, text, scope_path, status, doc_hash, payload_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    chunk_id,
+                    block_id,
+                    chunk.text,
+                    scope_str,
+                    "active",
+                    chunk.doc_hash,
+                    _json.dumps(payload, ensure_ascii=False),
+                ),
+            )
+            written += 1
+        self._conn.commit()
+        return written
+
     def get_chunk_id(self, block_id: str) -> Optional[str]:
         """Bidirectional lookup: block_id → chunk_id (T10a-5 invariant)."""
         row = self._conn.execute(

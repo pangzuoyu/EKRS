@@ -106,6 +106,8 @@ _EVENT_SCHEMAS = {
     "callback_url_blocked": {"doc_hash", "version", "reason"},
     "callback_auth_missing": {"doc_hash", "version"},
     "callback_best_effort_failed": {"doc_hash", "version", "rag_status", "error"},
+    # Phase 10 T10a-2: FTS ↔ Qdrant drift detector.
+    "fts_consistency_drift": {"drift_count"},
 }
 
 

@@ -21,6 +21,7 @@ from tenacity import (
 from ekrs_shared.models import IngestionNotification
 
 from ..core.config import settings
+from ..retrieval.fts_manager import FTSManager
 from ..retrieval.qdrant_client import QdrantManager
 from ..security import (
     CallbackAuthMissingError,
@@ -74,12 +75,15 @@ class IngestionPipeline:
         storage_path: Path,
         parser_token: str,
         audit_writer: AuditEmitter | None = None,
+        fts: FTSManager | None = None,
     ) -> None:
         self._qdrant = qdrant
         self._shared_storage_root = Path(storage_path).resolve()
         self._parser_token = parser_token
         # D5: optional injection; if None, audit emits are skipped (test fixtures).
         self._audit_writer = audit_writer
+        # Phase 10 T10a-2: FTS sync. None = Phase 9 baseline (no FTS write).
+        self._fts = fts
 
     async def ingest(self, notification: IngestionNotification) -> IngestionOutcome:
         """Run full ingestion pipeline for a parser notification.
@@ -188,6 +192,27 @@ class IngestionPipeline:
                 logger.warning(
                     "delete_old_versions_failed: doc=%s v=%d err=%s",
                     doc_hash, version, e,
+                )
+
+        # Step 5.6: Phase 10 T10a-2 — FTS sync write (paired with Qdrant).
+        # Qdrant is truth-of-record; FTS failure does NOT fail ingestion.
+        # Drift (if any) is detected by ConsistencyChecker (T10a-2).
+        if self._fts is not None:
+            try:
+                self._fts.replace_doc(doc_hash, chunks, version=version)
+                if self._audit_writer is not None:
+                    # fts_synced schema registered in T10a-7; before that,
+                    # write() returns False silently. Emit call stays
+                    # stable across T10a-7.
+                    self._audit_writer.write(
+                        "fts_synced",
+                        doc_hash=doc_hash, version=version,
+                        chunks_written=count,
+                    )
+            except Exception as fts_err:
+                logger.warning(
+                    "fts_sync_failed_after_qdrant: doc=%s v=%d err=%s",
+                    doc_hash, version, fts_err,
                 )
 
         # Step 6: success

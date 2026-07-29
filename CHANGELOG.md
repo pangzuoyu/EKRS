@@ -29,6 +29,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
   (`A312-TP316` / `GB-T 12459` / `1.6MPa`). T10a-1 boundary: schema +
   CRUD + BM25 归一化 only; pipeline ingest wiring = T10a-2,
   retriever fusion = T10a-4, audit events = T10a-7.
+- **Pipeline FTS sync + consistency drift detection**
+  (T10a-2, Phase 10): `IngestionPipeline.ingest()` writes FTS rows
+  paired with Qdrant upsert (Step 5.6, FTS failure does NOT fail
+  ingestion — Qdrant is truth-of-record). New `FTSManager.replace_doc()`
+  provides atomic delete-then-upsert for re-ingest idempotency (FTS5
+  virtual tables have no PRIMARY KEY; simple upsert would create
+  duplicate rows on parser re-deliveries). New
+  `FTSManager.count_active()` excludes `status='illegal'` for drift
+  comparison. New `QdrantManager.count_points()` delegates to Qdrant
+  1.11+ `count()` API. New `ConcurrencyChecker` background task
+  (5min interval, env `INDEX_CONSISTENCY_INTERVAL_S`) compares
+  `fts.count_active()` vs `qdrant.count_points()`; on drift emits
+  `fts_consistency_drift` audit event and increments
+  `ekrs_index_consistency_drift_total` counter.
+  **Detect-only — never auto-repairs** (parent plan §T10a-2 mandate,
+  avoids accidental deletion on transient FTS write lag).
+  `fts_synced` audit emit call site is in place but schema registration
+  is deferred to T10a-7. New `_EVENT_SCHEMAS` entry: `fts_consistency_drift`
+  (event count 19 → 20). 10 unit + 5 integration tests cover: paired
+  Qdrant+FTS writes, FTS failure non-blocking semantics, re-ingest
+  idempotency (3x replay produces 1 row, not 3), drift detection +
+  audit/metric emit, count failure swallowing. Pipeline constructor
+  gained `fts: FTSManager | None = None` kwarg — backward compatible
+  (existing callers work via default None, byte-level equal to Phase 9
+  baseline).
 - **`--mode offline` for production first-deploy ingestion**
   (`scripts/live_stress_60.py`): 3s pace, 2 retries with 2s/4s backoff,
   180s status timeout, 3s poll interval, no `_r<run_id>` suffix (relies

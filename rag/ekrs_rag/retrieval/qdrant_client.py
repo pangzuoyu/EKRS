@@ -242,6 +242,19 @@ class QdrantManager:
             _emit_qdrant_failure("write", self._collection_name, exc)
             raise
 
+    def count_points(self) -> int:
+        """Return total point count in the collection.
+
+        Used by T10a-2 ConsistencyChecker to compare against FTS active
+        count for drift detection. Delegates to qdrant-client Count API
+        (Qdrant 1.11+). Caller handles exceptions.
+        """
+        try:
+            return int(self._client.count(collection_name=self._collection_name).count)
+        except Exception as exc:
+            _emit_qdrant_failure("read", self._collection_name, exc)
+            raise
+
     def get_ingestion_status(self, doc_hash: str) -> Optional[IngestionStatus]:
         """Query Qdrant for ingestion status of a document."""
         try:
