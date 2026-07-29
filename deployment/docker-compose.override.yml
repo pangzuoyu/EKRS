@@ -1,0 +1,21 @@
+services:
+  rag:
+    build:
+      args:
+        # Use the cached Chinese-mirror Python base image to avoid
+        # registry-1.docker.io timeouts on this network.
+        PYTHON_BASE_IMAGE: docker.m.daocloud.io/library/python:3.11-slim
+        # Route pip through a working mirror (Phase 8 T8-3a pattern).
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+  dev_ui_v2:
+    build:
+      args:
+        # Same Chinese-mirror pattern as rag for the Node + nginx base
+        # images. docker-compose.override.yml is the single source of
+        # truth for network-restricted dev machines.
+        NODE_BASE_IMAGE: docker.m.daocloud.io/library/node:20-alpine
+        NGINX_BASE_IMAGE: docker.m.daocloud.io/library/nginx:1.27-alpine
+  prometheus:
+    # Skip prometheus — the upstream `prom/prometheus:latest` pull times
+    # out on this network. UI and RAG API work fine without it.
+    profiles: ["never"]

@@ -89,6 +89,31 @@ services:
       timeout: 5s
       retries: 3
 
+  # Phase 11 T11-4: dev_ui_v2 React SPA. Sits behind the same compose
+  # network as `rag`, so nginx inside the container can resolve `rag:8000`
+  # directly. Host port 5173 matches the Vite dev server convention so
+  # `make dev` users get a consistent URL even when switching between
+  # `npm run dev` and the container.
+  dev_ui_v2:
+    build:
+      context: ../dev_ui_v2
+      dockerfile: Dockerfile
+      args:
+        # Same pattern as `rag.PYTHON_BASE_IMAGE` — docker-compose.override.yml
+        # overrides these for restricted-network dev machines.
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-node:20-alpine}
+        NGINX_BASE_IMAGE: ${NGINX_BASE_IMAGE:-nginx:1.27-alpine}
+    ports:
+      - "5173:80"
+    depends_on:
+      rag:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:80/"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
 volumes:
   qdrant_data:
   parsed_lib:

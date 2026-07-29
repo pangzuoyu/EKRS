@@ -1,0 +1,39 @@
+node_modules
+dist
+dist-ssr
+coverage
+.vite
+.cache
+.eslintcache
+
+# Tests live at tests/ — vitest + playwright + e2e specs are not part of
+# the production image. MSW browser worker is generated locally for E2E.
+# Exception: src/main.tsx dynamically imports tests/mocks/browser behind
+# import.meta.env.DEV. TypeScript still type-checks the dynamic import
+# path, so the file must be in the build context. Vite tree-shakes the
+# import in production (no runtime fetch). Keep just tests/mocks/.
+tests
+!tests/mocks/
+tests-results
+playwright-report
+.vitest-cache
+
+# VCS + IDE + OS
+.git
+.gitignore
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+
+# Local dotfiles
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs
+
+# Build artifacts that should be re-built inside the image
+*.tsbuildinfo
