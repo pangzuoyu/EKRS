@@ -98,10 +98,15 @@ class EKRSRetriever:
         # active_scope filter on fused results (R4: scope_priority applied
         # AFTER RRF, per parent plan §Iron Rules).
         if self._fts is not None:
-            # RRF fusion (T10a-4). T10a-5 will replace key_fn with chunk_id.
+            # RRF fusion (T10a-4). T10a-5: key_fn prefers chunk_id (set by
+            # QdrantManager.upsert_chunks); falls back to doc_hash+block_id
+            # for legacy chunks (pre-T10a-5 ingestion, no chunk_id in payload).
+            def _chunk_key(c: Chunk) -> str:
+                return c.chunk_id or f"{c.doc_hash}:{c.source_block_ids[0]}"
+
             fused, fusion_stats = reciprocal_rank_fusion(
                 [vector_chunks, fts_chunks],  # type: ignore[arg-type]
-                key_fn=lambda c: f"{c.doc_hash}:{c.source_block_ids[0]}",
+                key_fn=_chunk_key,
             )
             fused_chunks: Sequence[Chunk] = [c for c, _ in fused]
             fused_scores: List[float] = [s for _, s in fused]
@@ -170,6 +175,7 @@ class EKRSRetriever:
             version=payload.get("version", 0),
             page_numbers=payload.get("page_numbers", []),
             numeric_hints=[],
+            chunk_id=payload.get("chunk_id"),  # T10a-5: FTS↔Qdrant round-trip
         )
 
     @staticmethod

@@ -279,6 +279,20 @@ class FTSManager:
         ).fetchone()
         return row[0] if row else None
 
+    def get_block_id_by_chunk_id(self, chunk_id: str) -> Optional[str]:
+        """Inverse lookup: chunk_id → block_id (T10a-5 NEW).
+
+        Complements :meth:`get_chunk_id` for full FTS↔Qdrant round-trip.
+        Returns the first matching ``block_id`` (FTS row is 1-chunk→1-block;
+        multi-block merged chunks carry the first source block_id here; the
+        full list is in ``source_block_ids`` on the Qdrant payload).
+        """
+        row = self._conn.execute(
+            "SELECT block_id FROM blocks_fts WHERE chunk_id = ? LIMIT 1",
+            (chunk_id,),
+        ).fetchone()
+        return row[0] if row else None
+
     def close(self) -> None:
         if self._conn:
             self._conn.close()

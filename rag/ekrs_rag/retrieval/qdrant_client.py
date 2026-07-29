@@ -19,6 +19,8 @@ from typing import Optional
 
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ApiException, UnexpectedResponse
+
+from ekrs_rag.retrieval.fts_manager import FTSManager
 from tenacity import (
     retry,
     retry_if_not_exception_type,
@@ -197,12 +199,21 @@ class QdrantManager:
             encoded = self._embedding_service.encode(texts)
 
             points = []
-            for chunk, vec in zip(chunks, encoded):
+            for idx, (chunk, vec) in enumerate(zip(chunks, encoded)):
                 point_id = str(uuid.uuid5(
                     uuid.NAMESPACE_DNS,
                     f"{chunk.doc_hash}:{chunk.version}:{chunk.source_block_ids}",
                 ))
                 sparse_qdrant = self._embedding_service.to_qdrant_sparse(vec.sparse)
+                # T10a-5: EKRS-side chunk_id for FTS↔Qdrant round-trip.
+                # Format: `{doc_hash[:8]}-{chunk_index:04d}` — deterministic
+                # from (doc_hash, chunk_index), matches FTSManager.generate_chunk_id.
+                # chunk.chunk_id defaults to None for legacy chunks; in that case
+                # we generate it here at upsert time so the Qdrant payload always
+                # carries it.
+                chunk_id = chunk.chunk_id or FTSManager.generate_chunk_id(
+                    chunk.doc_hash, idx
+                )
                 payload = {
                     "text": chunk.text,
                     "scope_path": chunk.scope_path,
@@ -211,6 +222,7 @@ class QdrantManager:
                     "doc_hash": chunk.doc_hash,
                     "version": chunk.version,
                     "page_numbers": chunk.page_numbers,
+                    "chunk_id": chunk_id,
                 }
                 points.append(models.PointStruct(
                     id=point_id,

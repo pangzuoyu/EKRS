@@ -196,6 +196,12 @@ class Chunk(BaseModel):
     # without bumping the on-disk document version. Default=1 preserves
     # legacy behavior; chunker passes 2 to force index rebuild on refactor.
     payload_version: int = 1
+    # Phase 10 T10a-5: EKRS-side generated chunk identifier, format
+    # `{doc_hash[:8]}-{chunk_index:04d}`. Written to Qdrant payload and
+    # FTS row for bidirectional round-trip (FTS↔Qdrant). Default None
+    # = legacy chunk (pre-T10a-5 ingestion); retriever falls back to
+    # `f"{doc_hash}:{source_block_ids[0]}"` for legacy chunks.
+    chunk_id: Optional[str] = None
 
 
 # --- API request/response models ---

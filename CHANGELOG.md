@@ -104,6 +104,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
   `async def`/`AsyncMock`. **Audit `fts_searched` event = T10a-7**,
   consumes `FusionStats` directly. No new tag (phase10 reserved for
   T10a-7 closure).
+- **chunk_id EKRS-side generation + FTS↔Qdrant round-trip**
+  (T10a-5, Phase 10): `QdrantManager.upsert_chunks` now writes
+  `chunk_id` into the Qdrant payload for every chunk. Format
+  `{doc_hash[:8]}-{chunk_index:04d}` via `FTSManager.generate_chunk_id`
+  (T10a-1 generator, no schema change). `Chunk` model gains
+  `chunk_id: Optional[str] = None` (default None preserves legacy
+  ingestion). New `FTSManager.get_block_id_by_chunk_id(chunk_id)` is
+  the inverse of T10a-1's `get_chunk_id(block_id)`; round-trip covered
+  by `test_round_trip_block_id_and_chunk_id`. Retriever key_fn
+  switches from `f"{doc_hash}:{source_block_ids[0]}"` (T10a-4
+  fallback) to `c.chunk_id` with `or` fallback for legacy chunks —
+  `test_retrieve_key_fn_uses_chunk_id_when_present` /
+  `_falls_back_to_doc_hash_for_legacy_chunks`. **Naming-space
+  coexistence** (parent §[M2]): `block_id` (UUID from ir_parser) and
+  `source_block_ids` (list) are preserved; `chunk_id` is a parallel
+  field, never a replacement. 7 unit + 3 IMPROVE boundary + 3 FTS
+  bidirectional tests pass; full suite 812 pass 0 regression; mypy
+  clean on touched files. **Audit `fts_synced`/`fts_searched`
+  fields = T10a-7** (event count 20→22 per plan). No new tag
+  (`phase10` reserved for T10a-7 closure).
 - **`--mode offline` for production first-deploy ingestion**
   (`scripts/live_stress_60.py`): 3s pace, 2 retries with 2s/4s backoff,
   180s status timeout, 3s poll interval, no `_r<run_id>` suffix (relies
