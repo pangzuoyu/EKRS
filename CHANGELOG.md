@@ -54,6 +54,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
   gained `fts: FTSManager | None = None` kwarg — backward compatible
   (existing callers work via default None, byte-level equal to Phase 9
   baseline).
+- **Reciprocal Rank Fusion pure function + `FusionStats` analytics**
+  (T10a-3, Phase 10): new module
+  `rag/ekrs_rag/retrieval/rank_fusion.py`. Exports `FusionStats` frozen
+  dataclass with three fields (`vector_hits` / `fts_hits` / `both_hits`)
+  for `T10a-7` audit event `fts_searched` to consume directly, and
+  `reciprocal_rank_fusion(ranked_lists, key_fn, k=60) -> (fused_results,
+  FusionStats)` — pure (R2) function with no I/O / state / side
+  effects, deterministic replay. RRF formula `score(d) = Σ_i 1/(k +
+  rank_i(d))`; ``rank_i(d)`` = best rank of d in list i (duplicates in
+  same sublist ignored after first occurrence). Tie-breaking is
+  insertion-order (first-appearance-wins). Supports arbitrary `N`
+  ranked lists; main path is `N=2` (vector + FTS) per parent plan
+  §T10a-3. `k=60` is the parent-plan-locked default (per
+  `broad-spectrum-retrieval-port-design §4.3`); tests use `k=10` or
+  `k=1` to verify fusion logic without 60x arithmetic slowdown. Caller
+  contract: ranked_lists[0]=vector, ranked_lists[1]=FTS (so FusionStats
+  fields have conventional semantics). 17 unit tests cover: empty /
+  single / dual / N=3 ranked lists, k parameter effect, duplicate keys
+  within sublists, key_fn exception propagation (R2 propagation
+  guarantee), FusionStats three-field set-arithmetic
+  (`vector_hits + fts_hits + both_hits == |unique keys union|`), and
+  frozen-dataclass enforcement. **Retriever wiring = T10a-4, audit
+  emit = T10a-7**. No new tag; `phase10.1` stays locked at `1c44eee`
+  (T10b-1 do-not-move); `phase10` reserved for T10a-7 closure.
 - **`--mode offline` for production first-deploy ingestion**
   (`scripts/live_stress_60.py`): 3s pace, 2 retries with 2s/4s backoff,
   180s status timeout, 3s poll interval, no `_r<run_id>` suffix (relies
