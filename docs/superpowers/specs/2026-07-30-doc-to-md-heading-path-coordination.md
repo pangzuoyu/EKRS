@@ -5,6 +5,18 @@
 **To**: doc-to-md 侧
 **Severity**: HIGH (阻塞 R4 / R7 实际效用)
 
+## EKRS-side schema contract (DRAFT, pending doc-to-md sign-off)
+
+详见 companion spec: [`2026-07-30-ekrs-expected-heading-path-schema.md`](2026-07-30-ekrs-expected-heading-path-schema.md)
+
+要点:
+- **Type**: `Optional[List[str]]` — 已存在于 `shared/ekrs_shared/models.py:27`
+- **Semantics**: heading hierarchy ONLY (root → leaf). doc-type classifier 是另一字段, 不归 `heading_path` 管 (§6 explicit warning)
+- **Ordering**: root first, leaf last
+- **Boundary case**: 嵌套 region 用 deepest enclosing heading
+- **Normalization**: doc-to-md 不 normalize, EKRS consumer 自己处理
+- **Verification**: 30-doc sample 期望 ≥80% blocks non-empty (现 0.1%); 50-case golden set 必须继续 pass
+
 ## TL;DR
 
 `doc-to-md/output/text/<doc_id>/data.jsonl` 中所有 block 的 `metadata.heading_path` 字段**几乎全部为 `None`** (99.9%, 抽样 1556 blocks / 20 docs)，即便 `outline.json` 显示该 doc 有完整多级 heading 树 (90% doc, 19–2070 headings)。
