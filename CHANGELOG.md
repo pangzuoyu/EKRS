@@ -124,6 +124,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
   clean on touched files. **Audit `fts_synced`/`fts_searched`
   fields = T10a-7** (event count 20→22 per plan). No new tag
   (`phase10` reserved for T10a-7 closure).
+- **Golden set 50 case 回归 + 3 工程标识符 BM25 recall@1 数据**
+  (T10a-6, Phase 10): 验证阶段, 不扩 case. 跑 `tests/golden_set/`
+  全集 = 208 pass (50 case 含参数化), 0 退化. 新增
+  `tests/unit/test_fts_identifier_recall.py` 4 测试: 测量
+  `A312-TP316` / `GB/T 12459` / `1.6MPa` 三个高价值工程标识符的
+  BM25-only recall@1, soft-assertion (不阻塞) + stdout log 决策数据
+  给 T10c cross-encoder 评估用. **结果: 3/3 recall@1=1** —
+  `unicode61 remove_diacritics 2` tokenizer 对 Latin+digit+连字符
+  /斜杠/点 标识符召回干净 (CJK run 是已知限制, 不在 T10a-6 范围).
+  T10c 触发条件 (parent §6.1): 决策数据 3/3 满, 不强制触发
+  cross-encoder; T10c 留待后续 plan 评估. 无新 tag
+  (`phase10` 留给 T10a-7 closure).
 - **`--mode offline` for production first-deploy ingestion**
   (`scripts/live_stress_60.py`): 3s pace, 2 retries with 2s/4s backoff,
   180s status timeout, 3s poll interval, no `_r<run_id>` suffix (relies
