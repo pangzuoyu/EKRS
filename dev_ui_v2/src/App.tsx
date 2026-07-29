@@ -1,51 +1,120 @@
 /**
- * Phase 11 T11-1 — App shell skeleton.
+ * Phase 11 T11-3 — App router shell.
  *
- * Minimal landing page that proves the stack works end-to-end:
- * - Renders without crashing (browser smoke test).
- * - Wires dark theme (study terminal style — Tier 2 polish).
+ * - Sidebar (left rail) with nav + admin key input + health dot
+ * - React Router 6 routes for the 4 views
+ * - ErrorBoundary wraps each route so a render crash is contained
+ *   to its view (white-screen-free)
  *
- * T11-3 will replace this with React Router routes for the 4 views:
- * Ingest / Constraints / Golden / Overlays. Keep this surface area
- * intentionally tiny so the scaffold acceptance test (build + preview)
- * stays focused on stack wiring, not feature surface.
+ * `useRouteError` is not yet wired because we use top-level ErrorBoundary
+ * per route — simpler than per-element boundaries + matches the dev_ui
+ * "one tab, one boundary" mental model.
  */
+import { Link, Route, Routes } from "react-router-dom";
+import { Sidebar } from "./components/Sidebar";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { IngestView } from "./views/IngestView";
+import { ConstraintsView } from "./views/ConstraintsView";
+import { GoldenView } from "./views/GoldenView";
+import { OverlaysView } from "./views/OverlaysView";
+
 export function App(): JSX.Element {
   return (
-    <main
-      style={{
-        minHeight: "100vh",
-        margin: 0,
-        padding: "2rem 3rem",
-        fontFamily:
-          '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif',
-        background: "#0e1116",
-        color: "#e6edf3",
-        colorScheme: "dark",
-      }}
-    >
-      <header style={{ marginBottom: "2rem" }}>
-        <h1 style={{ margin: 0, fontSize: "1.5rem", fontWeight: 600 }}>🛠️ EKRS Dev UI v2</h1>
-        <p
-          style={{
-            margin: "0.5rem 0 0",
-            color: "#7d8590",
-            fontSize: "0.875rem",
-          }}
-        >
-          Phase 11 scaffold — T11-1 stack + bundle budget CI gate.
-        </p>
-      </header>
-      <section
+    <div style={{ display: "flex", minHeight: "100vh" }}>
+      <Sidebar />
+      <main
         style={{
-          padding: "1rem 1.5rem",
-          background: "#161b22",
-          border: "1px solid #30363d",
-          borderRadius: "6px",
+          flex: 1,
+          padding: "2rem 2.5rem",
+          maxWidth: "1000px",
+          color: "#e6edf3",
         }}
       >
-        <p style={{ margin: 0 }}>Stack ready. T11-3 will add the 4 views.</p>
-      </section>
-    </main>
+        <Routes>
+          <Route
+            path="/"
+            element={
+              <ErrorBoundary>
+                <HomeRedirect />
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="/ingest"
+            element={
+              <ErrorBoundary>
+                <IngestView />
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="/constraints"
+            element={
+              <ErrorBoundary>
+                <ConstraintsView />
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="/golden"
+            element={
+              <ErrorBoundary>
+                <GoldenView />
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="/overlays"
+            element={
+              <ErrorBoundary>
+                <OverlaysView />
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="*"
+            element={
+              <ErrorBoundary>
+                <NotFound />
+              </ErrorBoundary>
+            }
+          />
+        </Routes>
+      </main>
+    </div>
+  );
+}
+
+function HomeRedirect(): JSX.Element {
+  return (
+    <div data-testid="home-view">
+      <h2 style={{ margin: "0 0 1rem" }}>Welcome</h2>
+      <p style={{ color: "#7d8590" }}>Pick a view from the sidebar to start.</p>
+      <ul style={{ marginTop: "1rem", listStyle: "none", padding: 0 }}>
+        <li style={{ margin: "0.4rem 0" }}>
+          <Link to="/ingest">📥 Ingest — trigger notifications + check status</Link>
+        </li>
+        <li style={{ margin: "0.4rem 0" }}>
+          <Link to="/constraints">🔍 Constraints — run three-gate queries</Link>
+        </li>
+        <li style={{ margin: "0.4rem 0" }}>
+          <Link to="/golden">📊 Golden — regression against the fixture</Link>
+        </li>
+        <li style={{ margin: "0.4rem 0" }}>
+          <Link to="/overlays">🧩 Overlays — provision overrides (placeholder)</Link>
+        </li>
+      </ul>
+    </div>
+  );
+}
+
+function NotFound(): JSX.Element {
+  return (
+    <div data-testid="not-found-view">
+      <h2 style={{ margin: "0 0 0.5rem" }}>404 — Not found</h2>
+      <p style={{ color: "#7d8590" }}>
+        That route doesn&apos;t exist. Use the sidebar to pick a view.
+      </p>
+    </div>
   );
 }

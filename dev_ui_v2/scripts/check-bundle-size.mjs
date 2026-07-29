@@ -35,6 +35,11 @@ try {
     const path = join(DIST, file);
     const raw = readFileSync(path);
     const gz = gzipSync(raw).length;
+    // Dev-only MSW worker chunk is excluded from the cap. It is a
+    // dynamically-imported code path in dev mode (vite/dev/test runs) —
+    // never fetched in production. Counting it would falsely flag the
+    // bundle for including test infrastructure.
+    if (file.includes("mocks") || file.includes("browser-")) continue;
     totalGzip += gz;
     if (gz > largestBytes) {
       largestBytes = gz;

@@ -16,6 +16,7 @@ import { App } from "./App";
 import { ApiClientProvider } from "./api/context";
 import { createApiClient } from "./api/client";
 import { getAdminKey } from "./lib/auth";
+import "./index.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -52,3 +53,11 @@ createRoot(rootEl).render(
     </QueryClientProvider>
   </StrictMode>,
 );
+
+// Optional MSW worker for dev / E2E. The dev-only guard means production
+// builds statically replace `import.meta.env.DEV` with `false`, eliminating
+// the dynamic import. The `mocks/browser` chunk remains on disk but is never
+// fetched — it is excluded from the bundle-size CI gate by name pattern.
+if (import.meta.env.DEV) {
+  void import("../tests/mocks/browser").then(({ startWorker }) => startWorker());
+}

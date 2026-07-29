@@ -1,0 +1,46 @@
+/**
+ * Phase 11 T11-3 — global stylesheet.
+ *
+ * Holds keyframes (Skeleton pulse) + base body reset. Imported once
+ * from `main.tsx`. Dark theme matches the App shell tokens.
+ */
+
+@keyframes ekrs-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  background: #0e1116;
+  color: #e6edf3;
+  color-scheme: dark;
+}
+
+button {
+  font-family: inherit;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  background: #0d1117;
+  color: #e6edf3;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 0.4rem 0.6rem;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: #58a6ff;
+}
