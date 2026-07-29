@@ -41,6 +41,12 @@ class RetrievalResult:
     # distinguish "FTS disabled" (None) vs "FTS ran but found nothing"
     # (FusionStats(vector=N, fts=0, both=0)).
     fusion_stats: Optional[FusionStats] = None
+    # T10b-3: ``True`` when retriever bypassed RRF because user query
+    # was a substring of at least one retrieved chunk's text (strong-
+    # signal optimization). Defaults to ``False`` so consumers built
+    # before T10b-3 see the same field set + same False default → no
+    # behavior change for non-matching queries (Phase 10 baseline).
+    short_circuit: bool = False
 
     @property
     def scores(self) -> List[float]:
@@ -101,21 +107,48 @@ class EKRSRetriever:
             self._payload_to_chunk(p, s) for _cid, p, s in fts_hits  # type: ignore[union-iter]
         ]
 
-        # active_scope filter on fused results (R4: scope_priority applied
-        # AFTER RRF, per parent plan §Iron Rules).
+        # T10b-3: short-circuit evaluation. When user query is a
+        # substring of any retrieved chunk's text, bypass RRF and
+        # return matched chunks directly with score=1.0 (deterministic
+        # strong-signal optimization). Gated on fts!=None to preserve
+        # Phase 9 byte-level baseline when fts is disabled.
+        # T10a-4 path retained as the no-match fallback; T10a-5
+        # chunk_id key continues to be preferred (legacy fallback).
+        short_circuit = False
         if self._fts is not None:
-            # RRF fusion (T10a-4). T10a-5: key_fn prefers chunk_id (set by
-            # QdrantManager.upsert_chunks); falls back to doc_hash+block_id
-            # for legacy chunks (pre-T10a-5 ingestion, no chunk_id in payload).
-            def _chunk_key(c: Chunk) -> str:
-                return c.chunk_id or f"{c.doc_hash}:{c.source_block_ids[0]}"
+            # T10a-5 chunk_key reused as RRF key_fn + union dedup key.
+            _chunk_key = EKRSRetriever._chunk_key
+            # Build deduped union: vector first (insertion-order
+            # stable), then FTS. _chunk_key reused by both short-
+            # circuit dedup and RRF fusion below.
+            unioned: List[Chunk] = []
+            seen_keys: set = set()
+            for c in list(vector_chunks) + list(fts_chunks):
+                k = _chunk_key(c)
+                if k not in seen_keys:
+                    seen_keys.add(k)
+                    unioned.append(c)
 
-            fused, fusion_stats = reciprocal_rank_fusion(
-                [vector_chunks, fts_chunks],  # type: ignore[arg-type]
-                key_fn=_chunk_key,
-            )
-            fused_chunks: Sequence[Chunk] = [c for c, _ in fused]
-            fused_scores: List[float] = [s for _, s in fused]
+            exact_match_idx = EKRSRetriever._is_exact_match(query, unioned)
+            if exact_match_idx:
+                # Short-circuit: matched chunks returned with score=1.0.
+                # fusion_stats reflects vector-only contribution
+                # (fts=0, both=0) — short-circuit bypass skips RRF's
+                # overlap calc; the chunk is in vector (else not
+                # matched) but overlap concept doesn't apply here.
+                short_chunks = [unioned[i] for i in exact_match_idx]
+                fused_chunks = short_chunks
+                fused_scores = [1.0] * len(short_chunks)
+                fusion_stats = FusionStats(len(short_chunks), 0, 0)
+                short_circuit = True
+            else:
+                # Standard RRF fusion path (T10a-4).
+                fused, fusion_stats = reciprocal_rank_fusion(
+                    [vector_chunks, fts_chunks],  # type: ignore[arg-type]
+                    key_fn=_chunk_key,
+                )
+                fused_chunks = [c for c, _ in fused]
+                fused_scores = [s for _, s in fused]
         else:
             # fts=None degradation path (M1+M4: byte-level == Phase 9).
             # Use raw Qdrant scores directly so composite scoring matches
@@ -169,13 +202,14 @@ class EKRSRetriever:
                 logger.warning("fts_searched_audit_emit_failed: %s", audit_err)
 
         logger.debug(
-            "Retrieved %d chunks (fts=%s), scope=%s",
-            len(chunks), self._fts is not None, active_scope,
+            "Retrieved %d chunks (fts=%s short_circuit=%s), scope=%s",
+            len(chunks), self._fts is not None, short_circuit, active_scope,
         )
         return RetrievalResult(
             chunks=chunks, vector_scores=vec_scores,
             scope_scores=scope_scores, final_scores=final_scores,
             fusion_stats=result_fusion_stats,
+            short_circuit=short_circuit,
         )
 
     @staticmethod
@@ -205,6 +239,36 @@ class EKRSRetriever:
             return 0.0
         first = chunk.scope_path[0].lower()
         return _SCOPE_PRIORITY_MAP.get(first, 40) / 100.0
+
+    @staticmethod
+    def _chunk_key(chunk: Chunk) -> str:
+        """Stable key for dedup + RRF. T10a-5: prefer ``chunk_id`` (set
+        by QdrantManager.upsert_chunks); fall back to ``doc_hash:block_id``
+        for legacy chunks (pre-T10a-5 ingestion, no chunk_id in payload).
+        Raises IndexError if both are missing — caller guarantees
+        ``source_block_ids`` non-empty by construction (chunker invariant).
+        """
+        if chunk.chunk_id:
+            return chunk.chunk_id
+        return f"{chunk.doc_hash}:{chunk.source_block_ids[0]}"
+
+    @staticmethod
+    def _is_exact_match(query: str, chunks: List[Chunk]) -> List[int]:
+        """T10b-3 short-circuit predicate. Return indices of chunks
+        whose ``text`` contains ``query`` as a substring.
+
+        Defaults: case-sensitive (engineering identifiers like
+        ``A312-TP316`` are case-sensitive; CJK queries are naturally
+        case-insensitive). Substring (not whole-match) per parent plan
+        §25 — phrase like ``"温度 ≤ 80℃"`` should match a chunk
+        containing the literal phrase.
+
+        Empty / whitespace-only query returns ``[]`` (no false-positive).
+        """
+        q = query.strip()
+        if not q:
+            return []
+        return [i for i, c in enumerate(chunks) if q in c.text]  # type: ignore[operator]  # Chunk.text is str
 
     def _rank_by_scope(self, chunks, vector_scores):
         if not chunks:

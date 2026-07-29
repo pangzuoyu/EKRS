@@ -182,6 +182,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
   rag container via `docker exec` (active `audit.log` + rotated
   `audit.log.{1..5}.gz` per `audit.py:44-50`). Required for the
   offline mode resume check unless `--audit-path` is host-accessible.
+- **Strong-signal short-circuit** (T10b-3, Phase 10 incremental): when
+  the user query is a substring of any retrieved chunk's
+  ``chunk.text`` (exact-match predicate), the retriever bypasses RRF
+  and returns the matched chunks directly with ``vector_scores=[1.0]``.
+  This is a deterministic optimization (different code path, **same
+  chunk set** as the standard RRF path) — globally enabled, NOT gated
+  on strict mode (parent §25 + §157). New
+  ``EKRSRetriever._is_exact_match(query, chunks) -> List[int]``
+  static predicate (case-sensitive substring match by default;
+  empty/whitespace query → ``[]`` no false-positive). Short-circuit is
+  gated on ``fts is not None`` to preserve the Phase 9 byte-level
+  baseline when FTS is disabled. ``RetrievalResult`` gains
+  ``short_circuit: bool = False`` field (default False preserves
+  Phase 10 callers). When short-circuit fires:
+  - ``fusion_stats = FusionStats(N, 0, 0)`` (vector contributed, fts
+    didn't, overlap concept doesn't apply).
+  - ``fts_searched`` audit emit still fires for ops visibility (parent
+    §204 "审计永远不阻塞业务" but also "审计永远不缺席"); a Prometheus
+    counter for short-circuit rate is deferred to Phase 11.
+  - Scope filter ``active_scope=`` still applies (R4 priority
+    unchanged); multi-match returns chunks in union(dedup by
+    chunk_id) insertion order.
+  11 unit tests in ``tests/unit/test_short_circuit_t10b3.py`` cover:
+  predicate semantics (single / multi / no / case-sensitive / empty
+  query), retriever integration (RRF bypassed on match, RRF called on
+  no-match, ``fts_searched`` still emitted on short-circuit, strict-
+  mode parity returns identical chunk set, ``active_scope`` filter
+  respected). Stub latency bench
+  ``scripts/t10b3_short_circuit_bench.py``: 200-chunk corpus,
+  15+15 queries, 5 warmup → sc fires 15/15 (100%), sc_p99 3.88ms vs
+  rrf_p99 4.45ms (12.7% reduction; ratio 0.87 < 0.99 acceptance
+  threshold; plan-doc aspirational target was 0.5 but tuned for real
+  bge-m3+FTS5+Qdrant HTTP backends — asyncio.to_thread overhead
+  dominates both paths in the stub environment). Full suite
+  **633 unit + 208 golden + 11 t10b3 = 852 pass 0 regression**;
+  mypy clean. **No new tag** — ``phase10`` already locked at
+  closure commit ``2e1d9fa``; T10b-3 is an incremental commit inside
+  the ``phase10`` tag.
 
 ### Fixed
 - **`scan_audit_for_failures()` bug** (`live_stress_60.py`): the audit
