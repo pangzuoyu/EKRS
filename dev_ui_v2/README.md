@@ -17,8 +17,11 @@ npm install           # install (uses .nvmrc; Node 20.20+)
 npm run dev           # Vite dev server + /v1/* proxy to localhost:8000
 npm run build         # type-check + production build
 npm run preview       # serve dist/ at http://127.0.0.1:4173
-npm run typecheck     # tsc -b --noEmit
+npm run typecheck     # tsc -b
 npm run lint          # ESLint, max-warnings 0
+npm run test          # Vitest (unit + MSW contract)
+npm run test:cov      # Vitest + v8 coverage
+npm run test:watch    # Vitest watch mode
 npm run format        # Prettier write
 npm run format:check  # Prettier check (CI gate)
 npm run check:bundle  # CI gate: dist/assets/*.js gzipped ≤ 500 KB
@@ -34,19 +37,29 @@ dev_ui_v2/
 ├── tsconfig.app.json      src/ strict TS config
 ├── tsconfig.node.json     vite.config + scripts config
 ├── vite.config.ts         Vite + React plugin + /v1/* dev proxy
+├── vitest.config.ts       Vitest + jsdom + MSW node + v8 coverage
 ├── scripts/
 │   └── check-bundle-size.mjs   CI gate: 500 KB gzipped hard cap
 ├── src/
-│   ├── main.tsx           React root + QueryClientProvider + BrowserRouter
+│   ├── main.tsx           React root + QueryClientProvider + ApiClientProvider + BrowserRouter
 │   ├── App.tsx            App shell skeleton (T11-3 fills this in)
-│   └── vite-env.d.ts      Vite ambient types
-└── .eslintrc.cjs          ESLint config (react + TS rules)
-└── .prettierrc.json       Prettier config
+│   ├── vite-env.d.ts      Vite ambient types
+│   ├── test-setup.ts      Vitest global setup (jest-dom matchers)
+│   ├── api/
+│   │   ├── schemas.ts     Zod schemas mirroring Pydantic models + z.infer types
+│   │   ├── client.ts      Pure typed fetch wrapper + ApiError
+│   │   ├── context.tsx    React context for the ApiClient
+│   │   └── hooks.ts       TanStack Query hooks (useHealth, useNotifyIngest, …)
+│   └── lib/
+│       └── auth.ts        X-Admin-Key localStorage helpers + useAdminKey hook
+└── tests/
+    └── mocks/
+        └── handlers.ts    MSW handlers (the wire-format contract spec)
 ```
 
-T11-2 adds `src/api/` (per-endpoint typed client + Zod schemas), `src/lib/`
-(auth helpers). T11-3 adds `src/views/{Ingest,Constraints,Golden,Overlays}.tsx`
-+ Playwright `tests/e2e/`.
+T11-3 adds `src/views/{Ingest,Constraints,Golden,Overlays}.tsx` + Playwright
+`tests/e2e/`. T11-4 Dockerizes (node:20-alpine → nginx:1.27-alpine). T11-5
+deprecates `dev_ui/`.
 
 ## Bundle budget (CI gate)
 
