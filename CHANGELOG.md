@@ -78,6 +78,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
   frozen-dataclass enforcement. **Retriever wiring = T10a-4, audit
   emit = T10a-7**. No new tag; `phase10.1` stays locked at `1c44eee`
   (T10b-1 do-not-move); `phase10` reserved for T10a-7 closure.
+- **Retriever wired to parallel vector + FTS retrieval via RRF**
+  (T10a-4, Phase 10): `EKRSRetriever` is now `async def retrieve()`
+  with two new call paths. Constructor accepts `fts: FTSManager | None =
+  None` kwarg; `fts=None` (default) preserves the Phase 9 byte-level
+  baseline (raw Qdrant scores pass through to `_rank_by_scope`). When
+  `fts` is configured, both paths run in parallel via
+  `asyncio.gather(..., return_exceptions=True)` + `asyncio.to_thread`;
+  FTS failure is **isolated** (`gather(return_exceptions=True)` →
+  log warning + degrade to vector-only, never propagate to caller).
+  Fused via `reciprocal_rank_fusion(ranked_lists=[vector_chunks,
+  fts_chunks], key_fn="f{doc_hash}:{source_block_ids[0]}",
+  k=60)`. New `FTSManager.search_with_payload(query) -> [(chunk_id,
+  payload_dict, score)]` returns the payload from `payload_json`
+  UNINDEXED column in a single IN-query (no N+1). `RetrievalResult`
+  gains `fusion_stats: Optional[FusionStats] = None` field; `None`
+  means fts disabled this round (R4 byte-level invariant). 10 unit +
+  3 IMPROVE boundary tests + 4 Phase 6B retriever regression tests +
+  1 FTSManager `search_with_payload` test cover: fts=None byte-level
+  byte-level == Phase 9, async gather wall-clock < sequential, FTS
+  exception isolation (vector survives), FTS corrupt-payload skipped
+  silently, scope_priority applied AFTER RRF (R4 invariant), and
+  FusionStats vector/fts/both fields. `constraints.py` 2 call sites
+  + `_StubRetriever.retrieve` + `_make_retriever` mock all migrated to
+  `async def`/`AsyncMock`. **Audit `fts_searched` event = T10a-7**,
+  consumes `FusionStats` directly. No new tag (phase10 reserved for
+  T10a-7 closure).
 - **`--mode offline` for production first-deploy ingestion**
   (`scripts/live_stress_60.py`): 3s pace, 2 retries with 2s/4s backoff,
   180s status timeout, 3s poll interval, no `_r<run_id>` suffix (relies

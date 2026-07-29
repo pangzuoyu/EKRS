@@ -69,7 +69,7 @@ class _StubRetriever:
     def __init__(self, default_chunks: list[Any] | None = None) -> None:
         self._default = default_chunks or []
 
-    def retrieve(
+    async def retrieve(
         self,
         query: str,
         top_k: int = 40,

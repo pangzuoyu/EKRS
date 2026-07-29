@@ -3,8 +3,15 @@
 Phase 6B D5: Retriever no longer takes an embedder; embedding happens
 inside qdrant.search via injected EmbeddingService. Mocks here only
 target qdrant.search(query_text=..., top_k=...).
+
+Phase 10 T10a-4: `retrieve()` is now `async def` (vector + FTS in
+parallel via asyncio.gather). Tests use `pytest.mark.asyncio`. asyncio_mode
+= "auto" in pyproject.toml makes the mark implicit but we keep it explicit
+for readability.
 """
 from __future__ import annotations
+
+import pytest
 
 from ekrs_rag.retrieval.retriever import EKRSRetriever
 
@@ -31,18 +38,21 @@ def _payload(scope_path, text="Temperature shall not exceed 80°C", block_id="b1
     }
 
 
-def test_retrieve_returns_empty_when_search_has_no_hits():
+@pytest.mark.asyncio
+async def test_retrieve_returns_empty_when_search_has_no_hits():
     qdrant = _Qdrant([])
 
     retriever = EKRSRetriever(qdrant=qdrant)
 
-    result = retriever.retrieve("temperature limit", top_k=3)
+    result = await retriever.retrieve("temperature limit", top_k=3)
 
     assert result.chunks == []
     assert qdrant.calls == [{"query_text": "temperature limit", "top_k": 3}]
+    assert result.fusion_stats is None
 
 
-def test_retrieve_filters_scope_and_extracts_evidenced_hints():
+@pytest.mark.asyncio
+async def test_retrieve_filters_scope_and_extracts_evidenced_hints():
     hits = [
         (_payload([], block_id="unscoped"), 0.99),
         (_payload(["industry", "API"], block_id="wrong"), 0.95),
@@ -50,7 +60,7 @@ def test_retrieve_filters_scope_and_extracts_evidenced_hints():
     ]
     retriever = EKRSRetriever(qdrant=_Qdrant(hits))
 
-    result = retriever.retrieve(
+    result = await retriever.retrieve(
         "temperature limit", active_scope=["national", "GB"]
     )
 
@@ -64,14 +74,15 @@ def test_retrieve_filters_scope_and_extracts_evidenced_hints():
     assert hint.scope_path == ["national", "GB", "pressure"]
 
 
-def test_retrieve_ranks_matching_hits_by_composite_score():
+@pytest.mark.asyncio
+async def test_retrieve_ranks_matching_hits_by_composite_score():
     hits = [
         (_payload(["project", "alpha"], block_id="project"), 1.0),
         (_payload(["national", "GB"], block_id="national"), 0.8),
     ]
     retriever = EKRSRetriever(qdrant=_Qdrant(hits))
 
-    result = retriever.retrieve("temperature limit")
+    result = await retriever.retrieve("temperature limit")
 
     assert [chunk.source_block_ids for chunk in result.chunks] == [
         ["national"],

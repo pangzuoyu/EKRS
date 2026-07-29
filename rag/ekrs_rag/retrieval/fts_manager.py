@@ -17,6 +17,7 @@ Iron Rules compliance:
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -105,6 +106,47 @@ class FTSManager:
         )
         rows = self._conn.execute(sql, (match_expr, limit)).fetchall()
         return [(row[0], max(row[1], 0.01)) for row in rows]
+
+    def search_with_payload(
+        self,
+        query: str,
+        *,
+        limit: int = 40,
+        scope_filter: Optional[list[str]] = None,
+    ) -> list[tuple[str, dict, float]]:
+        """Same FTS5 BM25 search as :meth:`search`, but also returns payload dict
+        deserialized from the ``payload_json`` UNINDEXED column — avoids N+1
+        queries when the retriever (T10a-4) needs the full payload for each hit.
+
+        Returns ``[(chunk_id, payload_dict, normalized_score), ...]``. Rows with
+        missing/corrupt ``payload_json`` are silently skipped (T10a-4 fts_search
+        exception isolation).
+        """
+        raw_hits = self.search(query, limit=limit, scope_filter=scope_filter)
+        if not raw_hits:
+            return []
+
+        chunk_ids = [c for c, _ in raw_hits]
+        score_map = dict(raw_hits)
+        placeholders = ",".join("?" * len(chunk_ids))
+        rows = self._conn.execute(
+            f"SELECT chunk_id, payload_json FROM blocks_fts "
+            f"WHERE chunk_id IN ({placeholders}) AND status != 'illegal'",
+            chunk_ids,
+        ).fetchall()
+
+        out: list[tuple[str, dict, float]] = []
+        for cid, pjson in rows:
+            if not pjson:
+                continue
+            try:
+                payload = json.loads(pjson)
+            except (json.JSONDecodeError, TypeError):
+                # T10a-4: corrupt row → skip silently; ConsistencyChecker
+                # (T10a-2) catches drift downstream.
+                continue
+            out.append((cid, payload, score_map.get(cid, 0.01)))
+        return out
 
     @staticmethod
     def _build_fts5_query(query: str) -> Optional[str]:

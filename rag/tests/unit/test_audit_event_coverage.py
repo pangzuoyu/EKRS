@@ -307,11 +307,16 @@ async def test_ingestion_failed_emit_on_unhandled_exception(audit_writer):
 
 
 def _make_retriever(chunks: list | None = None) -> MagicMock:
-    """Return a stub EKRSRetriever returning the given chunks (or empty)."""
+    """Return a stub EKRSRetriever returning the given chunks (or empty).
+
+    Phase 10 T10a-4: ``EKRSRetriever.retrieve`` is ``async def``; the mock
+    must be ``AsyncMock`` so that ``await retriever.retrieve(...)`` resolves
+    a coroutine that returns the canned RetrievalResult.
+    """
     r = MagicMock()
     retrieval = MagicMock()
     retrieval.chunks = chunks or []
-    r.retrieve = MagicMock(return_value=retrieval)
+    r.retrieve = AsyncMock(return_value=retrieval)
     return r
 
 

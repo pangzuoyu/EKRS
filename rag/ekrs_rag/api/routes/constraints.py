@@ -144,7 +144,7 @@ async def query_constraints(
         # Re-run solver with prior inputs (re-fetch retrieval).
         # `replay_retrieval_result` (distinct name) avoids redefining the
         # `retrieval_result` from the main branch below (mypy no-redef).
-        replay_retrieval_result: RetrievalResult = retriever.retrieve(
+        replay_retrieval_result: RetrievalResult = await retriever.retrieve(
             replay_query, top_k=query.top_k, active_scope=replay_scope,
         )
         constraints = EvidenceBuilder.build(replay_retrieval_result.chunks)
@@ -205,7 +205,7 @@ async def query_constraints(
     merged_context = _context_merge(query.context, {}, {})
 
     # --- Step 2: Retrieval ---
-    retrieval_result: RetrievalResult = retriever.retrieve(
+    retrieval_result: RetrievalResult = await retriever.retrieve(
         query.query,
         top_k=query.top_k,
         active_scope=active_scope,
