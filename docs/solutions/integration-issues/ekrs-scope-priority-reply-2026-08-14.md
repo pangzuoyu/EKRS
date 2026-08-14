@@ -9,11 +9,14 @@ related_plan: /home/pangzy/code_project/EKRS/docs/superpowers/specs/2026-07-30-d
 related_request: /home/pangzy/code_project/doc-to-md/docs/solutions/integration-issues/ekrs-scope-priority-confirmation-2026-08-14.md
 related_solution: ../integration-issues/parse-markdown-form-extractor-integration.md
 target_audience: doc-to-md development team
-status: ekrs_internal_decisions_recorded_pending_doc_to_md_schema_response
+status: 建议1_accepted_T1_T5_scheduled_2026-08-18_to_08-20
 ekrs_decision: option_C_with_reuse_existing_fields_optimization
 ekrs_actions: retriever_FTS5_consume_form_fields_column_headers_no_new_metadata_required
 ekrs_internal_resolutions: [item_1_internal_inference, item_2_hardcode_weights, item_3_shortcircuit_no_boost, item_4_strict_no_block, item_5_10to15_bundles_from_doc_to_md_list, item_6_defer_to_v3_data]
-pending_doc_to_md_input: [confirm_建议1_reuse_existing_fields, provide_152_long_tail_bundle_list]
+acceptance_doc: ekrs-scope-priority-acceptance-2026-08-14.md
+acceptance_status: doc-to-md_accepted_建议1_zero_doc_to_md_changes_required
+bundle_list_delivered: scripts/long_tail_lot_check_152.json (331 zero-cov + 15 recommended-first)
+pending_doc_to_md_input: []
 ---
 
 # EKRS scope_priority + heading_path boost 协调回复
@@ -223,16 +226,25 @@ Phase 13 commit `1685ca3` (PDF heading Phase 4 filters) 让 outline 节点大幅
 
 ---
 
-## 六、剩余待 doc-to-md 确认项
+## 六、Acceptance (2026-08-14) ✅
 
-经 §五 内部裁决, 6 项未解决问题全部有 EKRS 立场. 仍需 doc-to-md 端输入的项:
+doc-to-md 接受建议 1 (跨方协调闭环):
 
-| 项 | 内容 | 阻塞 |
-|---|---|---|
-| §四 行动项 | 是否接受"EKRS 直接消费已有 `metadata.form_fields` / `metadata.column_headers`"作为首选方案 (建议 1), 而 `scope_priority` 仅作为可选优化 (建议 2)? | 是, 阻塞 EKRS 端实施 (8/15 前回) |
-| 问题 5 | 提供 152 个长尾 bundle 清单 | 是, 阻塞跨方验证抽样 |
+| 项 | 状态 |
+|---|---|
+| §四 行动项 — 接受建议 1 | ✅ accepted — EKRS 直接消费 `metadata.form_fields` / `metadata.column_headers`, doc-to-md 端 **0 改动** |
+| §四 行动项 — 建议 2 不采用 | ✅ dropped — `scope_priority` 字段不引入, heading_path 契约 (`list[str]`) 不动摇 |
+| §五 问题 5 — 152 bundle 清单 | ✅ delivered 2026-08-14 (提前 1 天, 实际给 331 zero-cov + 15 recommended-first) |
+| §五 问题 1-4 + 6 EKRS 裁决 | ✅ doc-to-md 全接受, 无异议 |
 
-doc-to-md 在收到本回复后, 优先回 §四 行动项 + 问题 5, EKRS 即可启动 Phase 12 follow-up 周次 (8/18 ~ 8/20).
+**联调时间窗** (双方对齐):
+- 2026-08-18 ~ 08-19: EKRS T1-T5 实施 (Chunk 模型 / chunker 透传 / Qdrant payload / FTS5 schema / retriever 扩展)
+- 2026-08-20: Q5 re-ingest 完成后 FTS5/Qdrant drift 验证 + 联调窗口 (doc-to-md 跑 `scripts/verify_reingest.py` LOT/CHECK 抽样验证)
+- 2026-08-20 联调前 doc-to-md **无需出新代码**
+
+详细 acceptance 内容见 [`ekrs-scope-priority-acceptance-2026-08-14.md`](ekrs-scope-priority-acceptance-2026-08-14.md).
+
+§七 中保留的 5 项未解决问题 (Q5 re-ingest 覆盖 / warning log 量 / 端到端抽样 / 扫描脚本固化) 转入 8/20 联调执行阶段.
 
 ---
 
