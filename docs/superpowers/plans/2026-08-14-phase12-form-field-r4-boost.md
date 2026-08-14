@@ -5,8 +5,9 @@ category: docs/superpowers/plans
 module: rag-integration
 phase: 12
 parent_plan: /home/pangzy/code_project/EKRS/docs/superpowers/specs/2026-07-30-doc-to-md-heading-path-coordination.md
-status: closed_建议1_accepted_implementation_scheduled
+status: closed_建议1_accepted_plan_v2_engineer_review_applied
 target_window: 2026-08-18 ~ 2026-08-20
+pre_check_deadline: 2026-08-18 (verify_reingest.py 状态确认)
 ekrs_owner: Phase 12 follow-up team
 doc_to_md_owner: Phase 12 P0/P1 + Q3 §9.6 team
 ---
@@ -77,13 +78,74 @@ doc-to-md                                    EKRS
 
 | ID | 内容 | 周期 | 文件 |
 |---|---|---|---|
-| **T1** | Chunk 模型新增 `form_fields: Optional[list]` / `column_headers: Optional[list]` Optional 字段 | 0.5 day | `shared/ekrs_shared/models.py:Chunk` |
-| **T2** | chunker 透传 (block → chunk) + Qdrant payload 写入 `form_fields` / `column_headers` 数组字段 | 1 day | `rag/ekrs_rag/ingestion/chunker.py` + `rag/ekrs_rag/retrieval/qdrant_client.py` |
-| **T3** | FTS5 schema 迁移 (新增 `form_fields TEXT` / `column_headers TEXT` 列) + 索引扩展 (key + value + header 拼接) | 1 day | `rag/ekrs_rag/retrieval/fts_manager.py` |
-| **T4** | `retriever._scope_priority()` 扩展: 读取新字段, 按 type 加权 (`max(base, weight)` 叠加, 避免堆叠放大) | 0.5 day | `rag/ekrs_rag/retrieval/retriever.py:_scope_priority()` |
-| **T5** | 测试 (单元: 新字段 round-trip) + golden set 50 case 回归 + Boundary 2 frequency check | 1 day | `tests/unit/` + `tests/golden_set/` |
+| **T1** | **模型扩展**: `Chunk` 新增 `form_fields` / `column_headers` Optional 字段 **+ `Metadata` 必须同步新增** (IR parser 静默丢字段风险, 见 §三.0) | 0.5 day | `shared/ekrs_shared/models.py:Chunk` + `Metadata` |
+| **T2** | **透传链路验证**: 先验证 `rag/ekrs_rag/ingestion/ir_parser.py` 已从 data.jsonl 加载 `metadata.form_fields` / `column_headers` 到 `BlockMetadata`, 然后 chunker 透传 (block → chunk) + Qdrant payload 写入 `form_fields` / `column_headers` 数组字段 | 1 day | `rag/ekrs_rag/ingestion/ir_parser.py` (verify) + `chunker.py` + `qdrant_client.py` |
+| **T3** | **FTS5 schema 全量重建** (不能 ALTER TABLE ADD COLUMN, 见 §三.1 详细策略) | 1+ day | `rag/ekrs_rag/retrieval/fts_manager.py` |
+| **T4** | `retriever._scope_priority()` 扩展: 读取新字段, 按 type 加权 (`max(base, weight)` **在函数内部计算**, 不动下游 `vec * (1 + scope)` 公式) | 0.5 day | `rag/ekrs_rag/retrieval/retriever.py:_scope_priority()` |
+| **T5** | 测试 (单元: 新字段 round-trip + IR parser 加载断言) + golden set 50 case 回归 + Boundary 2 frequency check | 1 day | `tests/unit/` + `tests/golden_set/` |
 
-**合计 4 天**, 8/18-8/19 完成.
+**合计 4+ 天**, 8/18-8/19 完成 (T3 因全量 rebuild 可能溢出 1 天, 见 §三.1).
+
+### §三.0 IR parser 静默丢字段风险 (T1/T2 隐藏前置)
+
+**风险**: `shared/ekrs_shared/models.py:Metadata` 当前**未定义** `form_fields` / `column_headers` 字段. Pydantic `extra='ignore'` (默认) 会**静默丢弃**未声明字段, 与 [OvisOCR2 静默丢字段同类问题](#).
+
+**T1 必须同时**:
+- `Chunk` 新增 `form_fields` / `column_headers` Optional 字段
+- `Metadata` **同步**新增 `form_fields: Optional[list]` / `column_headers: Optional[list]` Optional 字段 (让 IR parser 加载到 BlockMetadata)
+
+**T2 验证步骤**:
+- 单元测试: `test_ir_parser_loads_form_fields.py` — data.jsonl 含 `metadata.form_fields=[{key, value}]` 时, IR 解析后 `block.metadata.form_fields` 非空
+- 端到端: chunker debug log 中 `form_fields` / `column_headers` 非空 (从 `000151778ca35475` bundle 验证)
+
+### §三.1 T3 详细: FTS5 schema 迁移策略
+
+**关键约束**: SQLite FTS5 虚拟表**不支持** `ALTER TABLE ADD COLUMN`. 任何 schema 变更需要**全量重建**.
+
+**迁移步骤** (3 阶段, 顺序不可换):
+
+1. **新建 FTS5 表** (`fts_chunks_v2`):
+   ```sql
+   CREATE VIRTUAL TABLE fts_chunks_v2 USING fts5(
+     chunk_id, block_id, text, scope_path, status, doc_hash,
+     form_fields,          -- 新增: 拼接 form_fields.key + form_fields.value (空格分隔)
+     column_headers,       -- 新增: 拼接 column_headers.header (空格分隔)
+     payload_json UNINDEXED
+   );
+   ```
+
+2. **全量重新索引** (从 Qdrant payload 重建, **不从 data.jsonl 重新摄取**):
+   ```python
+   # 遍历 Qdrant 所有 points, scroll + 读 payload.form_fields / column_headers
+   # 写入 fts_chunks_v2 (批量 INSERT, 1000/批)
+   for offset in qdrant.scroll_all(batch_size=1000):
+       for point in offset:
+           fts_row = build_fts_row_from_qdrant_payload(point.payload)
+           fts_manager_v2.insert(fts_row)
+   ```
+   **估算**: 当前 Qdrant 含 ~数万个 chunks (Phase 9 stress 验证 +268 chunks/batch), 全量 rebuild 预计 **数小时**. T3 的 1 天估算**偏紧**, 实际预留 **1.5-2 天**.
+
+3. **原子切换表名**:
+   ```sql
+   BEGIN TRANSACTION;
+   ALTER TABLE fts_chunks RENAME TO fts_chunks_v1_legacy;
+   ALTER TABLE fts_chunks_v2 RENAME TO fts_chunks_v2_legacy;  -- 错, 应:
+   -- 正确做法:
+   DROP TABLE fts_chunks;  -- 旧表 (假设已 v2 完整 + 验证)
+   ALTER TABLE fts_chunks_v2 RENAME TO fts_chunks;
+   COMMIT;
+   ```
+   简化方案: 直接 DROP 旧表 + RENAME 新表 (事务内, 失败回滚). **不需要保留旧表** (Qdrant 是 source of truth, FTS 仅是 secondary index).
+
+**回滚策略**:
+- 迁移前 snapshot Qdrant collection alias (Phase 8 vendored)
+- 失败时: 重建 fts_chunks (旧 schema), 重新从 Qdrant payload 跑旧索引逻辑 (无 form_fields/column_headers)
+- 回滚不丢数据 (Qdrant 不动)
+
+**T3 单元测试要求**:
+- `test_fts_v2_schema.py` — 验证新表结构含 form_fields / column_headers 列
+- `test_fts_v2_indexing.py` — 验证 form_field "Lot 49" 经 FTS5 召回 hit
+- `test_fts_v2_backward_compat.py` — 验证 chunk_id 仍为 PK, block_id / scope_path / payload_json 仍可查询
 
 ---
 
@@ -112,12 +174,23 @@ def _scope_priority(chunk, form_fields=None, column_headers=None):
 
 ## 五、8/20 联调计划
 
+**前置 (8/18 实施前必查, P1 缺口)**:
+- ⚠️ **8/18 之前**确认 `doc-to-md/scripts/verify_reingest.py` **是否已更新以验证 form_fields / column_headers 传递**. 不覆盖则:
+  - 选项 A (优先): doc-to-md 在 8/18 前先更新脚本 (低工作量, doc-to-md 接受建议 1 = 0 改动的前提下, 这是 doc-to-md 唯一动作)
+  - 选项 B: EKRS 自己写 `scripts/verify_reingest_ekrs_fields.py` 独立验证脚本
+- 此项**不应留到联调当天才发现** (否则 8/20 上午无法验证字段是否真正到达 EKRS 侧)
+
 | 时段 | 行动方 | 内容 |
 |---|---|---|
 | 8/20 上午 | doc-to-md | 跑 `scripts/verify_reingest.py` LOT/CHECK 抽样 (从 `long_tail_lot_check_152.json` 推荐 15 选 10-15) 验证 form_fields/column_headers 经 EKRS 全链路 |
-| 8/20 上午 | EKRS | 验证 FTS5/Qdrant drift (T10a-2 `ConsistencyChecker` 检测) — form_fields/column_headers 双写一致性 |
-| 8/20 下午 | 双方 | 端到端抽样 recall@10 baseline 对比 (form_field boost 启用前后) |
+| 8/20 上午 | EKRS | 验证 FTS5/Qdrant drift (T10a-2 `ConsistencyChecker` 检测) — form_fields/column_headers 双写一致性 (T3 全量 rebuild 后必查) |
+| 8/20 下午 | 双方 | **端到端抽样 recall@10 baseline 对比 (P1, 必须产出量化数据)** — form_field boost 启用前后, 从推荐 15 抽样各 5 query (form_field 锚点 + column_header 锚点 + 普通 heading 锚点 各覆盖) |
 | 8/20 下午 | EKRS | golden set 50 case 回归 (V3) — 量化 heading_path 链路缩短 (Phase 13 PDF filters) 对 R4 检索精度的影响 |
+
+**§七 问题 3 验收门槛**: recall@10 baseline 对比**必须产出量化数据**. 若 form_field boost 启用后无显著提升 (或反而下降), 需重新评估:
+- 权重设计 (0.9 / 0.7 是否过强 / 过弱)
+- 是否需要进一步特征工程 (e.g. form_field key vs value 加权区分)
+- 选项 C 是否优于选项 A/B (历史决策回顾)
 
 ---
 
@@ -163,12 +236,17 @@ def _scope_priority(chunk, form_fields=None, column_headers=None):
 
 ## 七、未解决问题 (8/20 联调执行)
 
-| # | 项 | 优先级 | 来源 |
+| # | 项 | 优先级 | 处理建议 | 来源 |
+|---|---|---|---|---|
+| 1 | `scripts/verify_reingest.py` 是否覆盖新 form_fields/column_headers 字段 | **P1** | **8/18 前确认, 不覆盖则先更新脚本** (doc-to-md 唯一动作或 EKRS 写独立脚本) — §五前置已展开 | doc-to-md §七 |
+| 2 | 协调项 #6 P3 ship (commit `58cc527`) 后, 长尾 bundle 首次 re-ingest 触发 warning log 量未测 | P2 | 联调时监控, 超阈值再加 rate-limit (非阻塞) | doc-to-md §七 |
+| 3 | **端到端抽样 recall@10 baseline 对比** (form_field boost 启用前后) | **P1** | **本次工作核心验收指标, 必须产出量化数据**. 5 query × 3 锚点类型 (form_field / column_header / heading) × 推荐 15 抽样 = 75 query 集. 无显著提升或反而下降需重新评估权重设计 | doc-to-md §七 + §五验收门槛 |
+| 4 | 清单扫描脚本固化 (临时 `/tmp/scan_long_tail.py` + `/tmp/scan_zero_cov.py` 进 `scripts/` 目录) | P3 低优 | 不阻塞, 后续处理 | doc-to-md §七 |
+
+**§七 隐藏前置** (本计划新增, 不在 doc-to-md 列表):
+| # | 项 | 优先级 | 处理建议 |
 |---|---|---|---|
-| 1 | Q5 re-ingest (commit `736fd3b`) verify script 是否覆盖新 form_fields/column_headers 字段? 需检查 `scripts/verify_reingest.py` 是否更新 | P1 | doc-to-md §七 |
-| 2 | 协调项 #6 P3 ship (commit `58cc527`) 后, 长尾 bundle 首次 re-ingest 触发 warning log 量未测. 若超日志可读阈值需 rate-limit | P2 | doc-to-md §七 |
-| 3 | 端到端抽样 recall@10 baseline 对比 — form_field boost 启用前后真实效果量化 | P1 | doc-to-md §七 |
-| 4 | 清单扫描脚本固化 (临时 `/tmp/scan_long_tail.py` + `/tmp/scan_zero_cov.py` 进 `scripts/` 目录) | P3 低优 | doc-to-md §七 |
+| 5 | `shared/ekrs_shared/models.py:Metadata` 新增 `form_fields` / `column_headers` Optional 字段 (T1 隐藏前置, 避免 IR parser 静默丢字段) | P0 | **T1 必含**, 单元测试断言 IR parser 加载到 BlockMetadata |
 
 ---
 
