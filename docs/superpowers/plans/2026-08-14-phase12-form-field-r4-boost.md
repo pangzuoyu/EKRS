@@ -5,7 +5,7 @@ category: docs/superpowers/plans
 module: rag-integration
 phase: 12
 parent_plan: /home/pangzy/code_project/EKRS/docs/superpowers/specs/2026-07-30-doc-to-md-heading-path-coordination.md
-status: closed_建议1_accepted_plan_v2_engineer_review_applied
+status: closed_建议1_accepted_plan_v3_gstack_eng_review_applied
 target_window: 2026-08-18 ~ 2026-08-20
 pre_check_deadline: 2026-08-18 (verify_reingest.py 状态确认)
 ekrs_owner: Phase 12 follow-up team
@@ -78,25 +78,68 @@ doc-to-md                                    EKRS
 
 | ID | 内容 | 周期 | 文件 |
 |---|---|---|---|
-| **T1** | **模型扩展**: `Chunk` 新增 `form_fields` / `column_headers` Optional 字段 **+ `Metadata` 必须同步新增** (IR parser 静默丢字段风险, 见 §三.0) | 0.5 day | `shared/ekrs_shared/models.py:Chunk` + `Metadata` |
-| **T2** | **透传链路验证**: 先验证 `rag/ekrs_rag/ingestion/ir_parser.py` 已从 data.jsonl 加载 `metadata.form_fields` / `column_headers` 到 `BlockMetadata`, 然后 chunker 透传 (block → chunk) + Qdrant payload 写入 `form_fields` / `column_headers` 数组字段 | 1 day | `rag/ekrs_rag/ingestion/ir_parser.py` (verify) + `chunker.py` + `qdrant_client.py` |
-| **T3** | **FTS5 schema 全量重建** (不能 ALTER TABLE ADD COLUMN, 见 §三.1 详细策略) | 1+ day | `rag/ekrs_rag/retrieval/fts_manager.py` |
-| **T4** | `retriever._scope_priority()` 扩展: 读取新字段, 按 type 加权 (`max(base, weight)` **在函数内部计算**, 不动下游 `vec * (1 + scope)` 公式) | 0.5 day | `rag/ekrs_rag/retrieval/retriever.py:_scope_priority()` |
-| **T5** | 测试 (单元: 新字段 round-trip + IR parser 加载断言) + golden set 50 case 回归 + Boundary 2 frequency check | 1 day | `tests/unit/` + `tests/golden_set/` |
+| **T1** | **模型扩展**: `Chunk` + `Metadata` 同步新增 `form_fields` / `column_headers` 字段, **默认值 `default_factory=list` (空列表, 非 None)** — 避免下游 retriever / FTS5 重复 None-check (gstack D4) | 0.5 day | `shared/ekrs_shared/models.py:Chunk` + `Metadata` |
+| **T2a** | **IR parser 透传验证**: 跑 `test_ir_parser_loads_form_fields.py` 验证 `rag/ekrs_rag/ingestion/ir_parser.py` 已从 data.jsonl 加载 `metadata.form_fields` / `column_headers` 到 `BlockMetadata` (T1 已加 Optional 字段的前提下) | 0.25 day | `rag/ekrs_rag/ingestion/ir_parser.py` (verify) + `tests/unit/test_ir_parser_loads_form_fields.py` |
+| **T2b** | **IR parser 修复 (T2a failed 才执行)**: 修 `ir_parser.py` 加载 + 增加 fallback warn log (与协调项 #6 同模式), 然后 chunker 透传 (block → chunk) + Qdrant payload 写入 `form_fields` / `column_headers` 数组字段 | 0.5-1 day (conditional) | `rag/ekrs_rag/ingestion/ir_parser.py` (if needed) + `chunker.py` + `qdrant_client.py` |
+| **T3** | **FTS5 schema 全量重建** (FTS5 不支持 ALTER TABLE ADD COLUMN, 见 §三.1 详细策略) + **30s drain + 3-attempt retry decorator** (D3) + **ConsistencyChecker 重建期间抑制 drift audit** (D1) | 0.5-1 day (refined from 1.5-2 days, D7) | `rag/ekrs_rag/retrieval/fts_manager.py` |
+| **T4** | `retriever._scope_priority()` 扩展: 读取新字段, 按 type 加权 (`max(base, weight)` **在函数内部计算**, 不动下游 `vec * (1 + scope)` 公式). **单一 touchpoint** — T10b-3 short-circuit 不读 form_fields (per parent §25, D5) | 0.5 day | `rag/ekrs_rag/retrieval/retriever.py:_scope_priority()` |
+| **T5** | 测试: 6 个命名 test files (D6) + golden set 50 case 回归 + Boundary 2 frequency check + 75-query recall@10 baseline | 1 day | `tests/unit/` + `tests/golden_set/` |
 
-**合计 4+ 天**, 8/18-8/19 完成 (T3 因全量 rebuild 可能溢出 1 天, 见 §三.1).
+**T5 6 个命名 test files** (D6):
+- `tests/unit/test_models_form_fields.py` — Pydantic round-trip
+  - `test_chunk_default_factory_yields_empty_list()`
+  - `test_metadata_default_factory_yields_empty_list()`
+  - `test_chunk_roundtrip_with_form_fields_column_headers()`
+  - `test_metadata_empty_lists_serialize_to_json_array()`
+- `tests/unit/test_ir_parser_loads_form_fields.py` — T2a 验证
+  - `test_ir_parser_loads_form_fields_from_data_jsonl()`
+  - `test_ir_parser_loads_column_headers_from_data_jsonl()`
+  - `test_ir_parser_loads_both_fields_concurrently()`
+  - `test_ir_parser_does_not_silently_drop_unknown_fields()` (Pydantic extra='ignore' 守卫)
+- `tests/unit/test_chunker_form_fields_passthrough.py` — T2 chunker
+  - `test_chunker_copies_form_fields_block_to_chunk()`
+  - `test_chunker_copies_column_headers_block_to_chunk()`
+  - `test_chunker_preserves_field_order_for_fns5_round_trip()`
+  - `test_chunker_handles_missing_fields_default_to_empty_list()`
+- `tests/unit/test_fts_v2_schema.py` — T3 schema
+  - `test_fts_chunks_v2_contains_form_fields_column()`
+  - `test_fts_chunks_v2_contains_column_headers_column()`
+  - `test_fts_v2_chunk_id_still_primary_key()`
+  - `test_fts_v2_payload_json_unindexed_backward_compat()`
+- `tests/unit/test_fts_v2_indexing.py` — T3 召回
+  - `test_fts_v2_recall_form_field_lot_49()`
+  - `test_fts_v2_recall_column_header_a105()`
+  - `test_fts_v2_recall_normal_text_not_corrupted_by_form_fields()`
+  - `test_fts_v2_rebuild_from_qdrant_payload_does_not_lose_chunks()`
+- `tests/unit/test_retriever_form_field_boost.py` — T4 weighting
+  - `test_scope_priority_max_with_form_field_weight()`
+  - `test_scope_priority_max_with_column_header_weight()`
+  - `test_scope_priority_no_stacking_heading_plus_form_field()`
+  - `test_scope_priority_base_floor_when_no_form_fields()`
+  - `test_retriever_short_circuit_unaffected_by_form_field_boost()` (T10b-3 parity)
+
+**合计 3-4 天**, 8/18-8/19 完成 (T3 因 D7 时间估算修正, 实际预算内).
 
 ### §三.0 IR parser 静默丢字段风险 (T1/T2 隐藏前置)
 
 **风险**: `shared/ekrs_shared/models.py:Metadata` 当前**未定义** `form_fields` / `column_headers` 字段. Pydantic `extra='ignore'` (默认) 会**静默丢弃**未声明字段, 与 [OvisOCR2 静默丢字段同类问题](#).
 
-**T1 必须同时**:
-- `Chunk` 新增 `form_fields` / `column_headers` Optional 字段
-- `Metadata` **同步**新增 `form_fields: Optional[list]` / `column_headers: Optional[list]` Optional 字段 (让 IR parser 加载到 BlockMetadata)
+**T1 必须同时** (D4 default_factory=list):
+- `Chunk` 新增 `form_fields: List[Dict[str, Any]] = Field(default_factory=list)` / `column_headers: List[Dict[str, Any]] = Field(default_factory=list)`
+- `Metadata` **同步**新增 `form_fields: List[Dict[str, Any]] = Field(default_factory=list)` / `column_headers: List[Dict[str, Any]] = Field(default_factory=list)` (让 IR parser 加载到 BlockMetadata)
+- **为什么 default_factory=list 而不是 Optional[list] = None**: 下游 retriever `_scope_priority()` 和 FTS5 string builder 不需要 None-check; `[].append(...)` 安全; Chunk model 既有约定（如 `source_block_ids` 用 `Field(default_factory=list)`).
 
-**T2 验证步骤**:
-- 单元测试: `test_ir_parser_loads_form_fields.py` — data.jsonl 含 `metadata.form_fields=[{key, value}]` 时, IR 解析后 `block.metadata.form_fields` 非空
+**T2a 验证步骤** (2h):
+- 单元测试: `tests/unit/test_ir_parser_loads_form_fields.py` — data.jsonl 含 `metadata.form_fields=[{key, value}]` 时, IR 解析后 `block.metadata.form_fields` 非空
+- 验证 3 个 case: form_fields_only / column_headers_only / both
+- 通过 → 直接进入 T3; 失败 → T2b (修复)
+
+**T2b 修复步骤** (conditional, 4h):
+- 修 `ir_parser.py` 加载路径 (典型: BlockMetadata 模型未声明字段 → 加声明, 或 load_from_jsonl 路径未透传)
+- 加 fallback warn log (与协调项 #6 `_warn_missing_heading_paths` 同模式): outline 存在但 field 为空时主动 log.warning
 - 端到端: chunker debug log 中 `form_fields` / `column_headers` 非空 (从 `000151778ca35475` bundle 验证)
+
+**T2 总预算**: 0.25 天 (T2a) + 0.5-1 天 (T2b, conditional) = 0.25-1.25 天
 
 ### §三.1 T3 详细: FTS5 schema 迁移策略
 
@@ -123,24 +166,29 @@ doc-to-md                                    EKRS
            fts_row = build_fts_row_from_qdrant_payload(point.payload)
            fts_manager_v2.insert(fts_row)
    ```
-   **估算**: 当前 Qdrant 含 ~数万个 chunks (Phase 9 stress 验证 +268 chunks/batch), 全量 rebuild 预计 **数小时**. T3 的 1 天估算**偏紧**, 实际预留 **1.5-2 天**.
+   **估算** (D7 refined): Phase 9 stress 验证 +268 chunks/batch + ~600ms/batch 端到端. 按 50k chunks total = 200 batches × 600ms ≈ **30 min**. 加 milestone 阶段 (bench + rebuild + verify) = **0.5-1 day** 实际预算. T3 估算从原 1.5-2 天下修.
 
-3. **原子切换表名**:
+**2.5 子步骤**: **bench 验证 (10 min)** — 在 1k chunks 子集先跑一次, 确认 600ms/batch 估算准确后再启动全量 rebuild. 失败则回归 1.5-2 天估算.
+
+3. **原子切换表名** (in transaction + **D3 30s drain + retry**):
    ```sql
    BEGIN TRANSACTION;
-   ALTER TABLE fts_chunks RENAME TO fts_chunks_v1_legacy;
-   ALTER TABLE fts_chunks_v2 RENAME TO fts_chunks_v2_legacy;  -- 错, 应:
-   -- 正确做法:
-   DROP TABLE fts_chunks;  -- 旧表 (假设已 v2 完整 + 验证)
+   DROP TABLE fts_chunks;
    ALTER TABLE fts_chunks_v2 RENAME TO fts_chunks;
    COMMIT;
    ```
-   简化方案: 直接 DROP 旧表 + RENAME 新表 (事务内, 失败回滚). **不需要保留旧表** (Qdrant 是 source of truth, FTS 仅是 secondary index).
+   简化方案: DROP 旧表 + RENAME 新表 (事务内, 失败回滚). **不需要保留旧表** (Qdrant 是 source of truth, FTS 仅是 secondary index).
+
+   **D3 30s drain + retry decorator**:
+   - **Drain (30s)**: 重命名前, RAG 服务进入 drain mode: 拒绝新的 `/v1/ingestion/notify` (返 503); 等待 30s 让 in-flight FTS5 read 调用自然完成. 借助 Phase 8 rate-limit 模式或新增 env var `EKRS_DRAIN=true`.
+   - **Retry decorator**: retriever FTS5 调用包 `@retry_on_sqlite_busy(max_attempts=3, backoff_ms=100)` — 第 1 次 SQLITE_BUSY → 100ms → 第 2 次 BUSY → 200ms → 第 3 次 BUSY → fail with proper error. 文档写在 `rag/ekrs_rag/retrieval/fts_manager.py` docstring.
+   - **D1 ConsistencyChecker 抑制**: T3 启动时设 env var `EKRS_FTS_MIGRATION_IN_PROGRESS=true`; `ConsistencyChecker.run()` 入口检查此 flag, 命中则 short-circuit (不 emit drift audit, 不 increment counter). T3 完成后 (atomic rename 后) flag clear. 失败时 caddy-up: flag 自动 1h expiry via filelock timestamp.
 
 **回滚策略**:
 - 迁移前 snapshot Qdrant collection alias (Phase 8 vendored)
 - 失败时: 重建 fts_chunks (旧 schema), 重新从 Qdrant payload 跑旧索引逻辑 (无 form_fields/column_headers)
 - 回滚不丢数据 (Qdrant 不动)
+- **D3 retry decorator 失败兜底**: 3 attempts 后仍 SQLITE_BUSY → 抛 `FTSSchemaChangeError` (新异常类型, `rag/ekrs_rag/retrieval/fts_manager.py`); HTTP 503 配合 `Retry-After: 5` header.
 
 **T3 单元测试要求**:
 - `test_fts_v2_schema.py` — 验证新表结构含 form_fields / column_headers 列
@@ -294,6 +342,8 @@ EKRS:      docs/solutions/integration-issues/ekrs-scope-priority-reply-2026-08-1
 - 2026-08-14: doc-to-md 接受建议 1 (commit `9e88914` mirror in doc-to-md repo)
 - 2026-08-14: EKRS 内部裁决 6 项记录 (commit `cfabd28`)
 - 2026-08-14: reply §六 Acceptance ✅ (commit `1cc1a7f`)
+- 2026-08-14: v2 — 应用 user engineer review (D1-D6 from user: IR parser 静默丢字段风险 + FTS5 迁移详细策略 + 优先级重排)
+- 2026-08-14: v3 — 应用 gstack-plan-eng-review (D1-FTS5-suppression + D2-T2-split + D3-drain+retry + D4-default_factory + D5-single-touchpoint + D6-named-test-files + D7-estimate-refine)
 
 ---
 
@@ -316,3 +366,30 @@ EKRS:      docs/solutions/integration-issues/ekrs-scope-priority-reply-2026-08-1
 | `023b45d` | 2026-08-14 | feat(pipeline): form_field_extractor 集成进 docx parser |
 | `f9deae5` | 2026-08-14 | feat(form_table_extractor): 列头提取 |
 | `a46f348` | 2026-08-14 | (form_table_extractor 后续 commit, 推测) |
+
+---
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| Eng Review | `/plan-eng-review` v3 | Architecture & tests (required) | 1 | CLEAR | 7 issues found, 0 critical gaps, 0 unresolved |
+| CEO Review | — | Scope & strategy | 0 | — | N/A (coordinator plan, not product) |
+| Codex Review | — | Independent 2nd opinion | 0 | — | Skipped per user (D8 outside voice declined) |
+| Design Review | — | UI/UX gaps | 0 | — | N/A (backend only) |
+| DX Review | — | Developer experience gaps | 0 | — | N/A (internal coordination) |
+
+**UNRESOLVED:** 0
+**VERDICT:** ENG CLEARED — ready to implement on 2026-08-18. 7 decisions (D1-D7) applied to plan v3.
+
+### Findings summary (D1-D7)
+
+| # | Section | Severity | Decision | Resolution |
+|---|---|---|---|---|
+| D1 | Architecture | High | T3 FTS5 rebuild → ConsistencyChecker drift audits flood | Suppress via `EKRS_FTS_MIGRATION_IN_PROGRESS=true` flag + 1h expiry |
+| D2 | Architecture | High | T2 verify-then-fix has no defined branch | Split T2 → T2a (verify, 0.25d) + T2b (fix-if-needed, 0.5-1d) |
+| D3 | Architecture | High | T3 atomic rename races in-flight FTS5 reads | Add 30s drain + 3-attempt retry decorator + `FTSSchemaChangeError` 503 |
+| D4 | Code Quality | Medium | Pydantic `Optional[list] = None` forces downstream None-checks | Switch to `default_factory=list` (D4) — matches existing `source_block_ids` convention |
+| D5 | Code Quality | Low | DRY risk: weighting logic could sprawl | Single touchpoint: `_scope_priority()` only; T10b-3 short-circuit unaffected (parent §25) |
+| D6 | Test | High | T5 vague ("新字段 round-trip + golden 50") | Expand to 6 named test files with 22 specific test methods |
+| D7 | Performance | Medium | T3 estimate "数小时" over-estimates by 1-2 orders | Refine to 30 min based on Phase 9 +268 chunks/batch × 600ms; add bench-validate step |
