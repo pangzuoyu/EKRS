@@ -9,9 +9,11 @@ related_plan: /home/pangzy/code_project/EKRS/docs/superpowers/specs/2026-07-30-d
 related_request: /home/pangzy/code_project/doc-to-md/docs/solutions/integration-issues/ekrs-scope-priority-confirmation-2026-08-14.md
 related_solution: ../integration-issues/parse-markdown-form-extractor-integration.md
 target_audience: doc-to-md development team
-status: ekrs_decision_pending_doc_to_md_confirmation
+status: ekrs_internal_decisions_recorded_pending_doc_to_md_schema_response
 ekrs_decision: option_C_with_reuse_existing_fields_optimization
 ekrs_actions: retriever_FTS5_consume_form_fields_column_headers_no_new_metadata_required
+ekrs_internal_resolutions: [item_1_internal_inference, item_2_hardcode_weights, item_3_shortcircuit_no_boost, item_4_strict_no_block, item_5_10to15_bundles_from_doc_to_md_list, item_6_defer_to_v3_data]
+pending_doc_to_md_input: [confirm_建议1_reuse_existing_fields, provide_152_long_tail_bundle_list]
 ---
 
 # EKRS scope_priority + heading_path boost 协调回复
@@ -182,18 +184,59 @@ doc-to-md 需先回答 (在 8/15 前回):
 
 ---
 
-## 五、未解决问题
+## 五、EKRS 内部裁决 (2026-08-14)
 
-1. **`metadata.scope_classifier` 整合**: doc-to-md 已 ship 该字段, 但 EKRS 方案 B 内部 `_classify_doc_type()` 推断. 是否在 Phase 12+ 把 EKRS 内部推断切换为消费 doc-to-md 的 `metadata.scope_classifier`? (统一数据流 vs 内部自治)
-2. **scope_priority[].weight 默认值**: 1.0/0.9/0.7 是 EKRS 建议值, doc-to-md 是否同意? 是否需要 config-driven 可配置? (跟 Q1 `scope_classifier` 一致)
-3. **T10b-3 短路路径下的 parity**: 当用户 query 是 form_field value (如 "Lot 49") 且短路命中时, form_field boost 是否仍生效? (parent §25: 短路是确定性优化, 不是 strict-mode 推断; 但 form_field boost 是 scope-derived, 不是 vector-derived — 边界待 EKRS 内部确认)
-4. **R6 strict mode parity**: strict=true 禁止推断; 若用户 query 是 form_field value, 是否需保留 strict 阻断 form_field boost? (parent §25 + §157)
-5. **LOT/CHECK 真实 bundle 抽样集**: doc-to-md 已有 `000151778ca35475` 1 个 bundle E2E 通过; Q3 调查识别 152 个长尾 bundle, 可作跨方验证抽样源. EKRS 端 corpus 子集待协调.
-6. **heading_path 链路缩短影响** (Phase 13 PDF filters, doc-to-md commit `1685ca3`): outline 节点 137→4, heading_path 链路大幅缩短. 对 R4 scope-aware 检索的精度影响待 V3 (golden set 50 case 回归) 量化.
+### 问题 3: T10b-3 短路路径下 form_field boost 是否生效 — **裁决: 不生效, 且这是正确行为, 不是缺陷**
+
+**理由**:
+- T10b-3 短路是**检索策略优化** — 当精确匹配命中时, 绕过 RRF 直接返回匹配结果. 短路发生在 RRF **之前**.
+- form_field boost 是 RRF **排序阶段**的权重修正, 与短路在管线不同位置.
+- 短路语义: 精确匹配 (如用户查询 "Lot 49" 直接命中 `SYSTEM NO: Lot 49`) 本身就是**最强检索信号**, 不需要额外语义加权调整排序.
+- 多精确命中 chunks 排序: 由其他**确定性信号**决定 (如 block 顺序, doc_hash 字母序), 不依赖 form_field 权重.
+
+**验证补充**: golden set 增加用例, 验证短路命中 form_field value 时, 返回结果排序确定性 (与 Phase 10 baseline 一致), 不依赖 form_field boost.
+
+### 问题 4: R6 strict mode 下 form_field boost 是否被阻断 — **裁决: 不阻断, strict 模式下照常生效**
+
+**理由**:
+- R6 禁止的是**推断** (LLM, cross-encoder 等非确定性组件).
+- form_field boost 是**确定性 scope 权重计算**, 与 doc-type 权重 (`_scope_priority`) 属于**同一类别** — 都是基于文档结构元数据的确定性加权.
+- Strict 模式下, doc-type 权重照常生效 (来自 `metadata.scope_classifier` 或 filename 推断, 确定性); form_field boost 同样照常生效. 两者都不涉及推断, 不违反 R6.
+
+**验证补充**: golden set strict=true 用例, 验证 form_field boost 不改变求解器纯函数行为 (R2), 即求解器输入/输出与 Phase 10 baseline 一致.
+
+### 问题 1: scope_classifier 整合 — **裁决: 维持现状 (EKRS 内部推断)**
+
+doc-to-md 的 `metadata.scope_classifier` 字段是**冗余信息源**, 内部自治更简单. Phase 12 方案 B 内部 `_classify_doc_type()` 已工作, 切换消费 doc-to-md 字段需要 Pydantic 模型改动 + 回填风险, ROI 不明确. 待有明确需求 (如跨 doc-type 联合统计) 再切换.
+
+### 问题 2: scope_priority[].weight 默认值 — **裁决: 采纳 EKRS 建议值, 硬编码**
+
+采纳 `heading=1.0 / form_field=0.9 / column_header=0.7`, **硬编码即可**. config-driven 是过度设计, 等有数据驱动调优需求再考虑. (若采用建议 2 引入 scope_priority 字段, 权重在 EKRS `_scope_priority()` 内常量定义.)
+
+### 问题 5: LOT/CHECK 真实 bundle 抽样集 — **裁决: doc-to-md 提供清单, EKRS 选 10-15 个**
+
+doc-to-md 提供 152 个长尾 bundle 清单 (Q3 调查识别). EKRS 从中选 **10-15 个** 作为跨方验证样本. 抽样标准: 覆盖 5 个 doc-type 各 ≥2 个, 优先选含 form_field 的 LOT/CHECK/STATUS doc.
+
+### 问题 6: heading_path 链路缩短影响 (Phase 13 PDF filters) — **裁决: 等数据再评估**
+
+Phase 13 commit `1685ca3` (PDF heading Phase 4 filters) 让 outline 节点大幅减少 (e.g. GB50019 root 137→4, RP0492 160→4). 对 R4 scope-aware 检索的精度影响待 V3 (golden set 50 case 回归) **量化数据**出来后再评估. **不提前动作.**
 
 ---
 
-## 六、回复联系人
+## 六、剩余待 doc-to-md 确认项
+
+经 §五 内部裁决, 6 项未解决问题全部有 EKRS 立场. 仍需 doc-to-md 端输入的项:
+
+| 项 | 内容 | 阻塞 |
+|---|---|---|
+| §四 行动项 | 是否接受"EKRS 直接消费已有 `metadata.form_fields` / `metadata.column_headers`"作为首选方案 (建议 1), 而 `scope_priority` 仅作为可选优化 (建议 2)? | 是, 阻塞 EKRS 端实施 (8/15 前回) |
+| 问题 5 | 提供 152 个长尾 bundle 清单 | 是, 阻塞跨方验证抽样 |
+
+doc-to-md 在收到本回复后, 优先回 §四 行动项 + 问题 5, EKRS 即可启动 Phase 12 follow-up 周次 (8/18 ~ 8/20).
+
+---
+
+## 七、回复联系人
 
 - EKRS 侧 owner: Phase 12 scope-aware 优化解锁由本文档承接
 - 后续 cross-repo 协调: 走 EKRS `docs/solutions/integration-issues/` ↔ doc-to-md 同目录双向 reply
