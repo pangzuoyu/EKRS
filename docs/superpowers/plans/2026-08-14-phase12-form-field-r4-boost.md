@@ -5,7 +5,7 @@ category: docs/superpowers/plans
 module: rag-integration
 phase: 12
 parent_plan: /home/pangzy/code_project/EKRS/docs/superpowers/specs/2026-07-30-doc-to-md-heading-path-coordination.md
-status: closed_建议1_accepted_plan_v3_gstack_eng_review_applied
+status: closed_建议1_accepted_plan_v3_gstack_eng_review_applied_§七_Item1_4step_P2_修复_in_flight
 target_window: 2026-08-18 ~ 2026-08-20
 pre_check_deadline: 2026-08-18 (verify_reingest.py 状态确认)
 ekrs_owner: Phase 12 follow-up team
@@ -296,6 +296,60 @@ def _scope_priority(chunk, form_fields=None, column_headers=None):
 |---|---|---|---|
 | 5 | `shared/ekrs_shared/models.py:Metadata` 新增 `form_fields` / `column_headers` Optional 字段 (T1 隐藏前置, 避免 IR parser 静默丢字段) | P0 | **T1 必含**, 单元测试断言 IR parser 加载到 BlockMetadata |
 
+**§七 Item 1 详细修复计划 (2026-08-14 调查发现 verify_reingest.py 不覆盖)**:
+
+**调查结论** (2026-08-14 19:xx):
+- 代码层: `check_one_doc` (line 108-132) 仅读 `metadata.heading_path`; `evaluate_gates` (line 179-203) 仅 3 gate (heading_path / scope_path / heading_less); 模块级常量仅 3 阈值. 0 引用 form_fields/column_headers.
+- 数据层: 1843 blocks (Recent 7d) 中 0/1843 form_fields, 0/1843 column_headers. 推荐 15 bundles = 14 × .doc + 1 × .eml. 331 全量 = 329 × .doc + 1 × .doc + 1 × .eml.
+- 根因: Q3 §9.6 commits (e4fbb36+023b45d+f9deae5) 2026-08-14 今日才 ship, 任何现存 data.jsonl 都未经过新代码路径. verify_reingest.py 写于 2026-07-30 (Phase 12 P1 commit 736fd3b), 早于新字段 9 天.
+
+**Gate 设计原则 (2026-08-14 决策)**: **条件 gate + 0% floor + 分布报告**, 不设猜测阈值.
+
+```python
+# 关键: 仅对 form-like 文档检查, 非 form 文档不参与
+FORM_LIKE_PATTERN = re.compile(
+    r'(lot|check|status|list|pta|checklist|ncr|form)', re.IGNORECASE
+)
+
+def _is_form_like(filename: str) -> bool:
+    return bool(FORM_LIKE_PATTERN.search(filename))
+
+# 对每个 doc 的验证逻辑
+if _is_form_like(doc.filename):
+    form_fields_ratio = count_non_empty(blocks, 'form_fields') / len(blocks)
+    column_headers_ratio = count_non_empty(blocks, 'column_headers') / len(blocks)
+
+    # 极宽松 floor: 仅捕获"字段完全丢失"的灾难性情况
+    if form_fields_ratio == 0.0 and len(blocks) >= 5:
+        warnings.append(f"{doc.filename}: form_fields 完全缺失")
+    if column_headers_ratio == 0.0 and len(blocks) >= 5:
+        warnings.append(f"{doc.filename}: column_headers 完全缺失")
+
+    # 输出分布数据供后续调整 (统计报告, 不参与 gate)
+    stats.append({
+        'filename': doc.filename,
+        'n_blocks': len(blocks),
+        'form_fields_ratio': form_fields_ratio,
+        'column_headers_ratio': column_headers_ratio,
+    })
+else:
+    # 非 form-like 文档: 跳过这些 gate, 不报告
+    pass
+```
+
+**为什么不能用 30%/50% 硬阈值**: form_fields / column_headers 只在 form-like 文档 (LOT/CHECK/STATUS/NCR) 中有语义; 对标准/规范/报告类文档, 缺失是正常且预期的. 直接设全量阈值会导致大量 false-positive. 数据不足时设精确阈值是猜测 — 用 0% floor + 分布报告, 让 8/20 联调时根据实际数据决定是否需要正式阈值.
+
+**修复 4 步 (doc-to-md 侧, P2 修复 / P3 solution doc)**:
+1. TDD 扩展 `verify_reingest.py` 加 2 条件 gate (form_fields/column_headers), 阈值默认 floor=0%, 增量 --include-form-fields 全局开关 (默认 off, 不影响现有 Q5 调用方)
+2. Re-ingest `scripts/long_tail_lot_check_152.json` §recommended_first 15 个 bundle (8/14 今晚低流量窗口, 与 Q5 re-ingest 脚本同路径, idempotent)
+3. 跑扩展 gate check: `python scripts/verify_reingest.py --gate-check --bundle-dir output/text --include-form-fields --sample-size 15`
+4. 写 `docs/solutions/integration-issues/verify-reingest-form-fields-2026-08-14.md` P3 solution doc + mirror 到 EKRS 侧同目录 (P3 记录, 不阻塞 T1-T5)
+
+**影响评估**:
+- 不阻塞 EKRS T1-T5 (EKRS schema 改造仅依赖 doc-to-md 已 ship 字段, 不依赖 verify)
+- 阻塞 8/20 联调时 "doc-to-md 端确认 emit 正确" 关闭标准
+- 现状: Q5 旧 3 gate 仍能 PASS, 但 Q3 §9.6 字段验证 = 零信号 → 8/20 联调时如发现 RAG 检索质量未提升, 无法区分是 EKRS 端 schema bug 还是 doc-to-md emit 缺失. 修复后三层 gate 可正交定位.
+
 ---
 
 ## 八、相关文件
@@ -344,6 +398,8 @@ EKRS:      docs/solutions/integration-issues/ekrs-scope-priority-reply-2026-08-1
 - 2026-08-14: reply §六 Acceptance ✅ (commit `1cc1a7f`)
 - 2026-08-14: v2 — 应用 user engineer review (D1-D6 from user: IR parser 静默丢字段风险 + FTS5 迁移详细策略 + 优先级重排)
 - 2026-08-14: v3 — 应用 gstack-plan-eng-review (D1-FTS5-suppression + D2-T2-split + D3-drain+retry + D4-default_factory + D5-single-touchpoint + D6-named-test-files + D7-estimate-refine)
+- 2026-08-14: §七 Item 1 — verify_reingest.py 调查发现不覆盖 form_fields/column_headers, 4 步 P2 修复 (条件 gate + 0% floor + 分布报告, 不设 30%/50% 硬阈值). 重 ingest 15 bundles 8/14 今晚跑, P3 solution doc 同步写.
+- 2026-08-15: 状态更新 — §七 Item 1 调查 + 4 步修复计划确认
 
 ---
 
