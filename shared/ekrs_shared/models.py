@@ -6,7 +6,7 @@ Mirrors doc-to-md DocumentBlock IR schema and adds RAG-specific types.
 from __future__ import annotations
 
 from enum import IntEnum
-from typing import Any, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -25,6 +25,12 @@ class Metadata(BaseModel):
     page_number: int = Field(default=1, ge=1)
     bbox: Optional[List[float]] = None
     heading_path: Optional[List[str]] = None
+    # Phase 12 T1: Q3 §9.6 form_field_extractor / form_table_extractor emit.
+    # Mirrors doc-to-md `metadata.form_fields` / `metadata.column_headers`.
+    # default_factory=list (gstack D4) avoids None-checks in downstream
+    # retriever._scope_priority and FTS5 string builder.
+    form_fields: List[Dict[str, Any]] = Field(default_factory=list)
+    column_headers: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class Lineage(BaseModel):
@@ -202,6 +208,12 @@ class Chunk(BaseModel):
     # = legacy chunk (pre-T10a-5 ingestion); retriever falls back to
     # `f"{doc_hash}:{source_block_ids[0]}"` for legacy chunks.
     chunk_id: Optional[str] = None
+    # Phase 12 T1: Q3 §9.6 form_field / column_header semantic boost.
+    # Populated by chunker from `block.metadata.form_fields` / `column_headers`.
+    # Written to Qdrant payload + FTS5 index for R4 scope-aware boost.
+    # default_factory=list (gstack D4) — mirrors Metadata field convention.
+    form_fields: List[Dict[str, Any]] = Field(default_factory=list)
+    column_headers: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 # --- API request/response models ---

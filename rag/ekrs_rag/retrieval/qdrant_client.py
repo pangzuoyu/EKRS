@@ -223,6 +223,12 @@ class QdrantManager:
                     "version": chunk.version,
                     "page_numbers": chunk.page_numbers,
                     "chunk_id": chunk_id,
+                    # Phase 12 T2: Q3 §9.6 form_field / column_header metadata
+                    # written to Qdrant payload for R4 scope-aware boost.
+                    # default_factory=list (gstack D4) → empty list serialized
+                    # for legacy chunks without form/table context.
+                    "form_fields": list(chunk.form_fields) if chunk.form_fields else [],
+                    "column_headers": list(chunk.column_headers) if chunk.column_headers else [],
                 }
                 points.append(models.PointStruct(
                     id=point_id,
