@@ -55,7 +55,22 @@ class ConsistencyChecker:
 
         Returns:
             drift_count (int): |fts_active - qdrant_total|. 0 = in sync.
+
+        Phase 12 F2 (D1 plan): suppress drift checks during FTS5 v1→v2
+        migration window. During rebuild, FTS active count is temporarily
+        != Qdrant total by design (rebuild is the source of truth), so the
+        5-min drift check would emit false-positive audit/counter events.
+        Reads :func:`ekrs_rag.concurrency.migration_state.is_migration_in_progress`.
         """
+        # Phase 12 F2: skip drift check during migration window.
+        from ekrs_rag.concurrency.migration_state import is_migration_in_progress
+
+        if is_migration_in_progress():
+            logger.debug(
+                "fts_consistency_check_skipped: migration in progress",
+            )
+            return 0
+
         try:
             fts_count = self._fts.count_active()
             qdrant_count = self._qdrant.count_points()

@@ -76,6 +76,7 @@ class IngestionPipeline:
         parser_token: str,
         audit_writer: AuditEmitter | None = None,
         fts: FTSManager | None = None,
+        fts_schema_version: int = 2,
     ) -> None:
         self._qdrant = qdrant
         self._shared_storage_root = Path(storage_path).resolve()
@@ -84,6 +85,12 @@ class IngestionPipeline:
         self._audit_writer = audit_writer
         # Phase 10 T10a-2: FTS sync. None = Phase 9 baseline (no FTS write).
         self._fts = fts
+        # Phase 12 F1: FTSManager target schema version. Default=2 means new
+        # ingest lands in v2 (form_fields_text + column_headers_text columns).
+        # v1 reserved for legacy DBs pending one-time migration. Pipeline does
+        # NOT migrate in-place; migration is the responsibility of an offline
+        # rebuild script (see F3 + ccd5726 4-step P2 fix).
+        self._fts_schema_version = fts_schema_version
 
     async def ingest(self, notification: IngestionNotification) -> IngestionOutcome:
         """Run full ingestion pipeline for a parser notification.
@@ -197,6 +204,9 @@ class IngestionPipeline:
         # Step 5.6: Phase 10 T10a-2 — FTS sync write (paired with Qdrant).
         # Qdrant is truth-of-record; FTS failure does NOT fail ingestion.
         # Drift (if any) is detected by ConsistencyChecker (T10a-2).
+        # Phase 12 F1: schema_version is captured at FTSManager __init__
+        # (the manager is the schema source-of-truth). replace_doc branches
+        # internally on self._schema_version. Pipeline passes through.
         if self._fts is not None:
             try:
                 self._fts.replace_doc(doc_hash, chunks, version=version)
