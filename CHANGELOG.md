@@ -8,27 +8,89 @@ from the previous phase is readable without consulting the handbook.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
 `Added`, `Changed`, `Fixed`, `Removed` per release.
 
+## [phase12] - 2026-08-15
+
+**Tag**: `phase12` (annotated, force-moved to this closure commit per
+parent plan §111). **Version**: 0.2.0 → 0.3.0 (minor bump — Phase 12
+ships new retrieval capability per Keep-a-Changelog). **Phase 12
+delivered as 5 implementation tasks + 3 follow-up tasks + §七 Item 3
+closure work** under the Q3 §9.6 last-mile plan
+`docs/superpowers/plans/2026-08-14-phase12-form-field-r4-boost.md`.
+
+**Sub-tag**: `phase12.1` locks at `090d74f` (T1+T2 chunker + Qdrant
+passthrough anchor, do-not-move).
+
+**Phase 12 closure scope**:
+
+- T1 (models) — `Chunk` + `Metadata` `form_fields`/`column_headers`
+  `default_factory=list` (gstack D4), shared at
+  `shared/ekrs_shared/models.py`.
+- T2 (chunker + IR parser + Qdrant passthrough) — `form_fields` /
+  `column_headers` survive ingestion → payload.
+- T3 (FTS5 v2 schema) — full FTS5 rebuild adds `form_fields` /
+  `column_headers` indexed columns (notional schema migration;
+  `scripts/migrate_fts_v1_to_v2.py`).
+- T4 (retriever R4 boost) — `_scope_priority()` extended with
+  `max(base, FORM_FIELD_WEIGHT=0.9)` for `form_fields`,
+  `max(base, COLUMN_HEADER_WEIGHT=0.7)` for `column_headers`.
+  R6 strict parity + R4 scope filter still apply post-boost.
+- T5 (testing) — 6 named test files cover Chunk round-trip,
+  chunker passthrough, FTS5 v2 schema + indexing, retriever form-field
+  boost; golden 50 regression at 208 passed / 0 fail.
+- F1 (pipeline wire) — `IngestionPipeline.ingest()` paired write
+  Qdrant + FTS for the new schema.
+- F2 (migration suppression) — `ConsistencyChecker` drift audit
+  suppressed during schema migration via `EKRS_FTS_MIGRATION_IN_PROGRESS`
+  flag.
+- F3 (migration script) — `scripts/migrate_fts_v1_to_v2.py`
+  orchestrates the full Qdrant-rebuild + atomic rename; 30s drain +
+  3-attempt retry decorator on FTS5 read paths.
+
+**§七 Item 3 — form_field boost toggle + recall@10 baseline** (this
+commit):
+
+- `EKRSRetriever._scope_priority(chunk, *, form_field_boost=True)` +
+  `EKRSRetriever.retrieve(query, ..., form_field_boost=None)` — kwarg
+  with `EKRS_FORM_FIELD_BOOST_ENABLED` env var default (production
+  preserves Phase 12 T4 ON-by-default).
+- `scripts/recall_at_10_form_field_baseline.py` — 15 bundles ×
+  3 anchors × 2 rounds (boost ON / OFF) comparison, with synthetic +
+  real-infra modes. Script always passes `form_field_boost` explicitly,
+  no env-var dependency for the measurement.
+- `docs/superpowers/research/2026-08-15-recall-at-10-form-field.md` —
+  synthetic baseline numbers (form_field OFF 0/15 → ON 15/15, Δ+15) and
+  the known coverage gap: column_header / heading synthetic does not
+  exercise boost paths — real-infra validation deferred to 8/20 联调
+  per plan §五 验收门槛.
+
+**Unresolved → 8/20 联调** (parked, not blocking closure):
+
+- §七 Item 3 P0 — real-data recall@10 on 15 LOT/CHECK recommended
+  bundles (verifies synthetic form_field 0/15 → 15/15 signal
+  reproduces; column_header boost effectiveness unverified by
+  synthetic).
+
+**Decisions recorded in this closure**:
+
+- FTSManager full description migrated from `[Unreleased]` to
+  `[phase10]` below (resolves pre-existing cross-reference drift).
+- 3 untracked `docs/superpowers/plans/2026-07-28 / 2026-07-29`
+  Phase 10 plans historical-cleanup-committed (content verified
+  against Phase 10 actual delivery — no NOTE drift).
+
+---
+
 ## [Unreleased]
 
+Phase 10 incremental tasks (T10a-2 / T10a-3 / T10a-4 / T10a-5 /
+T10a-6 / T10b-1 / T10b-3 / T10d Td.1 / T10d Td.2) and Phase 11 entries
+still need housekeeping — migration into [phase10] / [phase11]
+sections deferred per ruling 2 (only FTSManager description migrated
+in this closure; other entries kept in [Unreleased] for future
+housekeeping).
+
 ### Added
-- **FTSManager — BM25 keyword retrieval via SQLite FTS5**
-  (T10a-1, Phase 10): new module
-  `rag/ekrs_rag/retrieval/fts_manager.py`. Schema is
-  `CREATE VIRTUAL TABLE blocks_fts USING fts5(...)` with 7 columns
-  (`chunk_id`, `block_id`, `text`, `scope_path`, `status`, `doc_hash`,
-  `payload_json`); tokenizer `unicode61 remove_diacritics 2` (no porter,
-  per Phase 10 plan §Context lock). `payload_json` is UNINDEXED so JSON
-  keys do not contaminate MATCH. `generate_chunk_id(doc_hash, index)`
-  emits `{doc_hash[:8]}-{index:04d}` (T10a-1 owns the generator;
-  T10a-5 owns the retriever-side timing). 23 unit tests +
-  8 integration tests cover: BM25 normalization `|bm25|/(1+|bm25|)`
-  floor 0.01, R7 scope_path OR-filter (column-restricted MATCH syntax),
-  R8 `status != 'illegal'` filter, H2 `delete_by_chunk_id` single-row
-  rollback primitive, T10a-5 bidirectional `get_chunk_id(block_id)`
-  invariant, T10a-6 3 engineering-identifier smoketest
-  (`A312-TP316` / `GB-T 12459` / `1.6MPa`). T10a-1 boundary: schema +
-  CRUD + BM25 归一化 only; pipeline ingest wiring = T10a-2,
-  retriever fusion = T10a-4, audit events = T10a-7.
+
 - **Pipeline FTS sync + consistency drift detection**
   (T10a-2, Phase 10): `IngestionPipeline.ingest()` writes FTS rows
   paired with Qdrant upsert (Step 5.6, FTS failure does NOT fail
@@ -585,11 +647,24 @@ cross-encoder trigger per parent §6.1.
 
 ### Added — T10a-1 (BM25 keyword retrieval)
 
-`FTSManager` (SQLite FTS5 mirror of Qdrant payload) — see [Unreleased]
-above for full description. 30 unit + integration tests. Path
+**FTSManager — BM25 keyword retrieval via SQLite FTS5** (T10a-1, Phase 10):
+new module `rag/ekrs_rag/retrieval/fts_manager.py`. Schema is
+`CREATE VIRTUAL TABLE blocks_fts USING fts5(...)` with 7 columns
+(`chunk_id`, `block_id`, `text`, `scope_path`, `status`, `doc_hash`,
+`payload_json`); tokenizer `unicode61 remove_diacritics 2` (no porter,
+per Phase 10 plan §Context lock). `payload_json` is UNINDEXED so JSON
+keys do not contaminate MATCH. `generate_chunk_id(doc_hash, index)`
+emits `{doc_hash[:8]}-{index:04d}` (T10a-1 owns the generator;
+T10a-5 owns the retriever-side timing). 23 unit tests +
+8 integration tests cover: BM25 normalization `|bm25|/(1+|bm25|)`
+floor 0.01, R7 scope_path OR-filter (column-restricted MATCH syntax),
+R8 `status != 'illegal'` filter, H2 `delete_by_chunk_id` single-row
+rollback primitive, T10a-5 bidirectional `get_chunk_id(block_id)`
+invariant, T10a-6 3 engineering-identifier smoketest
+(`A312-TP316` / `GB-T 12459` / `1.6MPa`). T10a-1 boundary: schema +
+CRUD + BM25 归一化 only; pipeline ingest wiring = T10a-2,
+retriever fusion = T10a-4, audit events = T10a-7. Path
 `/app/rag/fts.sqlite`, sync `sqlite3` with `check_same_thread=False`.
-Tokenizer `unicode61 remove_diacritics 2`. Schema 7 columns with
-`payload_json UNINDEXED`. `generate_chunk_id` owner (T10a-5 reader).
 
 ### Added — T10a-2 (FTS pipeline sync + drift)
 

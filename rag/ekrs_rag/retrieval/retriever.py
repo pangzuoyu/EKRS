@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
@@ -22,6 +23,14 @@ from ekrs_rag.retrieval.qdrant_client import QdrantManager
 from ekrs_rag.retrieval.rank_fusion import FusionStats, reciprocal_rank_fusion
 
 logger = logging.getLogger(__name__)
+
+# Phase 12 §七 Item 3: env-var default for ``retrieve(..., form_field_boost=...)``.
+# ``"true"`` (default) preserves Phase 12 T4 behavior post-toggle; setting
+# ``EKRS_FORM_FIELD_BOOST_ENABLED=false`` flips to legacy T3 base-only path
+# for the §七 Item 3 recall@10 baseline script's "boost OFF" round.
+_FORM_FIELD_BOOST_ENABLED_ENV_DEFAULT: bool = (
+    os.getenv("EKRS_FORM_FIELD_BOOST_ENABLED", "true").lower() != "false"
+)
 
 _SCOPE_PRIORITY_MAP = {
     "national": 100, "industry": 80, "enterprise": 60, "project": 40, "reference": 20,
@@ -85,7 +94,15 @@ class EKRSRetriever:
         query: str,
         top_k: int = 40,
         active_scope: Optional[List[str]] = None,
+        form_field_boost: Optional[bool] = None,
     ) -> RetrievalResult:
+        # Phase 12 §七 Item 3: ``form_field_boost=None`` falls back to module-
+        # level env var ``EKRS_FORM_FIELD_BOOST_ENABLED`` (default ``True``,
+        # preserves Phase 12 T4 behavior). Explicit ``True``/``False``
+        # overrides env var. The §七 Item 3 baseline script passes both
+        # values explicitly so env var flakiness doesn't bias the run.
+        if form_field_boost is None:
+            form_field_boost = _FORM_FIELD_BOOST_ENABLED_ENV_DEFAULT
         # Parallel retrieval: vector + FTS in two threads. FTS exception
         # is isolated via ``gather(return_exceptions=True)``; FTS failure
         # degrades to vector-only results (logged at WARNING).
@@ -183,7 +200,7 @@ class EKRSRetriever:
 
         # scope_priority re-rank (Phase 6B _rank_by_scope, unchanged).
         chunks, vec_scores, scope_scores, final_scores = self._rank_by_scope(
-            filtered_chunks, filtered_scores
+            filtered_chunks, filtered_scores, form_field_boost=form_field_boost
         )
 
         # Hint extraction per chunk (Phase 6B invariant — populate
@@ -249,13 +266,19 @@ class EKRSRetriever:
         )
 
     @staticmethod
-    def _scope_priority(chunk: Chunk) -> float:
+    def _scope_priority(chunk: Chunk, form_field_boost: bool = True) -> float:
         """Compute R4 scope-aware priority score for a chunk.
 
         Base score from scope_path[0] (national=1.0 .. reference=0.2).
         Phase 12 T4 boost: form_fields → max with FORM_FIELD_WEIGHT=0.9;
         column_headers → max with COLUMN_HEADER_WEIGHT=0.7. Both boosts
         are deterministic (R6 strict parity).
+
+        ``form_field_boost`` (Phase 12 §七 Item 3, default ``True``):
+        ``False`` skips both form_field/column_header max — returns base
+        only. Used by the recall@10 baseline script to compare boost
+        ON vs OFF on the same corpus. Phase 12 T4 default behavior is
+        preserved when callers omit the kwarg.
         """
         if chunk.scope_path:
             first = chunk.scope_path[0].lower()
@@ -263,10 +286,11 @@ class EKRSRetriever:
         else:
             base = 0.0
         score = base
-        if chunk.form_fields:
-            score = max(score, FORM_FIELD_WEIGHT)
-        if chunk.column_headers:
-            score = max(score, COLUMN_HEADER_WEIGHT)
+        if form_field_boost:
+            if chunk.form_fields:
+                score = max(score, FORM_FIELD_WEIGHT)
+            if chunk.column_headers:
+                score = max(score, COLUMN_HEADER_WEIGHT)
         return score
 
     @staticmethod
@@ -299,10 +323,10 @@ class EKRSRetriever:
             return []
         return [i for i, c in enumerate(chunks) if q in c.text]  # type: ignore[operator]  # Chunk.text is str
 
-    def _rank_by_scope(self, chunks, vector_scores):
+    def _rank_by_scope(self, chunks, vector_scores, form_field_boost: bool = True):
         if not chunks:
             return [], [], [], []
-        scope_scores = [self._scope_priority(c) for c in chunks]
+        scope_scores = [self._scope_priority(c, form_field_boost=form_field_boost) for c in chunks]
         final_scores = [vec * (1 + scope) for vec, scope in zip(vector_scores, scope_scores)]
         combined = list(zip(chunks, vector_scores, scope_scores, final_scores))
         combined.sort(key=lambda x: x[3], reverse=True)
