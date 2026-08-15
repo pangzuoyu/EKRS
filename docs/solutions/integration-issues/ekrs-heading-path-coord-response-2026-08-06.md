@@ -8,10 +8,10 @@ component: block-assigner + scope-classifier
 related_plan: /home/pangzy/code_project/EKRS/docs/superpowers/specs/2026-07-30-doc-to-md-heading-path-coordination.md
 related_schema: /home/pangzy/code_project/EKRS/docs/superpowers/specs/2026-07-30-ekrs-expected-heading-path-schema.md
 target_audience: EKRS development team
-status: all_6_items_done + V1_V2_V3_2026-08-15_closed
-ekrs_actions_pending: none — V1/V2/V3 validated 2026-08-15 (commit d66f8a3)
+status: all_6_items_done + V1_V2_V3_2026-08-15_closed + Boundary3_2026-08-15_verified
+ekrs_actions_pending: none — V1/V2/V3 + Boundary 3 validated 2026-08-15 (commits d66f8a3 + 2f51cdc)
 doc_to_md_commits: f3a6a36 (Q1) / 736fd3b (Q5) / f140772 (docs) / 1685ca3 (Phase 4) / 240df0b (Q3 obs) / 2026-08-14 (item #6 P3 warning)
-ekrs_validation_commits: d66f8a3 (V2 unit test) + 85b1f04 (F1+F2+F3) + 6b726bd (T3+T4) + 090d74f (T1+T2)
+ekrs_validation_commits: d66f8a3 (V2 unit test) + 2f51cdc (Boundary 3 unit test) + 85b1f04 (F1+F2+F3) + 6b726bd (T3+T4) + 090d74f (T1+T2)
 ---
 
 # EKRS heading_path 协调报告完成情况回复
@@ -261,6 +261,40 @@ assert boundary2_delta > 0  # MET — V2 acceptance: delta > 0
 
 **实现路径**: `_route_accumulated_group` (T10b-1 helper) 同步 Boundary 2 (scope-change) + Boundary 3 (token-overflow). 当 heading_path 在 consecutive blocks 间变化时, Boundary 2 触发 flush, 后续 chunks 各自带正确 scope_path.
 
+#### V2 续 — Boundary 3 (token-overflow) 验证 (2026-08-15)
+
+**触发**: V2 验证完结后, EKRS 内部 follow-up — 既然 `_route_accumulated_group` 同时处理 Boundary 2 + Boundary 3, 两个 force-merge 边都必须独立验证. Phase 10 plan §GSTACK REVIEW [HIGH] 提示: deep-nesting docs 触发 token-overflow 比 scope-change 更频繁.
+
+**新增测试**: `rag/tests/unit/test_chunker_boundary3_frequency.py` (commit `2f51cdc`)
+
+| 测试场景 | scope 变化 | text 长度 | max_tokens | 预期 chunks | Boundary 3 触发 |
+|---|---|---|---|---|---|
+| 3 长块同 scope | `None` (不变) | 1000 chars each | 500 | ≥ 2 | ≥ 1 次 ✓ |
+| 3 短块同 scope | 不变 | short | 500 | 1 | 0 次 ✓ |
+| 10 长块紧预算 | 不变 | 500 chars each | 200 | ≥ 2 | ≥ 1 次 ✓ |
+| 5 巨块同 scope | 不变 | 1000 chars each | 100 | ≥ 2, 同 scope_path | ≥ 1 次 ✓ |
+
+**test_boundary3_distinct_from_boundary2 测试** (核心 acceptance — 两边界独立):
+
+```python
+# 5 huge blocks, ALL same scope → Boundary 2 cannot fire
+# Token overflow alone → Boundary 3 must still split
+huge_blocks = [
+    _make_block("word " * 200, ["Constant Scope"], f"b{i}")
+    for i in range(5)
+]
+chunks = chunk_blocks(huge_blocks, doc_hash="d3", version=1, max_tokens=100)
+assert len(chunks) >= 2
+
+# All chunks share same scope_path (Boundary 2 never fired)
+scope_paths = {tuple(c.scope_path) for c in chunks}
+assert len(scope_paths) == 1
+```
+
+**结论**: Boundary 3 (token-overflow) 独立触发确认. `_route_accumulated_group` 在同一 scope 内仅靠 token 预算也能强制 flush, 无需依赖 scope-change. **MET** ✓.
+
+**实现路径**: chunker.py:813-832 同步 Boundary 3 逻辑 (`current_tokens + text_tokens > max_tokens`) 调用同一个 `_route_accumulated_group` helper. Phase 10 T10b-1 refactor 完成时已实现, 本次只是补测试.
+
 ### V3. Golden set 50 case 回归 — 结果
 
 **命令** (在 EKRS repo):
@@ -285,15 +319,17 @@ Pytest: 208 passed
 |---|---|---|---|
 | V1 T10b-2 retest | `python t10b2_trigger_test.py` | cond#1: 100%→69.6% (改善); cond#2: mean=59.8 NOT MET | **CLOSE CANDIDATE** ✓ |
 | V2 Boundary 2 frequency | `pytest test_chunker_boundary2_frequency.py` | 4/4 pass, delta > 0 ✓ | **MET** ✓ |
+| V2 续 Boundary 3 frequency | `pytest test_chunker_boundary3_frequency.py` | 4/4 pass, distinct-from-B2 验证 ✓ | **MET** ✓ |
 | V3 Golden set 50 case | `pytest tests/golden_set/ -v` | 208 passed, 0 failures | **MET** ✓ |
 
-**协调报告正式关闭**: §六 全部 6 协调项 + V1/V2/V3 验收 = 全部完成. 无开放项阻塞 Phase 12 scope-aware 优化解锁.
+**协调报告正式关闭**: §六 全部 6 协调项 + V1/V2/V3 验收 + V2 续 (Boundary 3) 独立验证 = 全部完成. 无开放项阻塞 Phase 12 scope-aware 优化解锁.
 
 **EKRS Phase 12 ships**:
 - `090d74f` T1+T2: models + chunker + Qdrant payload
 - `6b726bd` T3+T4: FTS5 schema v2 + retriever scope boost
 - `85b1f04` F1+F2+F3: pipeline wire + migration suppression + script
 - `d66f8a3` V2 unit test (semantic Boundary 2 verification)
+- `2f51cdc` V2 续 unit test (semantic Boundary 3 verification, token-overflow 独立触发)
 
 **生产环境 gating 状态** (per F3 runbook `docs/solutions/integration-issues/migrate-fts-runbook-2026-08-15.md`):
 - [x] verify_reingest.py P2 修复 shipped (`ccd5726`)
