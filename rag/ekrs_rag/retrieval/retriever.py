@@ -27,6 +27,16 @@ _SCOPE_PRIORITY_MAP = {
     "national": 100, "industry": 80, "enterprise": 60, "project": 40, "reference": 20,
 }
 
+# Phase 12 T4: form_field / column_header R4 scope-aware boost.
+# Q3 §9.6 last-mile: form-extracted fields carry strong semantic authority
+# (e.g. LOT 49 / SYSTEM NO from a project checklist) — boost the scope
+# score so they outrank reference-tier chunks with same vector score.
+# FORM_FIELD_WEIGHT > COLUMN_HEADER_WEIGHT because form metadata is
+# document-level (key=value identity), while column_headers are
+# table-presentation. R6 strict parity: deterministic, no LLM/cross-encoder.
+FORM_FIELD_WEIGHT = 0.9
+COLUMN_HEADER_WEIGHT = 0.7
+
 
 @dataclass
 class RetrievalResult:
@@ -231,14 +241,33 @@ class EKRSRetriever:
             page_numbers=payload.get("page_numbers", []),
             numeric_hints=[],
             chunk_id=payload.get("chunk_id"),  # T10a-5: FTS↔Qdrant round-trip
+            # Phase 12 T4: form_fields / column_headers populated from Qdrant
+            # payload (T2 chunker + QdrantManager wrote them). Defaults to
+            # empty list (gstack D4) for legacy chunks pre-T2.
+            form_fields=payload.get("form_fields", []),
+            column_headers=payload.get("column_headers", []),
         )
 
     @staticmethod
     def _scope_priority(chunk: Chunk) -> float:
-        if not chunk.scope_path:
-            return 0.0
-        first = chunk.scope_path[0].lower()
-        return _SCOPE_PRIORITY_MAP.get(first, 40) / 100.0
+        """Compute R4 scope-aware priority score for a chunk.
+
+        Base score from scope_path[0] (national=1.0 .. reference=0.2).
+        Phase 12 T4 boost: form_fields → max with FORM_FIELD_WEIGHT=0.9;
+        column_headers → max with COLUMN_HEADER_WEIGHT=0.7. Both boosts
+        are deterministic (R6 strict parity).
+        """
+        if chunk.scope_path:
+            first = chunk.scope_path[0].lower()
+            base = _SCOPE_PRIORITY_MAP.get(first, 40) / 100.0
+        else:
+            base = 0.0
+        score = base
+        if chunk.form_fields:
+            score = max(score, FORM_FIELD_WEIGHT)
+        if chunk.column_headers:
+            score = max(score, COLUMN_HEADER_WEIGHT)
+        return score
 
     @staticmethod
     def _chunk_key(chunk: Chunk) -> str:

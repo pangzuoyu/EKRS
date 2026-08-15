@@ -45,10 +45,43 @@ class FTSManager:
     );
     """
 
-    def __init__(self, db_path: Path) -> None:
+    # Phase 12 T3: v2 schema adds UNINDEXED form_fields_text /
+    # column_headers_text columns. UNINDEXED (FTS5 pk=0) avoids polluting
+    # BM25 scoring with form key/value tokens; instead they live in payload
+    # for retriever-side R4 scope boost lookup.
+    #
+    # FTS5 ALTER TABLE ADD COLUMN is NOT supported (SQLite limitation).
+    # Upgrade path = full rebuild via :meth:`_rebuild_to_v2`. See plan D3.
+    SCHEMA_V2 = """
+    CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
+        chunk_id UNINDEXED,
+        block_id UNINDEXED,
+        text,
+        scope_path,
+        status UNINDEXED,
+        doc_hash UNINDEXED,
+        payload_json UNINDEXED,
+        form_fields_text UNINDEXED,
+        column_headers_text UNINDEXED,
+        tokenize = 'unicode61 remove_diacritics 2'
+    );
+    """
+
+    def __init__(self, db_path: Path, schema_version: int = 1) -> None:
+        """Initialize FTS5 manager.
+
+        Args:
+            db_path: SQLite file path.
+            schema_version: 1 = legacy (T10a-5 columns only); 2 = Phase 12 T3
+                (adds form_fields_text / column_headers_text UNINDEXED columns).
+                Default 1 preserves T10a-5 byte-level baseline for production
+                until rebuild completes.
+        """
         # check_same_thread=False: shared across FastAPI worker threads.
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._conn.execute(self.SCHEMA)
+        self._schema_version = schema_version
+        schema_sql = self.SCHEMA_V2 if schema_version == 2 else self.SCHEMA
+        self._conn.execute(schema_sql)
         self._conn.commit()
 
     def upsert(
@@ -253,20 +286,47 @@ class FTSManager:
                 "version": chunk.version,
                 "payload_version": chunk.payload_version,
             }
-            self._conn.execute(
-                "INSERT INTO blocks_fts "
-                "(chunk_id, block_id, text, scope_path, status, doc_hash, payload_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    chunk_id,
-                    block_id,
-                    chunk.text,
-                    scope_str,
-                    "active",
-                    chunk.doc_hash,
-                    _json.dumps(payload, ensure_ascii=False),
-                ),
+            form_fields_json = _json.dumps(
+                chunk.form_fields if chunk.form_fields else [],
+                ensure_ascii=False,
             )
+            column_headers_json = _json.dumps(
+                chunk.column_headers if chunk.column_headers else [],
+                ensure_ascii=False,
+            )
+            if self._schema_version == 2:
+                self._conn.execute(
+                    "INSERT INTO blocks_fts "
+                    "(chunk_id, block_id, text, scope_path, status, doc_hash, "
+                    "payload_json, form_fields_text, column_headers_text) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        chunk_id,
+                        block_id,
+                        chunk.text,
+                        scope_str,
+                        "active",
+                        chunk.doc_hash,
+                        _json.dumps(payload, ensure_ascii=False),
+                        form_fields_json,
+                        column_headers_json,
+                    ),
+                )
+            else:
+                self._conn.execute(
+                    "INSERT INTO blocks_fts "
+                    "(chunk_id, block_id, text, scope_path, status, doc_hash, payload_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        chunk_id,
+                        block_id,
+                        chunk.text,
+                        scope_str,
+                        "active",
+                        chunk.doc_hash,
+                        _json.dumps(payload, ensure_ascii=False),
+                    ),
+                )
             written += 1
         self._conn.commit()
         return written
