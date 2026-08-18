@@ -91,6 +91,25 @@ housekeeping).
 
 ### Added
 
+- **Phase 12-A: E2E test runner integration scaffolding**
+  (T10d-style incremental; goal from user 2026-07-30 evaluation of
+  Phase 11 closure open issues). Adds Makefile targets `test-e2e`
+  (first-time setup + run), `test-e2e-ci` (cache-warm CI variant),
+  and `test-e2e-ready` (pre-flight check). New executable
+  `dev_ui_v2/scripts/check-ci-ready.sh` verifies four prerequisites
+  (Node ≥ 20.20.0, `npx playwright` wired, Playwright Chromium
+  browser cache present, MSW worker file at
+  `dev_ui_v2/public/mockServiceWorker.js`) and exits 0 on success.
+  `dev_ui_v2/README.md` gains an "E2E tests (Playwright)" section
+  documenting the three commands and the rationale for `webServer`
+  being dev-mode not preview-mode. Covered by 5 pytest integration
+  tests in `rag/tests/unit/test_check_ci_ready.py` that exercise
+  each failure mode plus the happy path with controlled PATH /
+  HOME / `DEV_UI_V2_ROOT_OVERRIDE`. **Not yet wired to PR CI**;
+  Phase 12-B will add the `.github/workflows/e2e-tests.yml` job
+  once `make test-e2e` has been stable in local development for
+  at least one phase cycle.
+
 - **Pipeline FTS sync + consistency drift detection**
   (T10a-2, Phase 10): `IngestionPipeline.ingest()` writes FTS rows
   paired with Qdrant upsert (Step 5.6, FTS failure does NOT fail

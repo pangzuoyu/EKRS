@@ -27,6 +27,39 @@ npm run format:check  # Prettier check (CI gate)
 npm run check:bundle  # CI gate: dist/assets/*.js gzipped ≤ 500 KB
 ```
 
+## E2E tests (Playwright)
+
+Headless Chromium runs the 6 specs under `tests/e2e/` against the Vite dev
+server. MSW's service worker (`public/mockServiceWorker.js`) intercepts
+`/v1/*` and `/healthz` so no RAG backend is needed — the same wildcard-host
+handlers from `tests/mocks/handlers.ts` that the Vitest suite uses.
+
+| From repo root          | Effect                                                     |
+| ----------------------- | ---------------------------------------------------------- |
+| `make test-e2e`         | First-time setup (`npm ci` + Playwright Chromium install) + run |
+| `make test-e2e-ci`      | CI-mode: assumes Playwright cache warm, runs specs only     |
+| `make test-e2e-ready`   | Pre-flight: node ≥ 20.20.0, Playwright + Chromium + MSW worker present |
+
+Or step inside `dev_ui_v2/`:
+
+```bash
+npm run test:e2e          # playwright test
+npm run test:e2e:ui       # headed UI for local debugging
+```
+
+### Notes
+
+- `playwright.config.ts` runs the dev server (`npm run dev`) as `webServer`,
+  NOT `npm run preview`. The MSW worker only registers when
+  `import.meta.env.DEV` is true, so a production build would bypass the
+  mock backend entirely. The build is also faster and avoids the need to
+  rebuild for every iteration.
+- `fullyParallel: false` + `workers: 1` keep MSW handler state predictable
+  across specs (see `playwright.config.ts` comments); removing those in
+  favor of parallel runs is a deliberate trade-off, not an oversight.
+- E2E does NOT yet run in CI on PRs — that wiring is Phase 12-B. Until
+  then, run `make test-e2e` locally before merging UI-affecting changes.
+
 ## Layout
 
 ```

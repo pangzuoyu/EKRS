@@ -1,4 +1,4 @@
-.PHONY: dev test lint mock-notify install clean heavy-test golden-test
+.PHONY: dev test lint mock-notify install clean heavy-test golden-test test-e2e test-e2e-ci
 
 PYTHON ?= python3
 PIP ?= pip
@@ -53,6 +53,20 @@ mock-notify:
 # header for exit-code contract).
 smoke-ingestion:
 	@bash scripts/smoke_ingestion.sh
+
+# Phase 12-A: Playwright E2E suite (dev_ui_v2). Runs 6 existing T11-3
+# specs under headless Chromium with MSW intercepting /v1/* + /healthz.
+# Local first-time setup installs the Chromium browser (~250 MB); CI
+# variant assumes the cache is warm.
+test-e2e:
+	cd dev_ui_v2 && npm ci && npx playwright install --with-deps chromium && npm run test:e2e
+test-e2e-ci:
+	cd dev_ui_v2 && npm ci --omit=optional && npx playwright test
+# Pre-flight that the E2E environment can actually run the suite.
+# Useful in restricted environments where `npx playwright install` is
+# disallowed; see dev_ui_v2/scripts/check-ci-ready.sh.
+test-e2e-ready:
+	@bash dev_ui_v2/scripts/check-ci-ready.sh
 
 # Phase 8 T8-3a: rebuild the locked-down reference image and capture
 # its SHA256 into deployment/rag-image.baseline.json.
