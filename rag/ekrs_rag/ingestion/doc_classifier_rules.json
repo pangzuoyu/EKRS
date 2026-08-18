@@ -1,0 +1,11 @@
+{
+  "_comment": "Phase 12 Task C: filename → doc_type classifier rules. First-match-wins; rules evaluated top-to-bottom. priority maps to R4 scope-priority (0-100, divided by 100 for the retriever score). Edit in place; pipeline reads at startup via Pydantic Settings. Override path via EKRS_DOC_CLASSIFIER_RULES_PATH env var.",
+  "rules": [
+    {"pattern": "^GB[/_T-]?\\d",                          "doc_type": "national_standard", "priority": 100},
+    {"pattern": "^HG[/_T-]?\\d",                          "doc_type": "industry_standard", "priority": 80},
+    {"pattern": "^Q[/_-]?\\d",                            "doc_type": "enterprise_spec",   "priority": 60},
+    {"pattern": "Lot\\s*\\d+|NCR|DCN|Check[- ]?list|Exception\\s*List", "doc_type": "lot_checklist", "priority": 60},
+    {"pattern": "^SA[-_]",                                "doc_type": "project_spec",      "priority": 40}
+  ],
+  "default": {"doc_type": "unknown", "priority": 40}
+}
