@@ -1,0 +1,191 @@
+{
+  "summary": {
+    "tool": "extract_ground_truth_labels.py",
+    "phase": "12-A follow-up (8/20 联调 prep)",
+    "label_format": {
+      "anchor_type": "form_field | column_header | heading",
+      "anchor_value": "string used as query (LOT or header name)",
+      "expected_chunk_id": "Phase 12 T10a-5 chunk_id ({doc_hash[:8]}-{idx:04d})"
+    },
+    "per_anchor_policy": "SKIP+WARNING (no candidate) — not a failure"
+  },
+  "recommended_first": [
+    {
+      "bundle_id": "000151778ca35475",
+      "filename": "7-Lot00 NCR Status Report.doc",
+      "doc_type": "lot",
+      "n_blocks": 7,
+      "coverage_pct": 0.0,
+      "sample_priority": "high",
+      "ground_truth": [
+        {
+          "anchor_type": "form_field",
+          "anchor_value": "Lot 0",
+          "expected_chunk_id": "00015177-0002"
+        }
+      ]
+    },
+    {
+      "bundle_id": "03733760454ba6b7",
+      "filename": "6-Lot11 DCN Status Report.doc",
+      "doc_type": "lot",
+      "n_blocks": 5,
+      "coverage_pct": 0.0,
+      "sample_priority": "high",
+      "ground_truth": [
+        {
+          "anchor_type": "form_field",
+          "anchor_value": "Lot 11",
+          "expected_chunk_id": "03733760-0002"
+        }
+      ]
+    },
+    {
+      "bundle_id": "0569ee094a3746b1",
+      "filename": "6-Lot44 DCN Status Report.doc",
+      "doc_type": "lot",
+      "n_blocks": 5,
+      "coverage_pct": 0.0,
+      "sample_priority": "high",
+      "ground_truth": [
+        {
+          "anchor_type": "form_field",
+          "anchor_value": "Lot 44",
+          "expected_chunk_id": "0569ee09-0002"
+        }
+      ]
+    },
+    {
+      "bundle_id": "05a17ee938e0eddb",
+      "filename": "5-Lot16 Exception List.doc",
+      "doc_type": "lot",
+      "n_blocks": 7,
+      "coverage_pct": 0.0,
+      "sample_priority": "high",
+      "ground_truth": [
+        {
+          "anchor_type": "form_field",
+          "anchor_value": "Lot 16",
+          "expected_chunk_id": "05a17ee9-0002"
+        }
+      ]
+    },
+    {
+      "bundle_id": "05fee2814b690d0d",
+      "filename": "7-Lot03 NCR Status Report.doc",
+      "doc_type": "lot",
+      "n_blocks": 7,
+      "coverage_pct": 0.0,
+      "sample_priority": "high",
+      "ground_truth": []
+    },
+    {
+      "bundle_id": "06089e20e1f6ca14",
+      "filename": "5-Lot10 Exception List.doc",
+      "doc_type": "lot",
+      "n_blocks": 7,
+      "coverage_pct": 0.0,
+      "sample_priority": "high",
+      "ground_truth": [
+        {
+          "anchor_type": "form_field",
+          "anchor_value": "Lot 10",
+          "expected_chunk_id": "06089e20-0002"
+        }
+      ]
+    },
+    {
+      "bundle_id": "07aee7a42e608e76",
+      "filename": "3-Lot43 Check-list.doc",
+      "doc_type": "lot",
+      "n_blocks": 7,
+      "coverage_pct": 0.0,
+      "sample_priority": "high",
+      "ground_truth": [
+        {
+          "anchor_type": "form_field",
+          "anchor_value": "Lot 43",
+          "expected_chunk_id": "07aee7a4-0002"
+        }
+      ]
+    },
+    {
+      "bundle_id": "09649e4676322569",
+      "filename": "3-Lot52 Check-list.doc",
+      "doc_type": "lot",
+      "n_blocks": 7,
+      "coverage_pct": 0.0,
+      "sample_priority": "high",
+      "ground_truth": [
+        {
+          "anchor_type": "form_field",
+          "anchor_value": "Lot 52",
+          "expected_chunk_id": "09649e46-0002"
+        }
+      ]
+    },
+    {
+      "bundle_id": "14f30f460c53b3c1",
+      "filename": "4-Check-list.doc",
+      "doc_type": "check",
+      "n_blocks": 7,
+      "coverage_pct": 0.0,
+      "sample_priority": "high",
+      "ground_truth": []
+    },
+    {
+      "bundle_id": "19bf452b5342a22d",
+      "filename": "CC06121132-00-HSE-CK-001 OT checklist.doc",
+      "doc_type": "check",
+      "n_blocks": 25,
+      "coverage_pct": 0.0,
+      "sample_priority": "high",
+      "ground_truth": []
+    },
+    {
+      "bundle_id": "2e18248cc33c2de4",
+      "filename": "5-Check list-QAQC.doc",
+      "doc_type": "check",
+      "n_blocks": 7,
+      "coverage_pct": 0.0,
+      "sample_priority": "high",
+      "ground_truth": []
+    },
+    {
+      "bundle_id": "5d38b954a217ca26",
+      "filename": "8-NCR STATUS REPORT.doc",
+      "doc_type": "status",
+      "n_blocks": 7,
+      "coverage_pct": 0.0,
+      "sample_priority": "high",
+      "ground_truth": []
+    },
+    {
+      "bundle_id": "bed1c0022c7a7943",
+      "filename": "7-DCN STATUS REPORT.doc",
+      "doc_type": "status",
+      "n_blocks": 7,
+      "coverage_pct": 0.0,
+      "sample_priority": "high",
+      "ground_truth": []
+    },
+    {
+      "bundle_id": "10bc38a340e2ca04",
+      "filename": "Re Bidder List for Subcontract Package.eml",
+      "doc_type": "list",
+      "n_blocks": 1,
+      "coverage_pct": 0.0,
+      "sample_priority": "high",
+      "ground_truth": []
+    },
+    {
+      "bundle_id": "3e6935923ad06db7",
+      "filename": "6-EXCEPTION LIST.doc",
+      "doc_type": "list",
+      "n_blocks": 7,
+      "coverage_pct": 0.0,
+      "sample_priority": "high",
+      "ground_truth": []
+    }
+  ]
+}
