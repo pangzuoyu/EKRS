@@ -128,13 +128,14 @@ def pick_column_header_chunk(
     header_value: str,
 ) -> Optional[str]:
     """Return chunk_id of the chunk whose ``column_headers`` list contains
-    a dict with ``name == header_value`` AND whose ``text`` substring-
+    a dict with ``header == header_value`` AND whose ``text`` substring-
     matches the header value.
 
     Heuristic rationale: column_headers is a list of dicts (Phase 12 T1
-    schema) — we match on the dict's ``name`` field and require the
-    header text to appear in the chunk's body text (otherwise the dict
-    could be from a header-row-only block without body context).
+    schema, shape ``{index: int, header: str}``) — we match on the dict's
+    ``header`` field and require the header text to appear in the chunk's
+    body text (otherwise the dict could be from a header-row-only block
+    without body context).
     Tie-break: R4 scope_priority desc, then chunk_index asc.
     """
     if not chunks or not header_value:
@@ -144,7 +145,7 @@ def pick_column_header_chunk(
         for c in chunks
         if header_value in (c.get("text") or "")
         and any(
-            isinstance(h, dict) and h.get("name") == header_value
+            isinstance(h, dict) and h.get("header") == header_value
             for h in (c.get("column_headers") or [])
         )
     ]
@@ -200,14 +201,14 @@ def parse_lot_from_filename(filename: str) -> Optional[str]:
 
 
 def first_column_header_value(chunks: List[Dict[str, Any]]) -> Optional[str]:
-    """Pick the first ``column_headers[].name`` we encounter across the
-    bundle's chunks. Returns the header name string, or ``None`` if no
+    """Pick the first ``column_headers[].header`` we encounter across the
+    bundle's chunks. Returns the header string, or ``None`` if no
     chunk has a populated ``column_headers`` list.
     """
     for chunk in chunks:
         for h in chunk.get("column_headers") or []:
-            if isinstance(h, dict) and h.get("name"):
-                return h["name"]
+            if isinstance(h, dict) and h.get("header"):
+                return h["header"]
     return None
 
 

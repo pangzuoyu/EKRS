@@ -5,9 +5,9 @@ real-infra round of recall@10 baseline. Three heuristics:
 
 - form_field: chunk whose text contains the LOT value AND form_fields is non-empty
 - column_header: chunk whose column_headers list contains the header value AND
-  text contains it (substring match — column_headers values are dicts so we
-  check the dict's identifying field; for v1 the extractor matches on the
-  header *name* as a string within the text)
+  text contains it (substring match — column_headers values are dicts shaped
+  ``{index: int, header: str}`` so we check the dict's ``header`` field as a
+  string within the text)
 - heading: chunk whose heading_path ends with the heading value — DEFERRED
   (heading_path is not propagated to Qdrant payload per the data-quality
   issue documented in [[phase10-t10b2-closed]]; heuristic returns None for
@@ -122,7 +122,7 @@ def test_column_header_picks_chunk_with_header_in_list_and_text() -> None:
         _chunk(
             "aaaaaaaa-0002",
             text="Material Spec table with A105 column header",
-            column_headers=[{"name": "A105"}],
+            column_headers=[{"index": 0, "header": "A105"}],
         ),
     ]
     assert pick_column_header_chunk(chunks, "A105") == "aaaaaaaa-0002"
@@ -135,7 +135,7 @@ def test_column_header_returns_none_when_header_not_in_text() -> None:
         _chunk(
             "aaaaaaaa-0001",
             text="Different content entirely",
-            column_headers=[{"name": "A105"}],
+            column_headers=[{"index": 0, "header": "A105"}],
         ),
     ]
     assert pick_column_header_chunk(chunks, "A105") is None
@@ -144,6 +144,45 @@ def test_column_header_returns_none_when_header_not_in_text() -> None:
 @pytest.mark.unit
 def test_column_header_returns_none_for_empty_chunks() -> None:
     assert pick_column_header_chunk([], "A105") is None
+
+
+@pytest.mark.unit
+def test_column_header_picks_chunk_with_real_schema_index_and_header() -> None:
+    """Regression test: column_header heuristic must use the REAL schema
+    ``{index: int, header: str}`` (NOT ``{name: str}``).
+
+    Real Qdrant bundles carry:
+        ``column_headers: [{"index": 0, "header": "Item"}, ...]``
+
+    Before the fix, the heuristic read ``h.get("name")`` and never matched
+    real data — column_header recall@10 was 0/8 in the Phase 12 baseline.
+    """
+    chunks = [
+        _chunk(
+            "aaaaaaaa-0002",
+            text="Material Spec table with A105 column header",
+            column_headers=[{"index": 0, "header": "A105"}],
+        ),
+    ]
+    assert pick_column_header_chunk(chunks, "A105") == "aaaaaaaa-0002"
+
+
+@pytest.mark.unit
+def test_first_column_header_value_uses_real_schema_header_key() -> None:
+    """Regression test: ``first_column_header_value`` must read ``header``
+    key from the REAL schema ``{index, header}`` (NOT ``name``).
+
+    Before the fix, this helper returned ``None`` for every real bundle
+    because it read ``h.get("name")`` which doesn't exist in the real schema.
+    """
+    chunks = [
+        _chunk(
+            "aaaaaaaa-0002",
+            text="Has A105 column header",
+            column_headers=[{"index": 0, "header": "A105"}],
+        ),
+    ]
+    assert first_column_header_value(chunks) == "A105"
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +230,7 @@ def test_first_column_header_value_picks_first_name() -> None:
         _chunk(
             "aaaaaaaa-0002",
             text="Has A105 column header",
-            column_headers=[{"name": "A105"}],
+            column_headers=[{"index": 0, "header": "A105"}],
         ),
     ]
     assert first_column_header_value(chunks) == "A105"
@@ -215,7 +254,7 @@ def test_extract_anchors_for_bundle_emits_form_field_and_column_header() -> None
             "aaaaaaaa-0002",
             text="Lot 0 material spec with A105 column",
             form_fields=[{"name": "LOT", "value": "Lot 0"}],
-            column_headers=[{"name": "A105"}],
+            column_headers=[{"index": 0, "header": "A105"}],
         ),
     ]
     anchors = extract_anchors_for_bundle(bundle, chunks)
