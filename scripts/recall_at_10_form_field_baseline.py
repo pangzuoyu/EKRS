@@ -47,6 +47,11 @@ DOC_TO_MD_ROOT = Path("/home/pangzy/code_project/doc-to-md")
 BUNDLE_LIST_JSON = (
     DOC_TO_MD_ROOT / "scripts" / "long_tail_lot_check_152.json"
 )
+# Default sidecar path produced by `scripts/extract_ground_truth_labels.py`.
+# Real-infra mode reads ground_truth labels from here; `--synthetic` ignores it.
+DEFAULT_GROUND_TRUTH_MANIFEST = (
+    REPO_ROOT / "scripts" / "long_tail_lot_check_152.ground_truth.json"
+)
 
 # Anchor type definitions: query sources + expected answer matching
 ANCHOR_TYPES = ("form_field", "column_header", "heading")
@@ -124,6 +129,52 @@ def load_bundles(
     ]
     logger.info("Loaded %d bundles from %s", len(bundles), json_path)
     return bundles
+
+
+# ---------------------------------------------------------------------------
+# Ground-truth sidecar loader (real-infra labels)
+# ---------------------------------------------------------------------------
+
+
+def load_anchors_from_sidecar(
+    bundles: List[BundleEntry],
+    ground_truth_manifest: Path,
+) -> List[QueryAnchor]:
+    """Read ground-truth sidecar JSON and emit one ``QueryAnchor`` per
+    anchor entry. Per-bundle SKIP+WARNING when the bundle is absent from
+    the sidecar or has empty ground_truth.
+
+    Pure parsing logic lives in
+    :func:`ekrs_rag.ground_truth.anchors_from_sidecar` (unit-tested).
+    This wrapper is the I/O shell that reads the file + converts each
+    raw dict into the script's ``QueryAnchor`` dataclass.
+    """
+    from ekrs_rag.ground_truth import anchors_from_sidecar
+
+    if not ground_truth_manifest.exists():
+        logger.error(
+            "Ground-truth sidecar missing: %s — run "
+            "scripts/extract_ground_truth_labels.py first.",
+            ground_truth_manifest,
+        )
+        sys.exit(3)
+    sidecar = json.loads(ground_truth_manifest.read_text())
+    bundle_dicts = [{"bundle_id": b.bundle_id} for b in bundles]
+    raw = anchors_from_sidecar(bundle_dicts, sidecar)
+    anchors = [
+        QueryAnchor(
+            bundle_id=a["bundle_id"],
+            anchor_type=a["anchor_type"],
+            query_text=a["anchor_value"],
+            expected_chunk_id=a["expected_chunk_id"],
+        )
+        for a in raw
+    ]
+    logger.info(
+        "Loaded %d anchors from ground-truth sidecar (bundles: %d)",
+        len(anchors), len(bundles),
+    )
+    return anchors
 
 
 # ---------------------------------------------------------------------------
@@ -235,19 +286,27 @@ def build_retriever():
     """Construct ``QdrantManager`` + ``FTSManager`` + ``EKRSRetriever``
     from environment variables. Caller passes ``form_field_boost`` per
     call to ``retriever.retrieve(...)``.
+
+    Phase 6B B3: ``QdrantManager`` requires an ``EmbeddingService``
+    instance — the prior ``(client, settings)`` positional call was the
+    pre-B3 signature. Mirrors the runtime construction in
+    :mod:`ekrs_rag.main` so the script picks up the same Qdrant
+    collection + embedding plumbing.
     """
+    from ekrs_rag.core.config import Settings
     from ekrs_rag.retrieval.qdrant_client import QdrantManager
+    from ekrs_rag.retrieval.embedding_service import EmbeddingService
     from ekrs_rag.retrieval.fts_manager import FTSManager
     from ekrs_rag.retrieval.retriever import EKRSRetriever
-    from qdrant_client import QdrantClient
-    from ekrs_rag.config.settings import Settings
 
     settings = Settings()
-    client = QdrantClient(
+    qdrant = QdrantManager(
         host=settings.QDRANT_HOST,
         port=settings.QDRANT_PORT,
+        collection_name=settings.COLLECTION_NAME,
+        embedding_service=EmbeddingService(),
+        auto_reindex=False,
     )
-    qdrant = QdrantManager(client, settings)
     fts = FTSManager(db_path=settings.FTS_DB_PATH)
     return EKRSRetriever(qdrant=qdrant, fts=fts)
 
@@ -399,6 +458,13 @@ def main() -> int:
         default=BUNDLE_LIST_JSON,
         help="Path to bundle manifest JSON",
     )
+    parser.add_argument(
+        "--ground-truth-manifest",
+        type=Path,
+        default=DEFAULT_GROUND_TRUTH_MANIFEST,
+        help="Path to ground-truth sidecar JSON produced by "
+        "scripts/extract_ground_truth_labels.py (real-infra mode only)",
+    )
     args = parser.parse_args()
 
     if args.synthetic:
@@ -406,7 +472,7 @@ def main() -> int:
         anchors = synth_query_anchors(bundles)
     else:
         bundles = load_bundles(args.bundle_list, args.limit)
-        anchors = synth_query_anchors(bundles)
+        anchors = load_anchors_from_sidecar(bundles, args.ground_truth_manifest)
 
     top10_fn: Callable[[str, bool, List[QueryAnchor]], List[str]] = synth_run_top10
     if not args.synthetic:
@@ -425,17 +491,6 @@ def main() -> int:
                 return asyncio.run(real_top10(q, fb, _anchors))
 
             top10_fn = top10_real
-
-    # If using real-infra, fetch chunks from Qdrant for each anchor's bundle
-    # and pick an expected chunk_id per (bundle, anchor_type). Out-of-scope
-    # for this baseline iteration — anchors remain synth-defined even when
-    # retriever is real, with expected chunk_id being a placeholder.
-    if not args.synthetic:
-        logger.warning(
-            "Real-infra round: expected chunk_id is a placeholder — "
-            "this run measures rank stability, not true recall. Future "
-            "iteration should add per-(bundle, anchor) ground-truth labels."
-        )
 
     results = evaluate(anchors, top10_fn)
     report = render_report(results)
