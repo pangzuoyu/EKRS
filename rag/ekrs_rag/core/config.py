@@ -75,6 +75,14 @@ class Settings(BaseSettings):
     # (decoupled from TASK_DB_PATH so the two repos can run on separate disks).
     DOCUMENTS_DB_PATH: str = "/var/lib/ekrs/documents.db"
 
+    # Phase 10 T10a-1: SQLite FTS5 path mirroring Qdrant payload. Default
+    # is the in-container path used by the rag service (per plan doc
+    # 2026-07-29-phase10-T10a-1-FTSManager.md:82). Production callers
+    # (pipeline, consistency_checker) accept `fts: FTSManager | None`
+    # already-constructed; this field is the source of truth for ad-hoc
+    # entry points (scripts/, MCP, recall@10 baseline).
+    FTS_DB_PATH: str = "/app/rag/fts.sqlite"
+
     # Phase 6B: callback URL allowlist (T4 — SSRF mitigation)
     CALLBACK_ALLOWED_SCHEMES: str = "https"  # comma-separated
     CALLBACK_ALLOWED_HOSTS: str = ""  # comma-separated; "*" disables pinning

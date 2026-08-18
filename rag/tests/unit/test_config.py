@@ -50,3 +50,28 @@ def test_parser_token_rejects_empty(monkeypatch):
     with pytest.raises(ValidationError) as exc_info:
         Settings()
     assert "PARSER_TOKEN" in str(exc_info.value)
+
+
+def test_fts_db_path_default_is_app_rag_fts_sqlite(monkeypatch):
+    """Phase 12-A follow-up: FTS_DB_PATH must default to /app/rag/fts.sqlite.
+
+    Per plan doc 2026-07-29-phase10-T10a-1-FTSManager.md:82, the production
+    FTS DB lives at /app/rag/fts.sqlite inside the rag container. The
+    recall@10 baseline script (scripts/recall_at_10_form_field_baseline.py)
+    references settings.FTS_DB_PATH — a pre-existing gap from T10a-1 that
+    the script's try/except silently absorbed (degrading to synthetic).
+    """
+    monkeypatch.setenv("SHARED_STORAGE_PATH", "/tmp")
+    monkeypatch.setenv("PARSER_TOKEN", "x" * 32)
+    monkeypatch.delenv("FTS_DB_PATH", raising=False)
+    s = Settings()
+    assert s.FTS_DB_PATH == "/app/rag/fts.sqlite"
+
+
+def test_fts_db_path_env_override(monkeypatch):
+    """FTS_DB_PATH accepts FTS_DB_PATH env-var override (host-mount, tests)."""
+    monkeypatch.setenv("SHARED_STORAGE_PATH", "/tmp")
+    monkeypatch.setenv("PARSER_TOKEN", "x" * 32)
+    monkeypatch.setenv("FTS_DB_PATH", "/tmp/custom_fts.db")
+    s = Settings()
+    assert s.FTS_DB_PATH == "/tmp/custom_fts.db"
