@@ -214,6 +214,11 @@ class Chunk(BaseModel):
     # default_factory=list (gstack D4) — mirrors Metadata field convention.
     form_fields: List[Dict[str, Any]] = Field(default_factory=list)
     column_headers: List[Dict[str, Any]] = Field(default_factory=list)
+    # Phase 12 Task C: filename-derived doc_type classifier. Read at ingest
+    # from output_path/index.json::file_name via rag.doc_classifier. default
+    # None = legacy chunk (pre-Task-C) — retriever._scope_priority falls
+    # back to chunk.scope_path[0] lookup, preserving Phase 6B behavior.
+    doc_type: Optional[str] = None
 
 
 # --- API request/response models ---
