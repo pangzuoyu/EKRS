@@ -104,3 +104,52 @@ User authorized "立即接受修复方案 · 清空损坏数据 · 从 Checkpoin
 - **`.pyc` caches**: Both py3.11 AND py3.13 caches may exist (`.cpython-311.pyc`, `.cpython-313.pyc`). Only the one matching the runtime Python is used; clearing the wrong one is a no-op.
 - **Qdrant FilterSelector dict vs model**: `delete(points_selector={"filter": ...})` raises "Unsupported points selector type: dict". Must use `models.FilterSelector(filter=models.Filter(...))` explicitly.
 - **Auto-mode classifier + PARSER_TOKEN**: Use a wrapper script (`/tmp/run_task_d.sh` with `set -a; . .env; set +a`) to load the token into the python script's env without materializing it in interactive bash.
+- **"unhealthy" but processing is normal**: docker healthcheck `/dev/tcp` probe can return 000 transiently during bge-m3 encoding saturation. CPU 100% + memory steady = NOT a wedge. Use script log progress as the load-bearing monitor, not container healthcheck status.
+
+## Morning verification checklist (Task #38, post-Task #37)
+
+Expected completion: ~07:00–09:00 next day. Run from host shell.
+
+```bash
+# 1. Confirm run state (expect ~745 completed, low single-digit failed)
+tail -10 /tmp/task_d_run.log
+cat /tmp/task_d_full.json | python3 -c "import sys, json; d=json.load(sys.stdin); print(f'completed={len(d[\"completed\"])} failed={len(d[\"failed\"])}')"
+
+# 2. Qdrant total v=2 points (expect ~745×30 ≈ 22k, NOT just 745)
+docker exec deployment-rag-1 python -c "
+from qdrant_client import QdrantClient
+c = QdrantClient(host='qdrant', port=6333)
+v2 = c.count(collection_name='rag_documents', count_filter={'must':[{'key':'version','match':{'value':2}}]}).count
+v1 = c.count(collection_name='rag_documents', count_filter={'must':[{'key':'version','match':{'value':1}}]}).count
+total = c.count(collection_name='rag_documents').count
+print(f'total={total}  v1={v1}  v2={v2}')
+"
+# Note: collection name is 'rag_documents', NOT 'rag_collection_v2'
+
+# 3. Sample a multi-chunk doc — expect N points, where N = chunks_indexed from logs
+docker exec deployment-rag-1 python -c "
+from qdrant_client import QdrantClient
+c = QdrantClient(host='qdrant', port=6333)
+n = c.count(collection_name='rag_documents', count_filter={'must':[{'key':'doc_hash','match':{'value':'000150f86cdbc3c1'}},{'key':'version','match':{'value':2}}]}).count
+print(f'000150f86cdbc3c1 v=2 points: {n}  (expect 48)')
+"
+
+# 4. Verify metadata fields on a sample point
+docker exec deployment-rag-1 python -c "
+from qdrant_client import QdrantClient
+c = QdrantClient(host='qdrant', port=6333)
+res, _ = c.scroll(collection_name='rag_documents', scroll_filter={'must':[{'key':'doc_hash','match':{'value':'000150f86cdbc3c1'}},{'key':'version','match':{'value':2}}]}, limit=1, with_payload=True, with_vectors=False)
+p = res[0].payload
+for k in ['doc_type','chunk_id','scope_path','source_block_ids','form_fields','column_headers']:
+    v = p.get(k, '<MISSING>')
+    print(f'  {k}: {v}')
+"
+
+# 5. Write verification report to deployment/phase12-task-d-verification.md
+```
+
+Success criteria:
+- v=2 ≈ 22k points (not 745)
+- multi-chunk doc count matches its chunks_indexed from log
+- doc_type/chunk_id/scope_path/form_fields/column_headers all present
+- heading_path is NOT a Qdrant payload field by design — it translates to scope_path via R4/R7 spec
