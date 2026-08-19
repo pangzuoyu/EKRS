@@ -186,3 +186,41 @@ Memory headroom healthy: 4.75GB used / 20GB limit. Pre-change peak was 11.7GB so
 - Memory risk low (+1–2GB on +15GB headroom)
 - 9.5h ETA → ~4h halves overnight run window
 - Pre-authorized for "明天 Task #40 benchmark"; mid-run A/B validated the same hypothesis with real data
+
+## Env var refactor (deferred to morning commit, after Task D completes)
+
+**Decision matrix** (user-closed 2026-08-19 22:50):
+
+| Q | Decision | Rationale |
+|---|---|---|
+| inter_op support? | **No** — only intra_op | inter_op controls inter-operator parallelism; bge-m3 graph is sequential (transformer matmul chain), inter_op ≈ 1 effective regardless of value. Adding env var only adds config burden. |
+| Default value | **4** in code fallback (no Dockerfile hardcode) | 4 is verified-stable (4.78GB memory, 402% CPU, 2.5-4x speedup). Default=1 wastes hardware. Default=4 in code matches current commit 1865168 behavior — zero migration cost. |
+| `.env.example` location | **Top-level** with module-tagged comment | Matches PARSER_TOKEN / FTS_DB_PATH convention (deployment-wide env). bge-m3 is rag-internal but consumed by the rag process at runtime, so deployment-top-level is consistent. |
+
+### Planned code change (morning commit)
+
+```python
+# rag/ekrs_rag/retrieval/onnx_bge_m3.py:88 (replace hardcoded = 4)
+import os
+intra_op_threads = int(os.getenv("BGE_M3_INTRA_OP_THREADS", "4"))
+sess_opts.intra_op_num_threads = intra_op_threads
+```
+
+### Planned `.env.example` addition (deployment/.env.example)
+
+```bash
+# BGE-M3 ONNX Runtime intra-op thread count for embedding encoding.
+# Increase to utilize multiple CPU cores (e.g., 4) to reduce per-bundle latency.
+# Default: 4 (tested stable). Set to 1 to revert to BGEM3FlagModel default.
+BGE_M3_INTRA_OP_THREADS=4
+```
+
+### Do NOT touch
+
+- `inter_op_num_threads` (keep ONNX default = num_cores; setting it explicitly adds no value)
+- Dockerfile / docker-compose.yml (no hardcode; let code fallback provide 4)
+- .env.example section headers (keep existing groupings)
+
+### Optional follow-up (not blocking)
+
+- 4 vs 8 micro-bench: pick 1 representative 30-chunk bundle (`000150f86cdbc3c1`), measure wall-time + memory peak + CPU% for threads=1/4/8. If 8 > 4 by <20% (as expected from diminishing returns), keep default at 4.
