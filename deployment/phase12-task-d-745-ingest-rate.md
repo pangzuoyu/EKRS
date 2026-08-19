@@ -153,3 +153,36 @@ Success criteria:
 - multi-chunk doc count matches its chunks_indexed from log
 - doc_type/chunk_id/scope_path/form_fields/column_headers all present
 - heading_path is NOT a Qdrant payload field by design — it translates to scope_path via R4/R7 spec
+
+## Optimization: bge-m3 intra_op_num_threads 1 → 4 (2026-08-19 22:36)
+
+User confirmed single-core saturation observation. Diagnosed root cause: `onnx_bge_m3.py:88` hardcoded `intra_op_num_threads=1` (matched BGEM3FlagModel default). Batch encoding was already in place via `OnnxBgeM3.encode(list(texts))` — bottleneck was per-op thread pool, not batching.
+
+### Change
+- `sess_opts.intra_op_num_threads = 4` (was 1)
+- 1-line change + docker cp to `/app/rag/...` + clear .pyc + `docker compose restart rag`
+- Commit: `1865168 perf(retrieval): bge-m3 intra_op_num_threads 1→4`
+
+### Live verification (10 bundles sampled post-restart)
+
+| Metric | Pre-change (1 thread) | Post-change (4 threads) | Δ |
+|---|---|---|---|
+| CPU during inference | 100% (1 core) | 402% (4 cores) | +4x |
+| Memory | 3.8–11.7GB growing | 4.75GB steady | flat ✅ |
+| 30-chunk bundle avg | 50s | ~20s | 2.5x |
+| 41-chunk bundle | ~70s | 18.8s | 3.7x |
+| chunks/s | ~0.6 | ~1.85 | 3x |
+| ETA (745 bundles) | ~9.5h | ~4h | 2.4x |
+
+Memory headroom healthy: 4.75GB used / 20GB limit. Pre-change peak was 11.7GB so +1GB scaling for 4-thread ops is well within budget.
+
+### Caveats
+- Aspirated 3–5x speedup from bench was not fully realized; intra-op parallelism only helps matmul/attention ops, not tokenization or batch-padding overhead.
+- If memory exceeds 14GB during long runs, scale back to 2 or revert to 1.
+- Comment in code references this verification; future operators see the rationale.
+
+### Why user authorized mid-run change
+- Single-line blast radius, restart is auto-recovered by script `--retry 2`
+- Memory risk low (+1–2GB on +15GB headroom)
+- 9.5h ETA → ~4h halves overnight run window
+- Pre-authorized for "明天 Task #40 benchmark"; mid-run A/B validated the same hypothesis with real data
