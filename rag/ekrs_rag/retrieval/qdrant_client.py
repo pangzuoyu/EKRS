@@ -200,11 +200,6 @@ class QdrantManager:
 
             points = []
             for idx, (chunk, vec) in enumerate(zip(chunks, encoded)):
-                point_id = str(uuid.uuid5(
-                    uuid.NAMESPACE_DNS,
-                    f"{chunk.doc_hash}:{chunk.version}:{chunk.source_block_ids}",
-                ))
-                sparse_qdrant = self._embedding_service.to_qdrant_sparse(vec.sparse)
                 # T10a-5: EKRS-side chunk_id for FTS↔Qdrant round-trip.
                 # Format: `{doc_hash[:8]}-{chunk_index:04d}` — deterministic
                 # from (doc_hash, chunk_index), matches FTSManager.generate_chunk_id.
@@ -214,6 +209,17 @@ class QdrantManager:
                 chunk_id = chunk.chunk_id or FTSManager.generate_chunk_id(
                     chunk.doc_hash, idx
                 )
+                # P0 fix (2026-08-19): include chunk_id in UUID5 input so
+                # multi-chunk docs (chunker splits 1 block → N chunks) get
+                # N unique Qdrant points. Previously only
+                # (doc_hash, version, source_block_ids) was used, causing all
+                # N chunks with the same source_block_ids to collide on the
+                # same point_id → Qdrant silently overwrote 49 of 50 chunks.
+                point_id = str(uuid.uuid5(
+                    uuid.NAMESPACE_DNS,
+                    f"{chunk.doc_hash}:{chunk.version}:{chunk_id}",
+                ))
+                sparse_qdrant = self._embedding_service.to_qdrant_sparse(vec.sparse)
                 payload = {
                     "text": chunk.text,
                     "scope_path": chunk.scope_path,
