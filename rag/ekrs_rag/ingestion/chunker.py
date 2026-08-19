@@ -414,11 +414,13 @@ def _flush_chunk(
     payload_version: int = 1,
     form_fields: Optional[list[dict[str, Any]]] = None,
     column_headers: Optional[list[dict[str, Any]]] = None,
+    doc_type: Optional[str] = None,
 ) -> Optional[Chunk]:
     """Build a Chunk from accumulated text parts. Returns None if empty.
 
     Phase 12 T2: form_fields / column_headers carried from accumulator
     (set by chunk_blocks when scanning the leading block) to the chunk.
+    Phase 12 Task C: doc_type stamped onto every produced Chunk (None = legacy).
     """
     text = "\n".join(text_parts).strip()
     if not text:
@@ -435,6 +437,7 @@ def _flush_chunk(
         payload_version=payload_version,
         form_fields=list(form_fields) if form_fields else [],
         column_headers=list(column_headers) if column_headers else [],
+        doc_type=doc_type,
     )
 
 
@@ -450,6 +453,7 @@ def _route_accumulated_group(
     payload_version: int = 1,
     form_fields: Optional[list[dict[str, Any]]] = None,
     column_headers: Optional[list[dict[str, Any]]] = None,
+    doc_type: Optional[str] = None,
 ) -> list[Chunk]:
     """Route accumulated text_parts to _flush_chunk or _split_text_two_phase.
 
@@ -470,6 +474,7 @@ def _route_accumulated_group(
     finding: deep nesting triggers token-overflow more often than scope-change).
 
     Phase 12 T2: form_fields / column_headers threaded through both paths.
+    Phase 12 Task C: doc_type threaded through both paths.
     """
     # Guard 1: unsafe adjacent pair → safe-split path
     for prev, nxt in zip(text_parts[:-1], text_parts[1:]):
@@ -480,6 +485,7 @@ def _route_accumulated_group(
                 page_numbers, payload_version,
                 form_fields=form_fields,
                 column_headers=column_headers,
+                doc_type=doc_type,
             )
 
     # Guard 2: token budget overflow → safe-split path
@@ -491,6 +497,7 @@ def _route_accumulated_group(
             page_numbers, payload_version,
             form_fields=form_fields,
             column_headers=column_headers,
+            doc_type=doc_type,
         )
 
     # Default: whole-group merge (preserves pre-T10b-1 behavior)
@@ -499,6 +506,7 @@ def _route_accumulated_group(
         doc_hash, version, page_numbers, payload_version,
         form_fields=form_fields,
         column_headers=column_headers,
+        doc_type=doc_type,
     )
     return [chunk] if chunk else []
 
@@ -513,11 +521,13 @@ def _build_chunk(
     payload_version: int = 1,
     form_fields: Optional[list[dict[str, Any]]] = None,
     column_headers: Optional[list[dict[str, Any]]] = None,
+    doc_type: Optional[str] = None,
 ) -> Chunk:
     """Build a single Chunk from a split fragment.
 
     Phase 12 T2: form_fields / column_headers carried from block to chunk
     for R4 scope-aware boost (parent §三 form_field_r4 plan).
+    Phase 12 Task C: doc_type stamped onto the chunk (None = legacy).
     """
     return Chunk(
         text=text,
@@ -530,6 +540,7 @@ def _build_chunk(
         payload_version=payload_version,
         form_fields=list(form_fields) if form_fields else [],
         column_headers=list(column_headers) if column_headers else [],
+        doc_type=doc_type,
     )
 
 
@@ -544,12 +555,15 @@ def _split_large_block(
     payload_version: int = 1,
     form_fields: Optional[list[dict[str, Any]]] = None,
     column_headers: Optional[list[dict[str, Any]]] = None,
+    doc_type: Optional[str] = None,
 ) -> list[Chunk]:
     """Split a single large block that exceeds max_tokens.
 
     For tables: propagate column headers to each sub-chunk (preserves the
     header-row redundancy pattern; unchanged from prior implementation).
     For text: use Phase 1 + Phase 2 to preserve number/unit/word atomicity.
+
+    Phase 12 Task C: doc_type stamped onto every produced Chunk (None = legacy).
     """
     chunks: list[Chunk] = []
 
@@ -585,6 +599,7 @@ def _split_large_block(
                             payload_version=payload_version,
                             form_fields=list(form_fields) if form_fields else [],
                             column_headers=list(column_headers) if column_headers else [],
+                            doc_type=doc_type,
                         ))
                     current_parts = [header_prefix] if header_prefix else []
                     current_tokens = estimate_tokens(header_prefix)
@@ -609,6 +624,7 @@ def _split_large_block(
                         payload_version=payload_version,
                         form_fields=list(form_fields) if form_fields else [],
                         column_headers=list(column_headers) if column_headers else [],
+                        doc_type=doc_type,
                     ))
         else:
             # No structured data: fall through to two-phase text splitting.
@@ -618,6 +634,7 @@ def _split_large_block(
                     [block.block_id], page_numbers, payload_version,
                     form_fields=form_fields,
                     column_headers=column_headers,
+                    doc_type=doc_type,
                 )
             )
     else:
@@ -627,6 +644,7 @@ def _split_large_block(
                 [block.block_id], page_numbers, payload_version,
                 form_fields=form_fields,
                 column_headers=column_headers,
+                doc_type=doc_type,
             )
         )
 
@@ -650,6 +668,7 @@ def _split_text_two_phase(
     payload_version: int = 1,
     form_fields: Optional[list[dict[str, Any]]] = None,
     column_headers: Optional[list[dict[str, Any]]] = None,
+    doc_type: Optional[str] = None,
 ) -> list[Chunk]:
     """Split text via Phase 1 hard cut + Phase 2 greedy merge.
 
@@ -660,6 +679,7 @@ def _split_text_two_phase(
 
     Phase 12 T2: form_fields / column_headers propagated to all sub-chunks
     so multi-block grouping retains the leading block's form metadata.
+    Phase 12 Task C: doc_type stamped onto every produced Chunk (None = legacy).
     """
     chunks: list[Chunk] = []
     # Split on newlines first — line boundaries are always safe.
@@ -684,6 +704,7 @@ def _split_text_two_phase(
                 payload_version=payload_version,
                 form_fields=list(form_fields) if form_fields else [],
                 column_headers=list(column_headers) if column_headers else [],
+                doc_type=doc_type,
             ))
 
     return chunks
@@ -696,6 +717,7 @@ def chunk_blocks(
     max_tokens: int = DEFAULT_MAX_CHUNK_TOKENS,
     token_counter: Callable[[str], int] = estimate_tokens,
     payload_version: int = 1,
+    doc_type: Optional[str] = None,
 ) -> list[Chunk]:
     """Convert DocumentBlockIR list into Chunk objects.
 
@@ -716,6 +738,13 @@ def chunk_blocks(
     override to a raw ``len`` counter to exercise budget semantics
     directly. The ``payload_version`` parameter lets callers force a
     Qdrant rebuild without bumping the on-disk document version.
+
+    Phase 12 Task C: ``doc_type`` (default None = legacy) is stamped onto
+    every produced Chunk. Set by the caller from
+    ``rag.doc_classifier.classify()`` (one of national_standard /
+    industry_standard / enterprise_spec / lot_checklist / project_spec /
+    unknown). Legacy call sites that omit ``doc_type`` keep byte-level
+    behavior (chunks carry ``doc_type=None``).
 
     Returns list of Chunk objects ready for Qdrant upsert.
     """
@@ -752,6 +781,7 @@ def chunk_blocks(
                 doc_hash, version, current_pages, payload_version,
                 form_fields=current_form_fields,
                 column_headers=current_column_headers,
+                doc_type=doc_type,
             )
             if chunk:
                 chunks.append(chunk)
@@ -776,6 +806,7 @@ def chunk_blocks(
                         [page_num], payload_version,
                         form_fields=block_form_fields,
                         column_headers=block_column_headers,
+                        doc_type=doc_type,
                     )
                 )
             else:
@@ -784,6 +815,7 @@ def chunk_blocks(
                     payload_version,
                     form_fields=block_form_fields,
                     column_headers=block_column_headers,
+                    doc_type=doc_type,
                 ))
 
             current_scope = scope
@@ -801,6 +833,7 @@ def chunk_blocks(
                     max_tokens, token_counter, payload_version,
                     form_fields=current_form_fields,
                     column_headers=current_column_headers,
+                    doc_type=doc_type,
                 ))
             current_text_parts = []
             current_block_ids = []
@@ -822,6 +855,7 @@ def chunk_blocks(
                 max_tokens, token_counter, payload_version,
                 form_fields=current_form_fields,
                 column_headers=current_column_headers,
+                doc_type=doc_type,
             ))
             current_text_parts = []
             current_block_ids = []
@@ -860,6 +894,7 @@ def chunk_blocks(
                     payload_version,
                     form_fields=current_form_fields,
                     column_headers=current_column_headers,
+                    doc_type=doc_type,
                 )
             )
             current_text_parts = []
@@ -875,6 +910,7 @@ def chunk_blocks(
         doc_hash, version, current_pages, payload_version,
         form_fields=current_form_fields,
         column_headers=current_column_headers,
+        doc_type=doc_type,
     )
     if chunk:
         chunks.append(chunk)
