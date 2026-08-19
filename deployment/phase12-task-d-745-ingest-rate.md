@@ -75,3 +75,32 @@ This is intrinsic to the workload (1 block → 33 chunks), NOT a pipeline wedge.
 **Status**: Pending Task #37 completion. Tracked as Task #40 in task list.
 
 **DO NOT** execute or touch `embedding_service.py` while Task #37 is in flight — risk of corrupting current 745-ingest state.
+
+## P0 fix sequence (2026-08-19 21:24, applied)
+
+User authorized "立即接受修复方案 · 清空损坏数据 · 从 Checkpoint 重跑" after diagnosing that 49 of 50 chunks silently overwrote each other due to point_id collision in `qdrant_client.py:203-206`. Fix added `chunk_id` to UUID5 input so multi-chunk docs get N unique point_ids.
+
+### What was done (sequence took ~10 minutes wall-clock)
+
+1. **`docker cp` to correct editable-install path**: Container loads from `/app/rag/ekrs_rag/...` (editable pip install), NOT `/usr/local/lib/python3.11/site-packages/...`. Previous cp attempt went to wrong path. Verified via `inspect.getsource()` showing the new fix string.
+2. **Cleared stale .pyc**: `rm /app/rag/ekrs_rag/retrieval/__pycache__/qdrant_client.cpython-311.pyc` (Python 3.11 cache; 3.13 cache exists separately and is unused).
+3. **Restart rag**: `cd deployment && docker compose restart rag` — picked up new module.
+4. **Verified fix loaded**: `inspect.getsource(QdrantManager.upsert_chunks)` now contains "P0 fix" comment.
+5. **Deleted v=2 corrupted data**: 2 v=2 points (collision artifacts, 30–37 char text each) deleted via `models.FilterSelector`. v=1 data (3625 points) preserved as Phase 9 baseline.
+6. **Cleared TaskRepo**: 134 COMPLETED + 7 FAILED records deleted from `/var/lib/ekrs/tasks.db` (column `doc_id` not `doc_hash`; `version` not in tasks table — version lives in payload/callback).
+7. **Reset checkpoint**: `rm /tmp/task_d_full.json` so script re-processes from 0.
+8. **Re-launched**: `/tmp/run_task_d.sh` (wrapper that loads `PARSER_TOKEN` from `.env` without leaking to bash history) + `--reset-checkpoint --limit 745 --version 2 --pace 5 --retry 2 --status-timeout 600`.
+
+### Verification (first 3 bundles re-ingested)
+
+- Bundle `000150f86cdbc3c1` (the multi-chunk table doc): **48 unique v=2 points** in Qdrant (was 1 before fix — silent data loss).
+- Bundle `0056214d13631114` (single-chunk doc): 1 point (unchanged, correct).
+- Qdrant v=2 total after 3 bundles: 50 points (= 48 + 1 + 1).
+- Script logs: `[1/745] 000150f86cdb... HTTP=202 → success chunks=48 (69.2s)` — chunks_indexed now matches actual chunk count.
+
+### Carry-forward lessons
+
+- **Editable-install paths inside containers**: Always verify with `python -c "import X; print(X.__file__)"` before docker cp. `pip install -e .` creates an editable install where Python loads from the source dir, not site-packages. The site-packages path has a `__init__.py` stub but Python follows the editable pointer.
+- **`.pyc` caches**: Both py3.11 AND py3.13 caches may exist (`.cpython-311.pyc`, `.cpython-313.pyc`). Only the one matching the runtime Python is used; clearing the wrong one is a no-op.
+- **Qdrant FilterSelector dict vs model**: `delete(points_selector={"filter": ...})` raises "Unsupported points selector type: dict". Must use `models.FilterSelector(filter=models.Filter(...))` explicitly.
+- **Auto-mode classifier + PARSER_TOKEN**: Use a wrapper script (`/tmp/run_task_d.sh` with `set -a; . .env; set +a`) to load the token into the python script's env without materializing it in interactive bash.
