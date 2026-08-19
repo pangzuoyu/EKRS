@@ -56,3 +56,22 @@ This is intrinsic to the workload (1 block → 33 chunks), NOT a pipeline wedge.
 - 12h ETA — Task #37 completion expected ~05:30 next morning
 - Task #38 (verify Qdrant payloads + count + write report) runs after Task #37 completes
 - Consider lowering max-chunks-per-bundle filter to skip >50-chunk docs (would accelerate by ~30% but loses data)
+
+## Optimization opportunity — bge-m3 batch encoding (Task D+, post-completion)
+
+**Observation**: Per-bundle latency correlates with chunk count. 1-chunk bundles = 0.1s, 30-chunk bundles = 50–90s. Suggests current code path is per-chunk sequential encode, not batch.
+
+**Hypothesis**: bge-m3 ONNX typically supports batch inference with 3–5× per-item speedup (single-item overhead dominates at small batch). If pipeline currently calls `for chunk in chunks: embedding_service.encode(chunk.text)`, switching to `embedding_service.encode([c.text for c in chunks])` (batch) could compress 30-chunk bundle from ~50s to ~12s.
+
+**Total ETA impact**: 10h → 2–3h for full 745.
+
+**Plan** (after Task #37 completes):
+1. Pick 1 representative 30-chunk bundle from corpus
+2. Write micro-bench: batch vs per-chunk wall time + memory peak
+3. If batch wins (>2×): design patch to embedding_service.py + pipeline.py
+4. If patch viable: commit + new ingest runs benefit
+5. If not: document findings + recommendation
+
+**Status**: Pending Task #37 completion. Tracked as Task #40 in task list.
+
+**DO NOT** execute or touch `embedding_service.py` while Task #37 is in flight — risk of corrupting current 745-ingest state.
