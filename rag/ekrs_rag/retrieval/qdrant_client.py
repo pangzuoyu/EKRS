@@ -229,6 +229,11 @@ class QdrantManager:
                     # for legacy chunks without form/table context.
                     "form_fields": list(chunk.form_fields) if chunk.form_fields else [],
                     "column_headers": list(chunk.column_headers) if chunk.column_headers else [],
+                    # Phase 12 Task C: filename-derived doc_type signal.
+                    # Read by retriever._payload_to_chunk → _scope_priority.
+                    # None for legacy chunks (pre-Task-C) — falls back to
+                    # scope_path[0] lookup via Phase 6B invariant.
+                    "doc_type": chunk.doc_type,
                 }
                 points.append(models.PointStruct(
                     id=point_id,
