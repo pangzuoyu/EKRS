@@ -30,10 +30,18 @@ from ..security import (
     validate_callback_url,
 )
 from .chunker import chunk_blocks
+from .doc_classifier import DocClassifierRules, classify, load_index_file_name, load_rules
 from .ir_parser import IRParseError, parse_jsonl_file
 from .outcome import IngestionOutcome
 
 logger = logging.getLogger(__name__)
+
+
+# Phase 12 Task C: filename → doc_type classifier rules. Lazy-loaded
+# singleton (loaded once per process via _DOC_CLASSIFIER_RULES below).
+# rules themselves are immutable; the cache lives only to avoid re-parsing
+# the JSON config on every ingest call.
+_DOC_CLASSIFIER_RULES: DocClassifierRules | None = None
 
 
 # T6: callback outcome counters for observability. Matches the pattern used
@@ -164,10 +172,34 @@ class IngestionPipeline:
                 await self._send_callback_safely(notification, outcome)
                 return outcome
 
+            # Phase 12 Task C: read index.json → classify filename → doc_type.
+            # Classifier exceptions are isolated so they NEVER fail ingestion;
+            # we log WARNING + default doc_type to 'unknown'. The chunk_blocks
+            # call site is the only one wired (replay() at line ~298 intentionally
+            # left for an operator escape hatch — it still stamps doc_type=None
+            # legacy, which the retriever handles).
+            global _DOC_CLASSIFIER_RULES
+            try:
+                file_name = load_index_file_name(output_path)
+                if _DOC_CLASSIFIER_RULES is None:
+                    _DOC_CLASSIFIER_RULES = load_rules()
+                rules: DocClassifierRules = _DOC_CLASSIFIER_RULES
+                if file_name is not None:
+                    doc_type = classify(file_name, rules).doc_type
+                else:
+                    doc_type = "unknown"
+            except Exception as e:
+                logger.warning(
+                    "doc_classifier_failed: %s — defaulting doc_type to 'unknown'",
+                    e,
+                )
+                doc_type = "unknown"
+
             chunks = chunk_blocks(
                 blocks, doc_hash, version,
                 max_tokens=settings.MAX_CHUNK_TOKENS,
                 payload_version=2,
+                doc_type=doc_type,
             )
             if not chunks:
                 logger.warning("No chunks produced from %d blocks", len(blocks))
