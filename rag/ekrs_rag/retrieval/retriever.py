@@ -36,6 +36,18 @@ _SCOPE_PRIORITY_MAP = {
     "national": 100, "industry": 80, "enterprise": 60, "project": 40, "reference": 20,
 }
 
+# Phase 12 Task C: doc_type → priority (R4 mapping from spec §R4 mapping).
+# Read by _scope_priority BEFORE scope_path[0] lookup. Multiplied by 100
+# to land in the same 0-100 space as Priority enum / scope_path priorities.
+_DOC_TYPE_PRIORITY: dict[str, int] = {
+    "national_standard": 100,
+    "industry_standard": 80,
+    "enterprise_spec":   60,
+    "lot_checklist":     60,
+    "project_spec":      40,
+    "unknown":           40,
+}
+
 # Phase 12 T4: form_field / column_header R4 scope-aware boost.
 # Q3 §9.6 last-mile: form-extracted fields carry strong semantic authority
 # (e.g. LOT 49 / SYSTEM NO from a project checklist) — boost the scope
@@ -263,24 +275,30 @@ class EKRSRetriever:
             # empty list (gstack D4) for legacy chunks pre-T2.
             form_fields=payload.get("form_fields", []),
             column_headers=payload.get("column_headers", []),
+            # Phase 12 Task C: doc_type from payload. None for legacy chunks
+            # pre-Task-C; _scope_priority falls back to scope_path[0] lookup.
+            doc_type=payload.get("doc_type"),
         )
 
     @staticmethod
     def _scope_priority(chunk: Chunk, form_field_boost: bool = True) -> float:
         """Compute R4 scope-aware priority score for a chunk.
 
-        Base score from scope_path[0] (national=1.0 .. reference=0.2).
-        Phase 12 T4 boost: form_fields → max with FORM_FIELD_WEIGHT=0.9;
-        column_headers → max with COLUMN_HEADER_WEIGHT=0.7. Both boosts
-        are deterministic (R6 strict parity).
+        Phase 12 Task C: reads ``chunk.doc_type`` first (filename-derived
+        classifier at ingest). Falls back to ``scope_path[0]`` lookup for
+        legacy chunks (pre-Task-C, ``doc_type=None``). Falls back to 0.0
+        for chunks with neither signal.
 
-        ``form_field_boost`` (Phase 12 §七 Item 3, default ``True``):
-        ``False`` skips both form_field/column_header max — returns base
-        only. Used by the recall@10 baseline script to compare boost
-        ON vs OFF on the same corpus. Phase 12 T4 default behavior is
-        preserved when callers omit the kwarg.
+        Phase 12 T4 form_field/column_header boost: ``form_field_boost=True``
+        maxes with FORM_FIELD_WEIGHT=0.9 / COLUMN_HEADER_WEIGHT=0.7.
+        ``form_field_boost=False`` returns base only.
         """
-        if chunk.scope_path:
+        base: float
+        if chunk.doc_type is not None:
+            # Phase 12 Task C: filename-derived signal wins (avoids 99% of
+            # chunks defaulting to project=0.4 because scope_path[0] is empty)
+            base = _DOC_TYPE_PRIORITY.get(chunk.doc_type, 40) / 100.0
+        elif chunk.scope_path:
             first = chunk.scope_path[0].lower()
             base = _SCOPE_PRIORITY_MAP.get(first, 40) / 100.0
         else:
