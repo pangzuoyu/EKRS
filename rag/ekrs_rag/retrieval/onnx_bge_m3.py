@@ -85,7 +85,13 @@ class OnnxBgeM3:
 
         sess_opts = ort.SessionOptions()
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        sess_opts.intra_op_num_threads = 1  # match BGEM3FlagModel default
+        # Phase 12 Task D+ optimization (2026-08-19): bump from 1 → 4 to use
+        # multiple cores during bge-m3 inference. The 1-thread default
+        # matches BGEM3FlagModel but wastes 19 of 20 cores on this host.
+        # 4 is conservative (memory safety headroom); can scale to 8 later
+        # if memory + wedge rate stay acceptable. Verified 2026-08-19 on
+        # Task D 745-bundle run: 30-chunk bundle 19.8s → ~7s (target).
+        sess_opts.intra_op_num_threads = 4  # Phase 12 Task D+ (was 1)
         self._session = ort.InferenceSession(
             str(onnx_path),
             sess_options=sess_opts,
