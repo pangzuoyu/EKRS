@@ -47,6 +47,7 @@ working.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -60,6 +61,53 @@ _SPECIAL_TOKEN_IDS = frozenset({0, 1, 2, 3, 250001})
 # bge-m3 standard practical cap. The tokenizer advertises 8192 but most
 # retrieval scenarios clip to 512 (matches BAAI's bge-m3 README).
 _MAX_SEQ_LEN = 512
+
+# Default ONNX intra-op thread count for bge-m3 inference. Phase 12 Task D+
+# (2026-08-19 commit 1865168) verified that 4 threads yields ~2.5–4x
+# speedup over the BGEM3FlagModel default of 1 without exhausting memory
+# headroom on 20-core hosts (4.78 GB steady vs 20 GB container limit).
+# Operators can override at runtime via the BGE_M3_INTRA_OP_THREADS env
+# var (see `.env.example`). Non-numeric / empty values fall back to this
+# default with a warning so a typo degrades gracefully rather than
+# crashing ingest.
+_DEFAULT_INTRA_OP_THREADS = 4
+
+
+def _resolve_intra_op_threads() -> int:
+    """Read BGE_M3_INTRA_OP_THREADS from env, with safe fallback.
+
+    Returns:
+        int: thread count to feed into ``sess_opts.intra_op_num_threads``.
+
+    Behavior:
+        - Env unset / empty / whitespace → ``_DEFAULT_INTRA_OP_THREADS`` (4)
+        - Env set to a positive integer → that value
+        - Env set to a non-numeric value → ``_DEFAULT_INTRA_OP_THREADS``
+          with a warning (operator typo shouldn't crash ingest)
+
+    Read at ``__init__`` time so operators can change the value between
+    container restarts without rebuilding the image. Not exposed as a
+    constructor argument because the only consumer is this class.
+    """
+    raw = os.environ.get("BGE_M3_INTRA_OP_THREADS", "").strip()
+    if not raw:
+        return _DEFAULT_INTRA_OP_THREADS
+    try:
+        n = int(raw)
+    except ValueError:
+        logger.warning(
+            "BGE_M3_INTRA_OP_THREADS=%r is not a valid integer; "
+            "falling back to default %d",
+            raw, _DEFAULT_INTRA_OP_THREADS,
+        )
+        return _DEFAULT_INTRA_OP_THREADS
+    if n < 1:
+        logger.warning(
+            "BGE_M3_INTRA_OP_THREADS=%d is < 1; clamping to 1",
+            n,
+        )
+        return 1
+    return n
 
 
 class OnnxBgeM3:
@@ -91,7 +139,10 @@ class OnnxBgeM3:
         # 4 is conservative (memory safety headroom); can scale to 8 later
         # if memory + wedge rate stay acceptable. Verified 2026-08-19 on
         # Task D 745-bundle run: 30-chunk bundle 19.8s → ~7s (target).
-        sess_opts.intra_op_num_threads = 4  # Phase 12 Task D+ (was 1)
+        # Phase 12 Task D+ follow-up (2026-08-20): the value is now sourced
+        # from BGE_M3_INTRA_OP_THREADS so operators can tune without a
+        # code change. Default 4 (no env) preserves commit-1865168 behavior.
+        sess_opts.intra_op_num_threads = _resolve_intra_op_threads()
         self._session = ort.InferenceSession(
             str(onnx_path),
             sess_options=sess_opts,
