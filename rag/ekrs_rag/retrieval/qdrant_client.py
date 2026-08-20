@@ -240,6 +240,11 @@ class QdrantManager:
                     # None for legacy chunks (pre-Task-C) — falls back to
                     # scope_path[0] lookup via Phase 6B invariant.
                     "doc_type": chunk.doc_type,
+                    # Phase 12 row-flush fix: True if this chunk was force-split
+                    # from a pathological block (single row > max_tokens OR
+                    # buffer overflowed). Retriever can deprioritize these
+                    # without dropping — data is still indexed.
+                    "quality_warning": bool(chunk.quality_warning),
                 }
                 points.append(models.PointStruct(
                     id=point_id,

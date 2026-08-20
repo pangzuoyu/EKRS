@@ -219,6 +219,12 @@ class Chunk(BaseModel):
     # None = legacy chunk (pre-Task-C) — retriever._scope_priority falls
     # back to chunk.scope_path[0] lookup, preserving Phase 6B behavior.
     doc_type: Optional[str] = None
+    # Phase 12 row-flush fix: True if this chunk was force-split from a
+    # pathological block (single row > max_tokens OR buffer overflowed).
+    # Source-quality hint for downstream retriever — chunks with repeated
+    # cell data (OCR-degraded tables) can be deprioritized without dropping.
+    # Default False = normal chunk (legacy + refit chunks).
+    quality_warning: bool = False
 
 
 # --- API request/response models ---

@@ -278,6 +278,11 @@ class EKRSRetriever:
             # Phase 12 Task C: doc_type from payload. None for legacy chunks
             # pre-Task-C; _scope_priority falls back to scope_path[0] lookup.
             doc_type=payload.get("doc_type"),
+            # Phase 12 row-flush fix: source-quality hint. False for normal
+            # chunks; True if this chunk was force-split from a pathological
+            # block (single row > max_tokens OR buffer overflowed). Retriever
+            # can deprioritize via _scope_priority multiplication factor.
+            quality_warning=bool(payload.get("quality_warning", False)),
         )
 
     @staticmethod

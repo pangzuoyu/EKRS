@@ -564,8 +564,60 @@ def _split_large_block(
     For text: use Phase 1 + Phase 2 to preserve number/unit/word atomicity.
 
     Phase 12 Task C: doc_type stamped onto every produced Chunk (None = legacy).
+
+    Phase 12 row-flush fix: guarantees every output chunk has
+    ``token_count <= max_tokens``. Two protections:
+      1. Pre-check: if a single row's tokens exceed max_tokens, flush the
+         current buffer first and force-split the oversized row via
+         ``_split_text_two_phase`` (each sub-chunk then ≤ max_tokens).
+         Force-split chunks carry ``quality_warning=True`` (source-quality
+         hint for retriever; data is still indexed).
+      2. Post-flush re-check: any accumulated buffer that, after joining,
+         still exceeds max_tokens (e.g. header + one near-cap row) is
+         force-split via ``_split_text_two_phase`` instead of emitted as a
+         single oversized chunk. This eliminates the historical wedge
+         (267 pathological rows × ~1200 tokens producing 1500-2200 token
+         chunks that wedge bge-m3 encoding past the 600s status timeout).
     """
     chunks: list[Chunk] = []
+
+    def _emit_buffer(parts: list[str], *, quality_warning: bool = False) -> None:
+        """Flush ``parts`` as one or more Chunks, force-splitting if joined text exceeds max_tokens."""
+        if not parts:
+            return
+        joined = "\n".join(p for p in parts if p).strip()
+        if not joined:
+            return
+        joined_tokens = estimate_tokens(joined)
+        if joined_tokens <= max_tokens:
+            chunks.append(Chunk(
+                text=joined,
+                scope_path=list(scope_path),
+                source_block_ids=[block.block_id],
+                token_count=joined_tokens,
+                doc_hash=doc_hash,
+                version=version,
+                page_numbers=list(page_numbers),
+                payload_version=payload_version,
+                form_fields=list(form_fields) if form_fields else [],
+                column_headers=list(column_headers) if column_headers else [],
+                doc_type=doc_type,
+                quality_warning=quality_warning,
+            ))
+            return
+        # Buffer oversize (e.g. header + one near-cap row combined). Force-split
+        # via two-phase: each produced chunk will be ≤ max_tokens.
+        # Mark the just-appended sub-chunks with quality_warning.
+        pre_count = len(chunks)
+        chunks.extend(_split_text_two_phase(
+            joined, max_tokens, doc_hash, version, scope_path,
+            [block.block_id], page_numbers, payload_version,
+            form_fields=form_fields, column_headers=column_headers,
+            doc_type=doc_type,
+        ))
+        if quality_warning:
+            for c in chunks[pre_count:]:
+                c.quality_warning = True
 
     if block.type == "table":
         headers = extract_table_headers(block)
@@ -578,54 +630,56 @@ def _split_large_block(
             data_rows = rows[1:] if rows else []
 
             current_parts: list[str] = [header_prefix] if header_prefix else []
-            current_tokens = estimate_tokens(header_prefix)
-            row_block_ids: list[str] = []
+            current_tokens = estimate_tokens(header_prefix) if header_prefix else 0
 
             for row in data_rows:
                 row_text = " | ".join(str(c) for c in row)
                 row_tokens = estimate_tokens(row_text)
 
+                # Phase 12 row-flush fix #1: pre-check oversized row.
+                if row_tokens > max_tokens:
+                    # Flush current buffer first (will be re-checked by _emit_buffer).
+                    if current_parts:
+                        _emit_buffer(current_parts)
+                        current_parts = [header_prefix] if header_prefix else []
+                        current_tokens = estimate_tokens(header_prefix) if header_prefix else 0
+                    # Force-split the oversized row alone via _split_text_two_phase
+                    # so sub-chunks each ≤ max_tokens. The header is NOT prepended:
+                    # the row's pathological content is the source-quality issue,
+                    # and prepending the header would force-split the header into
+                    # a separate sub-chunk and propagate quality_warning to it
+                    # (false-positive on a non-pathological metadata fragment).
+                    # Header context is preserved implicitly via scope_path and
+                    # column_headers fields already on every chunk.
+                    pre_count = len(chunks)
+                    chunks.extend(_split_text_two_phase(
+                        row_text, max_tokens, doc_hash, version, scope_path,
+                        [block.block_id], page_numbers, payload_version,
+                        form_fields=form_fields, column_headers=column_headers,
+                        doc_type=doc_type,
+                    ))
+                    # Mark the just-appended sub-chunks with quality_warning.
+                    for c in chunks[pre_count:]:
+                        c.quality_warning = True
+                    continue  # Skip normal append+flush logic below.
+
+                # Original flush-on-overflow logic (preserved), but routes
+                # through _emit_buffer so post-flush re-check #2 kicks in.
                 if current_tokens + row_tokens > max_tokens and len(current_parts) > (1 if header_prefix else 0):
-                    chunk_text = "\n".join(current_parts).strip()
-                    if chunk_text:
-                        chunks.append(Chunk(
-                            text=chunk_text,
-                            scope_path=list(scope_path),
-                            source_block_ids=[block.block_id],
-                            token_count=estimate_tokens(chunk_text),
-                            doc_hash=doc_hash,
-                            version=version,
-                            page_numbers=list(page_numbers),
-                            payload_version=payload_version,
-                            form_fields=list(form_fields) if form_fields else [],
-                            column_headers=list(column_headers) if column_headers else [],
-                            doc_type=doc_type,
-                        ))
+                    _emit_buffer(current_parts)
                     current_parts = [header_prefix] if header_prefix else []
-                    current_tokens = estimate_tokens(header_prefix)
-                    row_block_ids = []
+                    current_tokens = estimate_tokens(header_prefix) if header_prefix else 0
 
                 current_parts.append(row_text)
                 current_tokens += row_tokens
-                row_block_ids.append(block.block_id)
 
-            # Flush remaining
-            if current_parts:
-                chunk_text = "\n".join(current_parts).strip()
-                if chunk_text:
-                    chunks.append(Chunk(
-                        text=chunk_text,
-                        scope_path=list(scope_path),
-                        source_block_ids=[block.block_id],
-                        token_count=estimate_tokens(chunk_text),
-                        doc_hash=doc_hash,
-                        version=version,
-                        page_numbers=list(page_numbers),
-                        payload_version=payload_version,
-                        form_fields=list(form_fields) if form_fields else [],
-                        column_headers=list(column_headers) if column_headers else [],
-                        doc_type=doc_type,
-                    ))
+            # Flush remaining (uses _emit_buffer; re-check protects against
+            # oversized final buffer when header + last near-cap row combined).
+            # Guard `len > 1 if header else > 0` prevents emitting a phantom
+            # header-only chunk when the last row was force-split (pre-check
+            # leaves `current_parts = [header_prefix]` with no data rows).
+            if current_parts and len(current_parts) > (1 if header_prefix else 0):
+                _emit_buffer(current_parts)
         else:
             # No structured data: fall through to two-phase text splitting.
             chunks.extend(
