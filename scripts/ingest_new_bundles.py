@@ -10,6 +10,7 @@ Run in background — 2825 bundles × ~20s avg = ~14h wall clock. Progress every
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import subprocess
@@ -56,7 +57,10 @@ def _http(method, url, *, headers=None, body=None, timeout=10.0):
             return e.code, json.loads(raw) if raw else {}
         except json.JSONDecodeError:
             return e.code, raw
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead) as e:
+        # IncompleteRead: server closed connection before sending full
+        # response body (typically transient under load). Treat as
+        # retryable transient — send_notify will retry up to --retry times.
         return 0, f"{type(e).__name__}: {e}"
 
 
