@@ -72,6 +72,44 @@ _MAX_SEQ_LEN = 512
 # crashing ingest.
 _DEFAULT_INTRA_OP_THREADS = 4
 
+# Sub-batch size cap for encode(). Root cause fix for the 2026-08-21
+# wedge (doc 8b776a6e8eaae267): a 1343-chunk OCR table doc went into ONE
+# session.run as [1343, ~512]; the attention intermediate
+# ([1343, 16, 512, 512] float32 ≈ 22.5 GB) OOM-killed an unlimited-memory
+# repro in 25 s and wedged the 20 GB-capped service (thread pool frozen,
+# 0% CPU). 64 keeps every sub-batch's transient ≈ 1 GB (verified shape
+# math: 64 × 16 × 512 × 512 × 4 B ≈ 1.07 GB) while amortizing per-call
+# overhead fine (normal docs are ≤ 64 chunks → single call, zero change).
+_DEFAULT_BATCH_SIZE = 64
+
+
+def _resolve_batch_size() -> int:
+    """Read BGE_M3_BATCH_SIZE from env, with safe fallback.
+
+    Mirrors ``_resolve_intra_op_threads``: unset/empty → default (64),
+    positive int → that value, anything else → default with a warning
+    (operator typo degrades gracefully instead of crashing ingest).
+    Read at ``__init__`` time so a restart picks up changes.
+    """
+    raw = os.environ.get("BGE_M3_BATCH_SIZE", "").strip()
+    if not raw:
+        return _DEFAULT_BATCH_SIZE
+    try:
+        n = int(raw)
+    except ValueError:
+        logger.warning(
+            "BGE_M3_BATCH_SIZE=%r is not a valid integer; "
+            "falling back to default %d",
+            raw, _DEFAULT_BATCH_SIZE,
+        )
+        return _DEFAULT_BATCH_SIZE
+    if n < 1:
+        logger.warning(
+            "BGE_M3_BATCH_SIZE=%d is < 1; clamping to 1", n,
+        )
+        return 1
+    return n
+
 
 def _resolve_intra_op_threads() -> int:
     """Read BGE_M3_INTRA_OP_THREADS from env, with safe fallback.
@@ -148,6 +186,9 @@ class OnnxBgeM3:
             sess_options=sess_opts,
             providers=["CPUExecutionProvider"],
         )
+        # Micro-batch cap — see _DEFAULT_BATCH_SIZE docstring for the
+        # wedge root cause. Env-tunable (BGE_M3_BATCH_SIZE).
+        self._batch_size = _resolve_batch_size()
         self._tokenizer = AutoTokenizer.from_pretrained(
             str(model_dir), use_fast=True
         )
@@ -191,13 +232,24 @@ class OnnxBgeM3:
         texts: list[str],
         return_dense: bool = True,
         return_sparse: bool = True,
+        batch_size: int | None = None,
     ) -> dict:
         """Encode texts to dense (1024d) + pseudo-sparse (token-importance) vectors.
+
+        Texts are encoded in sub-batches of at most ``batch_size`` texts
+        (default 64, env ``BGE_M3_BATCH_SIZE``) so a single pathological
+        document can never blow up the session.run batch shape — see
+        ``_DEFAULT_BATCH_SIZE`` for the wedge this prevents. Sub-batching
+        is invisible to callers: the merged result keeps the exact legacy
+        contract.
 
         Args:
             texts: list of input strings. Empty list returns an empty result.
             return_dense: include ``dense_vecs`` (L2-normalized, 1024d).
             return_sparse: include ``lexical_weights`` (per-token dict).
+            batch_size: override the sub-batch cap for this call;
+                ``None``/``< 1`` falls back to the ``__init__``-resolved
+                default (operator escape hatch, also used by tests).
 
         Returns:
             Dict with optional ``dense_vecs`` (np.ndarray) and ``lexical_weights``
@@ -206,6 +258,38 @@ class OnnxBgeM3:
         if not texts:
             return {"dense_vecs": np.zeros((0, 1024), dtype=np.float32), "lexical_weights": []}
 
+        eff_batch = batch_size if batch_size is not None and batch_size >= 1 else self._batch_size
+
+        dense_parts: list[np.ndarray] = []
+        lexical_all: list[dict[int, float]] = []
+        for i in range(0, len(texts), eff_batch):
+            d, lex = self._encode_batch(
+                texts[i:i + eff_batch], return_dense=return_dense,
+                return_sparse=return_sparse,
+            )
+            if d is not None:
+                dense_parts.append(d)
+            lexical_all.extend(lex)
+
+        result: dict = {}
+        if return_dense:
+            if dense_parts:
+                result["dense_vecs"] = np.concatenate(dense_parts, axis=0)
+            else:
+                result["dense_vecs"] = np.zeros((0, 1024), dtype=np.float32)
+        if return_sparse:
+            result["lexical_weights"] = lexical_all
+        return result
+
+    def _encode_batch(
+        self, texts: list[str],
+        return_dense: bool, return_sparse: bool,
+    ) -> tuple[np.ndarray | None, list[dict[int, float]]]:
+        """Tokenize + run one sub-batch; return (dense_rows, lexical_rows).
+
+        ``dense_rows`` is ``None`` when ``return_dense`` is falsey. Output
+        row order matches ``texts`` order — encode() concatenates slices.
+        """
         enc = self._tokenizer(
             list(texts),
             return_tensors="np",
@@ -221,13 +305,14 @@ class OnnxBgeM3:
             {"input_ids": input_ids, "attention_mask": attention_mask},
         )
 
-        result: dict = {}
+        dense_rows: np.ndarray | None = None
         if return_dense:
             # L2-normalize so Qdrant's COSINE distance is equivalent to
             # inner-product on dense vectors (matches BGEM3FlagModel output).
             norms = np.linalg.norm(sentence_embedding, axis=-1, keepdims=True)
-            result["dense_vecs"] = sentence_embedding / np.clip(norms, 1e-9, None)
+            dense_rows = sentence_embedding / np.clip(norms, 1e-9, None)
 
+        lexical: list[dict[int, float]] = []
         if return_sparse:
             if self._sparse_mode == "learned":
                 # _sparse_mode == "learned" implies weight & bias are loaded;
@@ -250,15 +335,13 @@ class OnnxBgeM3:
             is_special = np.isin(input_ids, list(_SPECIAL_TOKEN_IDS))
             keep = (attention_mask.astype(bool)) & (~is_special)
 
-            lexical: list[dict[int, float]] = []
             for row_ids, row_scores, row_keep in zip(input_ids, importance, keep):
                 weights: dict[int, float] = {}
                 for tok_id, score in zip(row_ids[row_keep], row_scores[row_keep]):
                     weights[int(tok_id)] = float(score)
                 lexical.append(weights)
-            result["lexical_weights"] = lexical
 
-        return result
+        return dense_rows, lexical
 
     @property
     def sparse_mode(self) -> str:
