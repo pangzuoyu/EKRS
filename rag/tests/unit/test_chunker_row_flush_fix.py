@@ -265,3 +265,109 @@ class TestRowFlushPathological:
             f"Pathological force-split chunks must all carry quality_warning; "
             f"got {qw_count}/{len(chunks)}"
         )
+
+
+@pytest.mark.unit
+class TestRowFlushJoinOverheadBug:
+    """Regression guard for the 5af7db2c1176534c OOM (post-closure incremental).
+
+    3860 rows × ~7 tokens (real 危险品目录 data) used to produce 3869 chunks
+    because Patch 1's flush trigger accumulated rows by per-row
+    ``estimate_tokens`` (which rounds down, losing ~0.25 tokens/row to
+    integer division), while ``_emit_buffer``'s force-split guard checked
+    ``len(joined) // 4`` exactly. The ~25-50 token "phantom" overhead from
+    ``"\n".join`` separators + int-division loss pushed the joined text
+    over max_tokens, triggering a false-positive force-split. The
+    force-split path calls ``_split_text_two_phase`` on line-bounded row
+    text → one chunk per row → 3869 chunks for a 3860-row block.
+
+    RAG then OOM-killed trying to bge-m3 encode 3869 chunks in one batch.
+    Patch #3 (post-closure) tracks raw chars in the flush trigger to match
+    the exact joined-text size check in ``_emit_buffer``. Expected: ~40
+    chunks (one per ~100-row buffer), NOT 3869.
+    """
+
+    def test_3860_short_rows_correctly_batched(self):
+        # Real 危险货物目录 pattern: header + 3860 short data rows.
+        # Each row ~30 chars (~7 tokens). NOT pathological — compliant
+        # post-O-6-fix data. Must produce ~40 chunks, not 3869.
+        header = ["危险货物编号", "名称", "别名", "UN号"]
+        # Real-world row format: "11018 | 迭氮(化)钡[干的或含水＜50%] |  | 0224"
+        rows = [header]
+        for i in range(3860):
+            rows.append([
+                str(11000 + i),
+                f"化学品{i}",
+                "",
+                f"UN{1000 + i}",
+            ])
+        block = _make_block(
+            block_id="07e6266c-414c-4397-ada7-f0979deadb08",
+            structured=rows,
+        )
+        text = "\n".join(" | ".join(str(c) for c in row) for row in rows)
+        chunks = _split_large_block(
+            block=block,
+            text=text,
+            max_tokens=MAX_TOKENS,
+            doc_hash="5af7db2c1176534c",
+            version=2,
+            scope_path=["Ch1"],
+            page_numbers=[1],
+        )
+        # HARD GUARANTEE: no chunk exceeds max_tokens.
+        oversize = [c for c in chunks if c.token_count > MAX_TOKENS]
+        assert not oversize, (
+            f"REGRESSION: {len(oversize)} chunk(s) exceed max_tokens "
+            f"(max oversize = {max((c.token_count for c in oversize), default=0)}). "
+            f"Patch #3 should prevent false-positive force-splits."
+        )
+        # CRITICAL: 3860 short rows must batch into ~40 chunks, NOT one per row.
+        # Pre-Patch-#3 (with the join-overhead bug) this produced 3869 chunks,
+        # which OOM-killed RAG when bge-m3 tried to encode all 3869 in one batch.
+        assert len(chunks) <= 100, (
+            f"REGRESSION: {len(chunks)} chunks for 3860 short rows — expected "
+            f"~40 (rows batched at max_tokens buffer). Pre-Patch-#3 produced "
+            f"3869 chunks, which OOM-killed RAG. Patch #3 must reduce this."
+        )
+        # Sanity: total tokens ≈ 3860 × 7 = ~27k (matches real bundle 30156).
+        total_tokens = sum(c.token_count for c in chunks)
+        assert 20000 <= total_tokens <= 40000, (
+            f"Total tokens {total_tokens} outside expected range"
+        )
+        # Most chunks should NOT carry quality_warning — this is normal data.
+        qw_count = sum(1 for c in chunks if c.quality_warning)
+        assert qw_count == 0, (
+            f"Normal short rows must not trigger quality_warning; "
+            f"got {qw_count}/{len(chunks)} flagged"
+        )
+
+    def test_join_overhead_does_not_trigger_force_split(self):
+        # Smaller version of the regression: 100 rows that fill the buffer
+        # exactly to current_tokens=700. Without Patch #3, the joined text
+        # is 755 tokens (> max_tokens=500 default) and force-split fires.
+        header = ["ID", "DESC"]
+        rows = [header] + [[str(i), f"item-{i}"] for i in range(100)]
+        block = _make_block(block_id="b006", structured=rows)
+        text = "\n".join(" | ".join(str(c) for c in row) for row in rows)
+        chunks = _split_large_block(
+            block=block,
+            text=text,
+            max_tokens=MAX_TOKENS,
+            doc_hash="test_join_overhead",
+            version=2,
+            scope_path=["Ch1"],
+            page_numbers=[1],
+        )
+        # All chunks must be ≤ max_tokens.
+        oversize = [c for c in chunks if c.token_count > MAX_TOKENS]
+        assert not oversize, (
+            f"100 short rows triggered oversize: {len(oversize)} chunks over cap"
+        )
+        # 100 rows × ~3 tokens + header → ~300 tokens total. Single chunk.
+        # If join-overhead bug present, would produce 100+ chunks.
+        assert len(chunks) <= 5, (
+            f"100 short rows produced {len(chunks)} chunks — expected 1-2. "
+            f"Pre-Patch-#3 produced 100+ (one per row)."
+        )
+

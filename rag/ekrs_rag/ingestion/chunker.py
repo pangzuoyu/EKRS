@@ -631,6 +631,14 @@ def _split_large_block(
 
             current_parts: list[str] = [header_prefix] if header_prefix else []
             current_tokens = estimate_tokens(header_prefix) if header_prefix else 0
+            # Phase 12 row-flush fix #3 (post-closure): track raw chars so the
+            # flush trigger matches ``_emit_buffer``'s exact joined-text size
+            # check. ``estimate_tokens`` rounds down per row, losing ~0.25
+            # tokens/row to integer division — for a 100-row buffer that's
+            # ~25 tokens of phantom overhead that pushes the joined text over
+            # max_tokens and triggers false-positive force-split. Using
+            # current_parts_chars directly avoids this drift.
+            current_parts_chars = len(header_prefix) if header_prefix else 0
 
             for row in data_rows:
                 row_text = " | ".join(str(c) for c in row)
@@ -665,12 +673,33 @@ def _split_large_block(
 
                 # Original flush-on-overflow logic (preserved), but routes
                 # through _emit_buffer so post-flush re-check #2 kicks in.
-                if current_tokens + row_tokens > max_tokens and len(current_parts) > (1 if header_prefix else 0):
+                # Phase 12 row-flush fix #3 (Post-closure incremental):
+                # Track ``current_parts_chars`` to match ``_emit_buffer``'s
+                # exact ``len(joined) // 4`` computation in the joined-text
+                # force-split guard. Using ``current_tokens + row_tokens``
+                # alone underestimates because ``estimate_tokens`` rounds
+                # down per row (e.g. 29 chars → 7 tokens; true value 7.25),
+                # so the per-row accumulation loses ~0.25 tokens/row to
+                # integer-division truncation, plus "\n" separators add
+                # ~0.25 tokens/row. For a 100-row buffer that's ~50 tokens
+                # of "phantom" overhead that pushes the joined text over
+                # max_tokens and triggers force-split, which calls
+                # ``_split_text_two_phase`` on line-bounded row text and
+                # produces one chunk per row (3869 chunks for a 3860-row
+                # 危险品目录 block instead of ~36). Track raw chars so the
+                # flush trigger and the emit guard agree.
+                projected_joined_chars = current_parts_chars + len(row_text) + 1
+                if (
+                    projected_joined_chars > max_tokens * 4
+                    and len(current_parts) > (1 if header_prefix else 0)
+                ):
                     _emit_buffer(current_parts)
                     current_parts = [header_prefix] if header_prefix else []
+                    current_parts_chars = len(header_prefix) if header_prefix else 0
                     current_tokens = estimate_tokens(header_prefix) if header_prefix else 0
 
                 current_parts.append(row_text)
+                current_parts_chars += len(row_text) + 1  # +1 for "\n" join separator
                 current_tokens += row_tokens
 
             # Flush remaining (uses _emit_buffer; re-check protects against
