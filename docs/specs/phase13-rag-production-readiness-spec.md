@@ -96,7 +96,8 @@ v10 验证了数据面正确性: chunker(行级冲刷 d37efce + 误判修正 e2b
 
 ## 9. 待决问题(F2/A-retry 后复核)
 1. 2326-chunk 实际编码时长 → 校准 P0-3 分层超时值
-2. 全量 chunk 分布 P99/P999 → 定稿 P0-4 阈值(E10)
-3. 大 doc 假失败的 A 类重试成功率 → 验证 60s 退避是否足够
-4. 吞吐对比(60 docs/h)与 worker 数/内存实测 → 定 max_workers
-5. monster doc 入库后 recall 影响 → 联动 F3(quality_warning 占比)决定是否收紧阈值
+2. ~~pebble 依赖受限网络可用性~~ **已验证(2026-08-22)**: aliyun 镜像含 pebble 5.2.1(34KB 纯 Python wheel 零编译依赖), rag Dockerfile 的 `PIP_INDEX_URL` build-arg(Phase 8 T8-3a)原生支持镜像覆盖 → pebble 路线定为主案, 手写 Process 降为 fallback 不预期使用
+3. 全量 chunk 分布 P99/P999 → 定稿 P0-4 阈值(E10)
+4. 大 doc 假失败的 A 类重试成功率 → 验证 60s 退避是否足够
+5. 吞吐对比(60 docs/h)与 worker 数/内存实测 → 定 max_workers
+6. monster doc 入库后 recall 影响 → 联动 F3(quality_warning 占比)决定是否收紧阈值
