@@ -181,6 +181,13 @@ def main() -> int:
     ap.add_argument("--version", type=int, default=DEFAULT_VERSION)
     ap.add_argument("--retry", type=int, default=1)
     ap.add_argument("--pace", type=float, default=SEQUENTIAL_PACE_S)
+    # Notify-fail backoff (2026-08-22): big-doc encode (300-400 chunks)
+    # blocks the RAG event loop for 45-90s; the old pace-sleep (2s) let
+    # BOTH notify attempts land inside one encode window → false HTTP=0
+    # failures (docs 1148/1149 during v10). Sleep far longer than one
+    # encode window before retrying. Only applies to the notify-fail path;
+    # the end-of-doc pace is still --pace.
+    ap.add_argument("--notify-retry-backoff", type=float, default=60.0)
     ap.add_argument("--status-timeout", type=float, default=STATUS_TIMEOUT_S)
     ap.add_argument("--notify-timeout", type=float, default=NOTIFY_TIMEOUT_S)
     ap.add_argument("--checkpoint", type=Path,
@@ -255,9 +262,9 @@ def main() -> int:
             notify_code, payload = send_notify(token, doc_hash, args.version, output_path, trace_id)
             print(f"  [{i:4d}/{len(pending)}] {doc_hash[:12]}... notify returned HTTP={notify_code}", flush=True)
             if notify_code not in (200, 202):
-                print(f"  [{i:4d}/{len(pending)}] {doc_hash[:12]}... NOTIFY FAIL HTTP={notify_code} (attempt {attempt}/{args.retry})", file=sys.stderr)
+                print(f"  [{i:4d}/{len(pending)}] {doc_hash[:12]}... NOTIFY FAIL HTTP={notify_code} (attempt {attempt}/{args.retry}, backoff {args.notify_retry_backoff:.0f}s)", file=sys.stderr)
                 last_body = payload
-                time.sleep(args.pace)
+                time.sleep(args.notify_retry_backoff)
                 continue
             status, body = poll_status(token, doc_hash, effective_timeout)
             dt = time.monotonic() - t0
