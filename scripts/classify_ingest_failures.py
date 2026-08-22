@@ -80,8 +80,13 @@ def load_failed(ckpt_path: Path) -> list[dict]:
 
 
 def live_status(rag_url: str, token: str, doc_hash: str) -> str:
-    """GET /v1/ingestion/status/{doc_hash}; returns 'unreachable' on any
-    transport error / non-200 so a busy server degrades to class D."""
+    """GET /v1/ingestion/status/{doc_hash}.
+
+    Returns the server status string ('success'/'failed'/...), or:
+      'not_found'  — HTTP 404: no TaskRepo row → notify never landed
+                     (class A: retry the notify)
+      'unreachable'— transport error / other HTTP code (class D)
+    """
     req = urllib.request.Request(
         f"{rag_url}/v1/ingestion/status/{doc_hash}",
         headers={"X-Parser-Token": token},
@@ -90,6 +95,10 @@ def live_status(rag_url: str, token: str, doc_hash: str) -> str:
         with urllib.request.urlopen(req, timeout=5) as resp:
             body = json.loads(resp.read().decode("utf-8"))
             return str(body.get("status", "unknown"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return "not_found"
+        return "unreachable"
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         return "unreachable"
 
@@ -129,11 +138,13 @@ def main() -> int:
             c_real.append(f"{h}\tlive_status={s}")
         elif s == "unreachable":
             d_unknown.append(h)
-        else:  # queued / processing / unknown → notify never finished
+        else:  # not_found / queued / processing / unknown → retry notify
             a_retry.append(h)
         if i % 25 == 0:
             print(f"  ... {i}/{len(failed)} checked", flush=True)
-        time.sleep(0.2)
+        # Stay under the Phase 8 /v1/* rate limit (60 req/min/IP token
+        # bucket) — a faster pace gets 429s that degrade to class D.
+        time.sleep(1.05)
 
     A_RETRY.write_text(json.dumps(a_retry, indent=1))
     B_MISLABELED.write_text("\n".join(b_mislabeled) + ("\n" if b_mislabeled else ""))
