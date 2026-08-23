@@ -372,7 +372,22 @@ async def notify(
             pass
         error_code = rejection.error_code if rejection else "raw_chars_over_limit"
         error_msg = rejection.error if rejection else "admission rejected"
-        # Audit emit (best-effort; T6 will register the schema).
+        # actual_chunks: number of blocks in the JSONL (best-effort scan).
+        # 0 if the file is unreadable — admission_rejected still fires.
+        # output_path is the parser's output DIRECTORY (coarse_gate reads
+        # {output_path}/data.jsonl); we mirror that contract.
+        actual_chunks = 0
+        try:
+            _jsonl_path = Path(notification.output_path) / "data.jsonl"
+            with _jsonl_path.open("r", encoding="utf-8") as _f:
+                for _line in _f:
+                    if _line.strip():
+                        actual_chunks += 1
+        except Exception:
+            pass
+        # Phase 13a T6: emit admission_rejected with full schema
+        # (doc_hash + reason + actual_chunks). Required-field schema is
+        # registered in main.py _EVENT_SCHEMAS.
         try:
             from ekrs_rag.observability.audit import get_writer as _gw
             _writer = _gw()
@@ -380,9 +395,9 @@ async def notify(
                 _writer.write(
                     "admission_rejected",
                     request_id=request_id,
-                    doc_id=doc_hash,
+                    doc_hash=doc_hash,
                     reason=error_code or "raw_chars_over_limit",
-                    raw_chars=0,  # populate from coarse_gate if needed
+                    actual_chunks=actual_chunks,
                 )
         except Exception:
             pass

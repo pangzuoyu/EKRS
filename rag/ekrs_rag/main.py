@@ -117,6 +117,16 @@ _EVENT_SCHEMAS = {
     # Event count: 20 → 22.
     "fts_synced": {"doc_hash", "version", "chunks_written"},
     "fts_searched": {"vector_hits", "fts_hits", "both_hits"},
+    # Phase 13a T6: admission + pool timeout events.
+    # ``admission_rejected`` emitted by notify() when coarse_gate or
+    # chunk_gate rejects the document (raw_chars or chunk count over
+    # hard limit; E10 invariant: 202 not bare 403).
+    # ``task_timeout_killed`` emitted by EncodingPool.wait() when pebble
+    # kills a worker subprocess for exceeding 30-minute timeout
+    # (ProcessExpired or concurrent.futures.TimeoutError).
+    # Event count: 22 → 24.
+    "admission_rejected": {"doc_hash", "reason", "actual_chunks"},
+    "task_timeout_killed": {"doc_hash", "task_id", "timeout_s"},
 }
 
 

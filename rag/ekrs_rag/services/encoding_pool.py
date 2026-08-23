@@ -166,7 +166,7 @@ class EncodingPool:
         self._tasks[task_id] = fut
         return task_id
 
-    async def wait(self, task_id: str) -> dict[str, Any]:
+    async def wait(self, task_id: str, *, doc_hash: str = "") -> dict[str, Any]:
         """Block until task completes; return outcome dict.
 
         Handles ``ProcessExpired`` (subprocess killed by timeout) →
@@ -174,6 +174,11 @@ class EncodingPool:
         instead of raising. Also catches any other exception (worker
         crashed before submit returned, etc.) and reports as
         ``task_failed`` so callers never see a bare exception.
+
+        Phase 13a T6: when a timeout fires, emit ``task_timeout_killed``
+        audit event (doc_hash + task_id + timeout_s) before returning the
+        structured failure dict. Best-effort — audit failure is swallowed
+        so it doesn't compound the underlying worker crash.
 
         Pops the task from ``self._tasks`` on completion (success or fail).
         """
@@ -197,6 +202,23 @@ class EncodingPool:
             logger.warning(
                 "encoding_pool: task_timeout task_id=%s err=%s", task_id, e,
             )
+            # Phase 13a T6: emit audit event before returning the
+            # structured failure dict. doc_hash is supplied by caller
+            # (notify handler) so the operator sees which document was
+            # killed; falls back to task_id-only when caller omits it.
+            try:
+                from ..observability.audit import get_writer
+
+                writer = get_writer()
+                if writer is not None:
+                    writer.write(
+                        "task_timeout_killed",
+                        doc_hash=doc_hash or "",
+                        task_id=task_id,
+                        timeout_s=self._task_timeout_s,
+                    )
+            except Exception:
+                pass
             return {
                 "rag_status": "failed",
                 "error": f"task_timeout after {self._task_timeout_s}s: {e}",

@@ -341,7 +341,7 @@ Phase 6B 起,嵌入从 bge-small-en (384d) 切换到 bge-m3 (1024d + sparse),Qdr
 1. **启动 RAG 服务**:lifespan 自动检测 dim 不匹配(384d → 1024d),`AUTO_REINDEX=true`(默认)触发删旧集合+重建。等待服务 listen。
 2. **触发 parser 全量重新推送**:parser 侧按文档清单逐个调 `POST /v1/ingestion/notify`,RAG 接收并 upsert(bge-m3 真实嵌入)。
 3. **验证检索**:调 `POST /v1/constraints` 验证返回非空 + score 合理。
-4. **监控**:首 24h 关注 `qdrant_write_failed` 审计事件(语义已放宽,见 §16)。
+4. **监控**:首 24h 关注 `qdrant_write_failed` 审计事件(语义已放宽,见 §16)。Phase 13a T6 增量:关注 `admission_rejected` 与 `task_timeout_killed` 比例 — 持续上升表示客户端 payload 体积异常或子进程超时阈值过紧。
 
 **生产部署**:`AUTO_REINDEX=false` 显式禁止 dim 自动重建,要求 operator 手动确认数据迁移窗口。
 
@@ -537,7 +537,11 @@ RAG 服务暴露两个端口：
 
 审计日志不记录令牌
 
-审计日志 `audit.log` 永久保存，按 100 MB × 5 轮转（gzip 压缩，标准库 RotatingFileHandler）。`/healthz` 请求不写入审计（k8s 探活高频调用）。轮转后 AuditIndex 自动重建（仅扫描当前文件，跳过 `.gz` 历史）。**19 个事件名/schema 不可变更**（Phase 5: 15 个基线 + Phase 6A Task 2 注册 `document_metadata_failed` 孤儿事件 + doc-to-md 集成 T6/T9 注册 3 个回调事件）：constraint_solve_started/solved/failed, endpoint_started/completed, query_replay_executed, ingestion_received/completed/failed/replay_started/replay_completed/replay_sha256_mismatch, compensation_retry, qdrant_write_failed, lock_acquire_failed, document_metadata_failed, callback_url_blocked, callback_auth_missing, callback_best_effort_failed。Phase 6A Task 4 新增 2 个可选字段 `lineage_snapshot` + `conflict_details`（不进入 required schema，通过 `_PHASE6A_OPTIONAL` 白名单透传）。
+审计日志 `audit.log` 永久保存，按 100 MB × 5 轮转（gzip 压缩，标准库 RotatingFileHandler）。`/healthz` 请求不写入审计（k8s 探活高频调用）。轮转后 AuditIndex 自动重建（仅扫描当前文件，跳过 `.gz` 历史）。**24 个事件名/schema 不可变更**（Phase 5: 15 个基线 + Phase 6A Task 2 注册 `document_metadata_failed` 孤儿事件 + doc-to-md 集成 T6/T9 注册 3 个回调事件 + Phase 10 T10a-7 注册 2 个 FTS 事件 `fts_synced`/`fts_searched` + Phase 13a T6 注册 2 个准入/超时事件 `admission_rejected`/`task_timeout_killed`）：constraint_solve_started/solved/failed, endpoint_started/completed, query_replay_executed, ingestion_received/completed/failed/replay_started/replay_completed/replay_sha256_mismatch, compensation_retry, qdrant_write_failed, lock_acquire_failed, document_metadata_failed, callback_url_blocked, callback_auth_missing, callback_best_effort_failed, fts_synced, fts_searched, admission_rejected, task_timeout_killed。Phase 6A Task 4 新增 2 个可选字段 `lineage_snapshot` + `conflict_details`（不进入 required schema，通过 `_PHASE6A_OPTIONAL` 白名单透传）。
+
+Phase 13a T6 schema 新增项：
+- `admission_rejected {doc_hash, reason, actual_chunks}` — 由 `notify()` 在粗筛 (`raw_chars_over_limit`) 或 chunk 门 (`chunks_over_limit`) 拒绝时 emit。`reason` 字段直接承载 `error_code` (`raw_chars_over_limit` | `chunks_over_limit` | `jsonl_unreadable`)。`actual_chunks` 是 best-effort 块计数（文件不可读 → 0）。
+- `task_timeout_killed {doc_hash, task_id, timeout_s}` — 由 `EncodingPool.wait()` 在 pebble 子进程被超时（30 分钟）杀死时 emit。`doc_hash` 由 `notify()` 通过 `pool.wait(task_id, doc_hash=...)` 传入；缺省时为空字符串。
 
 17. 错误码参考
 HTTP	业务错误码	说明

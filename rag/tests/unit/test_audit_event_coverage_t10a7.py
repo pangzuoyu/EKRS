@@ -111,13 +111,14 @@ def test_main_event_schemas_contains_fts_synced_and_searched() -> None:
     }
 
 
-def test_main_event_schemas_count_22() -> None:
-    """``_EVENT_SCHEMAS`` has 22 entries (T10a-7 closed: +2 from 20 baseline)."""
+def test_main_event_schemas_count_24() -> None:
+    """``_EVENT_SCHEMAS`` has 24 entries (T10a-7 closed: +2 from 20 baseline;
+    Phase 13a T6 closed: +2 admission_rejected + task_timeout_killed = 24)."""
     from ekrs_rag.main import _EVENT_SCHEMAS
 
-    assert len(_EVENT_SCHEMAS) == 22, (
-        f"Expected 22 event schemas (T10a-7 closure); "
-        f"got {len(_EVENT_SCHEMAS)}"
+    assert len(_EVENT_SCHEMAS) == 24, (
+        f"Expected 24 event schemas (T6 closure: admission_rejected + "
+        f"task_timeout_killed); got {len(_EVENT_SCHEMAS)}"
     )
 
 
