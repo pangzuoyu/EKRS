@@ -97,12 +97,15 @@ async def test_pipeline_classifier_exception_isolated(
     # Patch the pipeline module's local binding (from .doc_classifier import
     # classify creates a module-level alias in pipeline; re-assigning the
     # symbol on doc_classifier would not affect that alias).
-    import ekrs_rag.ingestion.pipeline as pipeline_mod
+    # Phase 13a Pre-Task A: classify was moved from pipeline.py into
+    # services/step5_helpers.py (single source of truth for Step 5).
+    # Patch the new location.
+    import ekrs_rag.services.step5_helpers as helpers_mod
 
     def boom(*_a: object, **_k: object) -> object:
         raise RuntimeError("simulated classifier crash")
 
-    monkeypatch.setattr(pipeline_mod, "classify", boom)
+    monkeypatch.setattr(helpers_mod, "classify", boom)
 
     notification = MagicMock()
     notification.doc_hash = "d1"

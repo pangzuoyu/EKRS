@@ -30,18 +30,24 @@ from ..security import (
     validate_callback_url,
 )
 from .chunker import chunk_blocks
-from .doc_classifier import DocClassifierRules, classify, load_index_file_name, load_rules
 from .ir_parser import IRParseError, parse_jsonl_file
 from .outcome import IngestionOutcome
+from ..services.step5_helpers import (
+    AuditEmitter,
+    _prepare_step5,
+    _run_step5,
+)
+
+# Re-export for backward compat: existing tests / callers use
+# `from ekrs_rag.ingestion.pipeline import AuditEmitter`.
+__all__ = [
+    "AuditEmitter",
+    "CallbackNonRetryableError",
+    "CallbackRetryableError",
+    "IngestionPipeline",
+]
 
 logger = logging.getLogger(__name__)
-
-
-# Phase 12 Task C: filename → doc_type classifier rules. Lazy-loaded
-# singleton (loaded once per process via _DOC_CLASSIFIER_RULES below).
-# rules themselves are immutable; the cache lives only to avoid re-parsing
-# the JSON config on every ingest call.
-_DOC_CLASSIFIER_RULES: DocClassifierRules | None = None
 
 
 # T6: callback outcome counters for observability. Matches the pattern used
@@ -61,17 +67,6 @@ class CallbackRetryableError(Exception):
 
 class CallbackNonRetryableError(Exception):
     """4xx error — should NOT be retried."""
-
-
-class AuditEmitter(Protocol):
-    """Minimal contract for the injected audit writer.
-
-    Documents the method the pipeline actually calls (`write`), so a missing
-    or renamed method is caught by the type checker rather than at runtime.
-    Kept as a Protocol to preserve loose coupling (no import of AuditWriter).
-    """
-
-    def write(self, event_type: str, **kwargs: object) -> bool: ...
 
 
 class IngestionPipeline:
@@ -103,7 +98,9 @@ class IngestionPipeline:
     async def ingest(self, notification: IngestionNotification) -> IngestionOutcome:
         """Run full ingestion pipeline for a parser notification.
 
-        Steps:
+        Steps (Phase 13a Pre-Task A: Steps 1-5.6 extracted to
+        services/step5_helpers.py as pure functions, single source of
+        truth):
         1. Check idempotency (already indexed → skip)
         2. Read JSONL from shared volume
         3. Parse DocumentBlock IR
@@ -116,149 +113,33 @@ class IngestionPipeline:
         the ingestion state (success/business-failure), not callback
         delivery status.
         """
-        doc_hash = notification.doc_hash
-        version = notification.version
-        output_path = Path(notification.output_path)
+        # Phase 13a Pre-Task A: helper extraction. _prepare_step5 handles
+        # Steps 0-4 (defense-in-depth path check + idempotency + JSONL +
+        # parse + chunk + classifier). Early-exit paths return an
+        # IngestionOutcome directly.
+        prep = _prepare_step5(
+            notification=notification,
+            qdrant=self._qdrant,
+            storage_root=self._shared_storage_root,
+            audit_writer=self._audit_writer,
+        )
 
-        # P0.2: defense-in-depth check (route already enforces this; pipeline re-checks)
-        try:
-            output_path.resolve(strict=False).relative_to(self._shared_storage_root)
-        except (ValueError, OSError) as e:
-            logger.error(
-                "output_path_out_of_scope: doc=%s v=%d path=%s root=%s",
-                doc_hash,
-                version,
-                output_path,
-                self._shared_storage_root,
-            )
-            outcome = self._failed_outcome(
-                "output_path_out_of_scope",
-                f"output_path outside SHARED_STORAGE_PATH: {output_path}",
-            )
-            await self._send_callback_safely(notification, outcome)
-            return outcome
+        # Early-exit: prep has outcome but no chunks (skip / error path)
+        if prep.chunks is None:
+            assert prep.outcome is not None, "Step5Preparation invariant violated"
+            await self._send_callback_safely(notification, prep.outcome)
+            return prep.outcome
 
-        logger.info("Starting ingestion: doc=%s v=%d path=%s",
-                     doc_hash, version, output_path)
+        # Step 5+5.5+5.6: qdrant.upsert + delete_old_versions + fts.replace_doc
+        outcome = _run_step5(
+            chunks=prep.chunks,
+            qdrant=self._qdrant,
+            fts=self._fts,
+            audit_writer=self._audit_writer,
+            doc_hash=notification.doc_hash,
+            version=notification.version,
+        )
 
-        # Step 1: Idempotency check
-        existing = self._qdrant.get_ingestion_status(doc_hash)
-        if existing and existing.status == "success" and existing.version == version:
-            logger.info("Already indexed: doc=%s v=%d (%d chunks), skipping",
-                         doc_hash, version, existing.chunks_indexed)
-            outcome = IngestionOutcome(
-                rag_status="success",
-                chunks_indexed=existing.chunks_indexed,
-            )
-            await self._send_callback_safely(notification, outcome)
-            return outcome
-
-        # Step 2: Read JSONL
-        jsonl_path = output_path / "data.jsonl"
-        if not jsonl_path.exists():
-            logger.error("JSONL not found: %s", jsonl_path)
-            outcome = self._failed_outcome(
-                "jsonl_missing", f"File not found: {jsonl_path}",
-            )
-            await self._send_callback_safely(notification, outcome)
-            return outcome
-
-        # Step 3-4: Parse and chunk
-        try:
-            blocks = parse_jsonl_file(str(jsonl_path))
-            if not blocks:
-                logger.warning("Empty JSONL: %s", jsonl_path)
-                outcome = self._failed_outcome("jsonl_empty", "Empty JSONL file")
-                await self._send_callback_safely(notification, outcome)
-                return outcome
-
-            # Phase 12 Task C: read index.json → classify filename → doc_type.
-            # Classifier exceptions are isolated so they NEVER fail ingestion;
-            # we log WARNING + default doc_type to 'unknown'. The chunk_blocks
-            # call site is the only one wired (replay() at line ~298 intentionally
-            # left for an operator escape hatch — it still stamps doc_type=None
-            # legacy, which the retriever handles).
-            global _DOC_CLASSIFIER_RULES
-            try:
-                file_name = load_index_file_name(output_path)
-                if _DOC_CLASSIFIER_RULES is None:
-                    _DOC_CLASSIFIER_RULES = load_rules()
-                rules: DocClassifierRules = _DOC_CLASSIFIER_RULES
-                if file_name is not None:
-                    doc_type = classify(file_name, rules).doc_type
-                else:
-                    doc_type = "unknown"
-            except Exception as e:
-                logger.warning(
-                    "doc_classifier_failed: %s — defaulting doc_type to 'unknown'",
-                    e,
-                )
-                doc_type = "unknown"
-
-            chunks = chunk_blocks(
-                blocks, doc_hash, version,
-                max_tokens=settings.MAX_CHUNK_TOKENS,
-                payload_version=2,
-                doc_type=doc_type,
-            )
-            if not chunks:
-                logger.warning("No chunks produced from %d blocks", len(blocks))
-                outcome = self._failed_outcome("no_chunks", "No chunks produced")
-                await self._send_callback_safely(notification, outcome)
-                return outcome
-
-        except IRParseError as e:
-            logger.error("JSONL parse error for %s: %s", doc_hash, e)
-            outcome = self._failed_outcome("ir_parse_error", str(e))
-            await self._send_callback_safely(notification, outcome)
-            return outcome
-
-        # Step 5: Upsert to Qdrant
-        try:
-            count = self._qdrant.upsert_chunks(chunks)
-            logger.info("Ingested %d chunks for doc=%s v=%d", count, doc_hash, version)
-        except Exception as e:
-            logger.error("Qdrant upsert failed for %s: %s", doc_hash, e)
-            outcome = self._failed_outcome("qdrant_upsert_failed", str(e))
-            await self._send_callback_safely(notification, outcome)
-            return outcome
-
-        # Step 5.5: P2 — old-version cleanup (only after successful upsert)
-        if settings.OLD_VERSION_DELETE_ENABLED:
-            try:
-                self._qdrant.delete_old_versions(doc_hash, keep_version=version)
-            except Exception as e:
-                logger.warning(
-                    "delete_old_versions_failed: doc=%s v=%d err=%s",
-                    doc_hash, version, e,
-                )
-
-        # Step 5.6: Phase 10 T10a-2 — FTS sync write (paired with Qdrant).
-        # Qdrant is truth-of-record; FTS failure does NOT fail ingestion.
-        # Drift (if any) is detected by ConsistencyChecker (T10a-2).
-        # Phase 12 F1: schema_version is captured at FTSManager __init__
-        # (the manager is the schema source-of-truth). replace_doc branches
-        # internally on self._schema_version. Pipeline passes through.
-        if self._fts is not None:
-            try:
-                self._fts.replace_doc(doc_hash, chunks, version=version)
-                if self._audit_writer is not None:
-                    # fts_synced schema registered in T10a-7; before that,
-                    # write() returns False silently. Emit call stays
-                    # stable across T10a-7.
-                    self._audit_writer.write(
-                        "fts_synced",
-                        doc_hash=doc_hash, version=version,
-                        chunks_written=count,
-                    )
-            except Exception as fts_err:
-                logger.warning(
-                    "fts_sync_failed_after_qdrant: doc=%s v=%d err=%s",
-                    doc_hash, version, fts_err,
-                )
-
-        # Step 6: success
-        outcome = IngestionOutcome(rag_status="success", chunks_indexed=count)
         await self._send_callback_safely(notification, outcome)
         return outcome
 
