@@ -92,7 +92,7 @@ def live_status(rag_url: str, token: str, doc_hash: str) -> str:
         headers={"X-Parser-Token": token},
     )
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             body = json.loads(resp.read().decode("utf-8"))
             return str(body.get("status", "unknown"))
     except urllib.error.HTTPError as e:
