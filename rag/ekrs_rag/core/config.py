@@ -114,6 +114,16 @@ class Settings(BaseSettings):
     ADMISSION_RAW_CHAR_LIMIT: int = 1_000_000
     ADMISSION_CHUNK_LIMIT: int = 3000
 
+    # Phase 13a T4: pebble.ProcessPool subprocess pool (P0-2/P0-3).
+    # MAX_WORKERS = number of concurrent Step5 worker subprocesses (eng-review
+    # Issue 2 default = 2; tune via env for higher throughput on beefier hosts).
+    # PROMETHEUS_MULTIPROC_DIR mirrors the env var that main.py reads at
+    # startup; this Settings field is for the worker subprocess (which
+    # inherits env from its parent pebble spawn) so it can write counters
+    # to the multiproc dir shared with the parent (eng-review Issue 3 item 1).
+    EKRS_ENCODING_MAX_WORKERS: int = 2
+    PROMETHEUS_MULTIPROC_DIR: str = ""
+
     @field_validator("PARSER_TOKEN")
     @classmethod
     def token_min_length(cls, v: str) -> str:

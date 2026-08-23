@@ -23,6 +23,10 @@ dependencies = [
     # Phase 10 T10d — MCP (Model Context Protocol) SDK. stdio transport
     # for AI Agent (Claude Code / MCP inspector) integration.
     "mcp>=1.0",
+    # Phase 13a T4 — pebble subprocess pool for Step5 encode workers
+    # (P0-2/P0-3 production-readiness). Version cap <6 because pebble
+    # 6.x changed the ProcessPool API.
+    "pebble>=5.0,<6",
 ]
 
 [build-system]
