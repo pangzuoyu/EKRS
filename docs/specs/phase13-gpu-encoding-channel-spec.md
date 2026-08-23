@@ -21,11 +21,11 @@
 
 ## 1. 背景与动机(v10 实测口径)
 
-| 瓶颈 | 实测表现 |
+| 瓶颈 | 实测表现(2026-08-23 修正口径) |
 |---|---|
-| 编码速度 | 7787-chunk doc ≈ 26min; 12 个怪物 doc 串行 ≈ 5h 连续 loop 阻塞(retry2 全灭根因) |
-| 资源隔离 | CPU 编码期间 healthz 超时 / notify HTTP=0 风暴(v10+v11+v12 累计 A+B 类 ~400 条假失败, C 类真失败恒 0) |
-| 吞吐 | v10 全程 ~0.5 docs/min(含停机), chunk 吞吐 ~4000/h |
+| 编码速度 | 实测 **9-48 chunks/s** 区间(48 = 2298-chunk doc 空闲态 47.2s; 9.4 = 1343-chunk 病态 doc 143s); 7787-chunk 极端 doc ≈ **3-14min** |
+| 资源隔离 | retry2 全灭根因 = **队列效应**: ~30 个落地 doc × 每个 1-5min 串行编码 ≈ 数小时连续 loop 阻塞, healthz 超时 + notify HTTP=0 风暴(v10-v13 累计 A+B 类 ~400 条假失败, **C 类真失败恒 0**) |
+| 吞吐 | v10 全程 ~0.5 docs/min(含停机), chunk 吞吐 ~4000/h; 单 doc 幂等 skip 路径 <5s |
 
 CPU 方案(ONNX 4 线程 + 微批次)正确性已验证(5724-chunk 成功入库), 速度是物理上限 → GPU 主通道 + CPU 备用。
 
@@ -45,7 +45,7 @@ CPU 方案(ONNX 4 线程 + 微批次)正确性已验证(5724-chunk 成功入库)
 
 | 组件 | 选型 | 说明 |
 |---|---|---|
-| 后端 | **PoC 对比后定**: (a) onnxruntime-gpu CUDA EP(复用 vendored 模型+现有代码) vs (b) PyTorch 2.3 FP16(hf-mirror 拉权重) | 13a 首日基准: 同一 28-doc 测集对比吞吐/显存 |
+| 后端 | **torch FP16 优先**(2026-08-23 user): ① 社区实证快于 ONNX GPU; ② `sparse_linear.pt` 本就是 torch state_dict, torch 侧零适配; ③ retry2 的 28-doc 即测集。**torch FP16 在 8GB 显存稳定且性能达标 → 直接跳过 ORT-GPU**; 仅当 torch 路径不可行(权重拉取/显存)才回退 onnxruntime-gpu CUDA EP(复用 vendored 模型, 零来源问题) |
 | 精度 | FP16(b 路径) | 权重 1.1GB |
 | Attention | sdpa 兜底, FA2 预编译 wheel 可得则用 | G5 |
 | Pooling | **CLS + L2 normalize**(G1) | 与 ONNX sentence_embedding 对齐 |
@@ -98,16 +98,17 @@ Router(1C/2G) → GPU Worker(2C/8G/**8GB 显存专用, k8s gpu=1**) + CPU Fallba
 GPU Worker 与 CPU 容器**不共享 GPU**(显存竞争)。
 
 ## 7. 性能预期(保守)
-单条 30-50ms; 1343-chunk ≤30s; 7787-chunk ≤3min; 稳态 10-15 docs/min。
+CPU 基线(2026-08-23 实测): 48 chunks/s 空闲态 / 9.4 chunks/s 病态 doc; 单条 ~0.1s。
+GPU 目标: 单条 30-50ms; 2298-chunk ≤5s; 7787-chunk ≤30s; 稳态 10-15 docs/min。
 冷加载 10-30s(2.2GB 权重, 预加载)。
 
 ## 8. 验收标准
 
 | # | 项 | 标准 |
 |---|---|---|
-| 1 | 检索等价 | recall@10 黄金集上 GPU vs CPU **Top-10 完全一致**为主标准; **回退线(预置)**: 重合率 ≥95% 且 recall@10 差 ≤1pp, 余弦分布 ≥0.999 为过程指标 |
+| 1 | 检索等价 | **Top-10 差异 ≤1%(业务可接受阈值)** — recall@10 黄金集上 GPU vs CPU 通道的 Top-10 重合率 ≥99%; 仅当差异导致**真实召回下降超阈值**才触发回退(G6); 可解释的 FP16/FP32 数值漂移(余弦 ≥0.999, 过程指标)不触发 |
 | 2 | 显存 | 7787-chunk 编码期峰值 ≤6GB 无 OOM |
-| 3 | 性能 | 7787-chunk ≤3min(16× 于 CPU) |
+| 3 | 性能 | 7787-chunk ≤30s; 2298-chunk ≤5s(基线: CPU 实测 47.2s) |
 | 4 | 故障转移 | GPU 容器 kill → 30s 内切 CPU 不中断 |
 | 5 | 过载 | GPU 队列 >10 溢出 CPU |
 | 6 | 回归 | golden 208 零退化 |
@@ -120,7 +121,7 @@ GPU Worker 与 CPU 容器**不共享 GPU**(显存竞争)。
 不要求 GPU(FP16)与 CPU(FP32)数值一致, 以检索等价为验收。理由: 检索对微小误差不敏感; 强制一致牺牲性能; recall@10 是既有业务指标。
 
 ## 9. 实施计划(修正)
-- **13a** GPU 容器 + 双选型 PoC 基准(ORT-GPU vs torch FP16, G4) — 1-2 天
+- **13a** GPU 容器 + **torch FP16 PoC 优先**(通过则跳过 ORT-GPU; 测集=retry2 28-doc, G4) — 1-2 天
 - **13b** 调度层(合并进 P0-2 worker, G7) — 0.5-1 天
 - **13c** 集成测试 + 检索等价验收(含 sparse, G2/G8) — 0.5 天
 - **13d** 压测调优(batch/显存/泄漏) — 0.5 天
