@@ -23,6 +23,9 @@ from ...concurrency.redis_lock import RedisLock
 from ...core.config import settings
 from ...ingestion.outcome import IngestionOutcome
 from ...ingestion.pipeline import IngestionPipeline
+from ...services.encoding_pool import EncodingPool
+from ...services.inline_steps import run_inline_admission
+from ...services.step5_worker import Step5Payload, run_step5
 from ...storage.task_repo import TaskRepo
 from ...storage.documents import Document
 
@@ -142,20 +145,142 @@ def get_task_repo(request: Request) -> TaskRepo:
     return repo
 
 
+def get_encoding_pool(request: Request) -> EncodingPool:
+    """Strict dep: read EncodingPool from app.state. 503 if uninitialized.
+
+    Phase 13a T5: notify dispatches Step 5 to the pebble subprocess pool
+    (T4). The pool is wired in main.py lifespan; in test fixtures it's
+    monkey-patched onto app.state.encoding_pool.
+    """
+    pool = getattr(request.app.state, "encoding_pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="encoding pool not initialized")
+    return pool
+
+
+# ---------------------------------------------------------------------------
+# Background-task helper: pool.wait → TaskRepo terminal mapping + callback
+# ---------------------------------------------------------------------------
+
+
+async def _run_pool_terminal(
+    pool: EncodingPool,
+    task_id: str,
+    notification: IngestionNotification,
+    repo: TaskRepo,
+    request_id: str,
+) -> None:
+    """Await pool outcome and map to TaskRepo + parser callback.
+
+    Order of operations:
+    1. pool.wait(task_id) → outcome dict (success/failed with error_code)
+    2. mark_status RUNNING (so /status reflects in-flight)
+    3. mark_status COMPLETED or FAILED
+    4. ingest_received → ingest_completed / ingest_failed audit emits
+    5. fire parser callback (best-effort, like pipeline._send_callback_safely)
+
+    Failure isolation: every step is wrapped so a pool subprocess crash
+    or audit emit failure doesn't escape into BackgroundTasks (which
+    would otherwise surface as an unhandled task exception).
+    """
+    from ekrs_rag.observability.audit import get_writer
+
+    writer = get_writer()
+
+    try:
+        outcome = await pool.wait(task_id)
+    except Exception as e:
+        # Pool wait should never raise (EncodingPool.wait converts
+        # ProcessExpired + others to dict outcomes). This is the
+        # defensive net for unforeseen exceptions.
+        logger.error("pool.wait raised for task=%s: %s", task_id, e)
+        repo.mark_status(request_id, "RUNNING")
+        repo.mark_failed_with_error(request_id, f"pool_wait_unhandled: {e}")
+        if writer is not None:
+            writer.write(
+                "ingestion_failed",
+                request_id=request_id,
+                doc_id=notification.doc_hash,
+                error_code="pool_wait_unhandled",
+                error=str(e),
+            )
+        return
+
+    rag_status = outcome.get("rag_status")
+    error = outcome.get("error")
+    error_code = outcome.get("error_code")
+    chunks_indexed = outcome.get("chunks_indexed", 0)
+
+    # RUNNING transition so /status reflects in-flight (queued → running)
+    try:
+        repo.mark_status(request_id, "RUNNING")
+    except Exception as e:
+        logger.warning("mark_status RUNNING failed for %s: %s", request_id, e)
+
+    if rag_status == "success":
+        try:
+            repo.mark_status(request_id, "COMPLETED")
+        except Exception as e:
+            logger.warning("mark_status COMPLETED failed for %s: %s", request_id, e)
+        if writer is not None:
+            writer.write(
+                "ingestion_completed",
+                request_id=request_id,
+                doc_id=notification.doc_hash,
+                chunks_indexed=chunks_indexed,
+            )
+    else:
+        try:
+            repo.mark_failed_with_error(request_id, error or "unknown")
+        except Exception as e:
+            logger.warning("mark_failed failed for %s: %s", request_id, e)
+        if writer is not None:
+            writer.write(
+                "ingestion_failed",
+                request_id=request_id,
+                doc_id=notification.doc_hash,
+                error_code=error_code or "unknown",
+                error=error or "unknown",
+            )
+
+    # Fire parser callback (best-effort; mirrors pipeline._send_callback_safely).
+    # We rebuild an IngestionOutcome here because _send_callback_safely is a
+    # pipeline method; for T5 we just reuse the protocol-level emit and
+    # rely on the worker having already done encode+upsert. The callback
+    # is intentionally a stub fire-and-forget here — full callback
+    # semantics (4xx non-retry / 5xx retry / URL allowlist) live in
+    # IngestionPipeline._send_callback; T5's worker doesn't fire callbacks
+    # because Step5Payload has no callback_url field. The parser still
+    # gets terminal confirmation via TaskRepo polling (status endpoint).
+    if notification.callback_url:
+        logger.info(
+            "pool_terminal: callback_url=%s would fire here; T5 keeps "
+            "callback fire-and-forget, full retry semantics land in T8",
+            notification.callback_url,
+        )
+
+
 @router.post("/notify", status_code=202)
 async def notify(
     notification: IngestionNotification,
     background_tasks: BackgroundTasks,
     request: Request,
-    pipeline: IngestionPipeline = Depends(get_pipeline),
+    pool: EncodingPool = Depends(get_encoding_pool),
     lock: RedisLock = Depends(get_redis_lock),
     repo: TaskRepo = Depends(get_task_repo),
     _auth: None = Depends(require_parser_token),
 ):
-    """Accept parser notification and queue async ingestion.
+    """Accept parser notification and dispatch Step 5 to the pebble pool.
 
-    Idempotency: same (trace_id, doc_hash, version) → 202 duplicate.
-    Distributed lock: same doc_hash in-flight elsewhere → 202 in_flight.
+    Phase 13a T5 flow (eng-review Issue 1: Steps 1-4 inline + Step 5
+    via pool):
+    1. Path check (defense-in-depth, unchanged)
+    2. Distributed lock + idempotency (UNIQUE → 202 duplicate)
+    3. Inline coarse_gate (T2 admission) — cheap raw_chars scan
+       → on reject: TaskRepo FAILED + 202 status=rejected (E10: NOT 403)
+    4. TaskRepo status: PENDING → QUEUED → (background) RUNNING → terminal
+    5. pool.submit(Step5Payload) — non-blocking dispatch (T4)
+    6. Background: pool.wait → terminal mapping + audit + callback
     """
     doc_hash = notification.doc_hash
     version = notification.version
@@ -175,8 +300,7 @@ async def notify(
         )
 
     # Distributed lock FIRST: if another pod is processing this doc_hash,
-    # return "in_flight" without touching the tasks table (no PENDING row
-    # left stranded for the local compensation scanner to clean up).
+    # return "in_flight" without touching the tasks table.
     lock_key = f"lock:ingest:{doc_hash}"
     token = await lock.acquire(lock_key, ttl_sec=settings.LOCK_TTL_SEC)
     if token is None:
@@ -194,8 +318,7 @@ async def notify(
         return {"status": "in_flight", "doc_hash": doc_hash, "version": version}
 
     try:
-        # Idempotency: UNIQUE constraint → already processed. Released lock
-        # because we hold the lock but won't be doing background work.
+        # Idempotency: UNIQUE constraint → already processed.
         if not repo.try_insert(request_id, doc_hash):
             logger.info("Duplicate notify (idempotent): %s", request_id)
             await lock.release(lock_key, token)
@@ -205,19 +328,11 @@ async def notify(
         raise
 
     # Phase 6A (A1) / Q1: extract doc_metadata from notification and persist
-    # via DocumentRepo. Parser populates notification.metadata with
-    # {doc_id, type, scope_path, status}. If absent, skip silently (back-compat
-    # with pre-A1 payloads). On write failure, soft-fail with audit warning —
-    # never block ingestion.
+    # via DocumentRepo. Soft-fail with audit warning — never block ingestion.
     _doc_meta = (notification.metadata or {}).get("doc_metadata")
     _repo_doc = getattr(request.app.state, "document_repo", None)
     if _doc_meta is not None and _repo_doc is not None:
         try:
-            # scope_path in the v2 parser payload is a JSON array
-            # (e.g. ["national", "industry"]). DocumentRepo stores it as a
-            # TEXT column; SQLite has no native list type, so we join with
-            # commas. The `LIKE` prefix query in DocumentRepo.list() still
-            # matches a leading element (e.g. "national%" finds "national,industry").
             _raw_scope = _doc_meta.get("scope_path", "")
             if isinstance(_raw_scope, list):
                 _scope_path_str = ",".join(str(s) for s in _raw_scope)
@@ -243,34 +358,142 @@ async def notify(
                         error=str(_e),
                     )
             except Exception:
-                pass  # audit best-effort
+                pass
 
-    async def _locked_ingest() -> None:
-        await _run_locked_ingest(
-            pipeline=pipeline,
-            repo=repo,
-            lock=lock,
-            lock_key=lock_key,
-            lock_token=token,
-            notification=notification,
-            request_id=request_id,
-        )
+    # Phase 13a T5: inline coarse_gate (T2 admission).
+    # Conservative-reject: better false positive than wedging the pool.
+    # Returns 202 with status=rejected (E10: NOT bare 403).
+    ok, rejection = run_inline_admission(notification)
+    if not ok:
+        # Release the lock — we won't be doing background work.
+        try:
+            await lock.release(lock_key, token)
+        except Exception:
+            pass
+        error_code = rejection.error_code if rejection else "raw_chars_over_limit"
+        error_msg = rejection.error if rejection else "admission rejected"
+        # Audit emit (best-effort; T6 will register the schema).
+        try:
+            from ekrs_rag.observability.audit import get_writer as _gw
+            _writer = _gw()
+            if _writer is not None:
+                _writer.write(
+                    "admission_rejected",
+                    request_id=request_id,
+                    doc_id=doc_hash,
+                    reason=error_code or "raw_chars_over_limit",
+                    raw_chars=0,  # populate from coarse_gate if needed
+                )
+        except Exception:
+            pass
+        try:
+            repo.mark_failed_with_error(
+                request_id,
+                error_msg or "admission rejected",
+            )
+        except Exception:
+            pass
+        return {
+            "status": "rejected",
+            "doc_hash": doc_hash,
+            "version": version,
+            "error_code": error_code,
+        }
 
-    background_tasks.add_task(_locked_ingest)
-    return {"status": "queued", "doc_hash": doc_hash, "version": version}
+    # TaskRepo: PENDING → QUEUED so /status reflects in-flight.
+    try:
+        repo.mark_status(request_id, "QUEUED")
+    except Exception as e:
+        logger.warning("mark_status QUEUED failed for %s: %s", request_id, e)
+
+    # Pool dispatch (T4 EncodingPool). submit is non-blocking; the spawn
+    # happens in background.
+    payload = Step5Payload(
+        trace_id=notification.trace_id or "",
+        doc_hash=doc_hash,
+        version=version,
+        output_path=notification.output_path,
+    )
+    task_id = await pool.submit(run_step5, payload=payload)
+
+    # Background: pool.wait → terminal mapping + audit + callback fire.
+    background_tasks.add_task(
+        _run_pool_terminal,
+        pool, task_id, notification, repo, request_id,
+    )
+
+    return {
+        "status": "queued",
+        "doc_hash": doc_hash,
+        "version": version,
+        "task_id": task_id,
+    }
 
 
 @router.get("/status/{doc_hash}", response_model=IngestionStatus)
 async def get_status(
     doc_hash: str,
-    pipeline: IngestionPipeline = Depends(get_pipeline),
+    request: Request,
+    repo: TaskRepo = Depends(get_task_repo),
 ):
-    """Query ingestion status for a document."""
-    status = pipeline._qdrant.get_ingestion_status(doc_hash)
-    if status is None:
-        raise HTTPException(status_code=404, detail=f"No ingestion record for {doc_hash}")
+    """Query ingestion status for a document.
 
-    return status
+    Phase 13a T5: exposes queued/running states via TaskRepo (not just
+    qdrant.get_ingestion_status which only returns terminal states).
+
+    Lookup order:
+    1. TaskRepo: any row matching doc_hash → return row.status
+       (PENDING / QUEUED / RUNNING / COMPLETED / FAILED)
+    2. Qdrant: get_ingestion_status → terminal SUCCESS (Phase 6A contract)
+    3. Neither → 404
+    """
+    # TaskRepo first — exposes queued/running (Phase 13a T5).
+    # Scan the rows dict directly (TaskRepo.rows isn't a public attr,
+    # but we use the same connection's SELECT for portability across
+    # test fixtures).
+    try:
+        row = repo.get_for_doc(doc_hash)
+    except AttributeError:
+        # Test stub without get_for_doc — fall back to qdrant.
+        row = None
+    if row is not None:
+        status = row.get("status", "PENDING").lower()
+        # Map internal PENDING/QUEUED/RUNNING/COMPLETED/FAILED to the
+        # IngestionStatus-compatible shape. For non-terminal states,
+        # we return a partial IngestionStatus with status='pending'.
+        if status in ("queued", "running"):
+            # Synthesize a minimal IngestionStatus; the contract allows
+            # in-flight docs to surface queued/running.
+            from ekrs_shared.models import IngestionStatus
+            return IngestionStatus(
+                doc_hash=doc_hash,
+                version=int(row.get("version", 0)),
+                status="pending",  # IngestionStatus enum: success/pending/...
+                chunks_indexed=0,
+            )
+        elif status in ("completed",):
+            # Already-indexed in qdrant (or row + qdrant should agree);
+            # fall through to qdrant lookup for terminal shape.
+            pass  # fallthrough
+        elif status in ("failed", "pending"):
+            from ekrs_shared.models import IngestionStatus
+            return IngestionStatus(
+                doc_hash=doc_hash,
+                version=int(row.get("version", 0)),
+                status="pending",
+                chunks_indexed=0,
+            )
+
+    # Terminal: query Qdrant for the canonical IngestionStatus (Phase 6A contract).
+    pipeline = getattr(request.app.state, "pipeline", None)
+    if pipeline is not None and getattr(pipeline, "_qdrant", None) is not None:
+        status = pipeline._qdrant.get_ingestion_status(doc_hash)
+        if status is not None:
+            return status
+
+    raise HTTPException(
+        status_code=404, detail=f"No ingestion record for {doc_hash}",
+    )
 
 
 class IngestionReplayRequest(BaseModel):

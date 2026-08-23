@@ -190,6 +190,21 @@ class TaskRepo:
         ).fetchone()
         return dict(row) if row else None
 
+    def get_for_doc(self, doc_id: str) -> dict[str, Any] | None:
+        """Look up the most-recent task row for a doc_id.
+
+        Phase 13a T5: status endpoint queries by doc_hash (not request_id).
+        Returns the row with the highest updated_at for that doc_id, or
+        None if no row matches. Caller can read .status to expose
+        queued/running/terminal states (TaskRepo is the source of truth
+        for in-flight; qdrant is the source of truth for terminal).
+        """
+        row = self._c().execute(
+            "SELECT * FROM tasks WHERE doc_id=? ORDER BY updated_at DESC LIMIT 1",
+            (doc_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def pending_tasks_older_than(self, seconds: float) -> list[dict[str, Any]]:
         threshold = time.time() - seconds
         rows = self._c().execute(

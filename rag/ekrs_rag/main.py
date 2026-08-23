@@ -29,6 +29,7 @@ from .observability.audit_index import AuditIndex
 from .retrieval.embedding_service import EmbeddingService
 from .retrieval.qdrant_client import QdrantManager
 from .retrieval.retriever import EKRSRetriever
+from .services.encoding_pool import EncodingPool
 from .storage.task_repo import TaskRepo
 from .storage.documents import DocumentRepo
 
@@ -272,6 +273,13 @@ async def lifespan(app: FastAPI):
         _doc_repo.init()
         app.state.document_repo = _doc_repo
 
+        # Phase 13a T4+T5: pebble subprocess pool for Step 5 dispatch.
+        # Pool is wired into app.state so /v1/ingestion/notify can dispatch
+        # via Depends(get_encoding_pool). stop() is invoked at lifespan
+        # teardown via the finally block below.
+        _encoding_pool = EncodingPool(settings)
+        app.state.encoding_pool = _encoding_pool
+
         # Phase 7 T3 (Decision §1): real handler that re-ingests orphan
         # tasks via IngestionPipeline.reparse(). Defined as a closure
         # here so it captures app.state.pipeline after Qdrant init.
@@ -376,6 +384,17 @@ async def lifespan(app: FastAPI):
             metrics_httpd.shutdown()
             metrics_httpd.server_close()
         logger.info("Metrics exporter stopped")
+
+        # Phase 13a T4: drain pebble subprocess pool. stop() is idempotent
+        # so double-call from signal handler + lifespan teardown is safe.
+        encoding_pool = getattr(app.state, "encoding_pool", None)
+        if encoding_pool is not None:
+            try:
+                encoding_pool.stop()
+            except Exception as e:
+                logger.warning("encoding_pool.stop raised: %s", e)
+            logger.info("EncodingPool stopped")
+
         logger.info("Shutting down EKRS RAG service")
 
 

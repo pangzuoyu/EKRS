@@ -539,11 +539,12 @@ async def test_lock_acquire_failed_emit_on_lock_conflict(
     shared = tmp_path / "shared"
     shared.mkdir()
 
-    # Stub pipeline/repo/lock on app.state. Lock always conflicts.
+    # Stub pipeline/repo/lock/pool on app.state. Lock always conflicts.
     pipeline_stub = MagicMock()
     repo_stub = MagicMock()
     lock_stub = MagicMock()
     lock_stub.acquire = AsyncMock(return_value=None)  # contention!
+    pool_stub = MagicMock()  # Phase 13a T5: pool is wired in app.state
 
     token = "x" * 32
     monkeypatch.setenv("PARSER_TOKEN", token)
@@ -560,6 +561,7 @@ async def test_lock_acquire_failed_emit_on_lock_conflict(
             self.task_repo = repo_stub
             self.redis_lock = lock_stub
             self.document_repo = None
+            self.encoding_pool = pool_stub
 
     class _FakeRequest:
         def __init__(self):
@@ -584,7 +586,7 @@ async def test_lock_acquire_failed_emit_on_lock_conflict(
         notification=notification,
         background_tasks=bg,
         request=fake_request,
-        pipeline=pipeline_stub,
+        pool=pool_stub,
         lock=lock_stub,
         repo=repo_stub,
         _auth=None,
