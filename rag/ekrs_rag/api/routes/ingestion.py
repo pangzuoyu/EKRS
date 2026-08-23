@@ -23,6 +23,7 @@ from ...concurrency.redis_lock import RedisLock
 from ...core.config import settings
 from ...ingestion.outcome import IngestionOutcome
 from ...ingestion.pipeline import IngestionPipeline
+from ...observability.metrics import METRICS, safe_dec, safe_inc, safe_observe
 from ...services.encoding_pool import EncodingPool
 from ...services.inline_steps import run_inline_admission
 from ...services.step5_worker import Step5Payload, run_step5
@@ -37,6 +38,28 @@ router = APIRouter(prefix="/v1/ingestion", tags=["ingestion"])
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+
+def _record_terminal(result_label: str, t0: float | None) -> None:
+    """Phase 13a T7: queue-depth dec + task-duration observe.
+
+    Called from terminal branches (success / failed / pool_wait_unhandled).
+    `t0` is the monotonic start captured at notify() entry; ``None`` is
+    safe (skip duration observe) for legacy call sites that don't pass
+    it. Result labels mirror rag_status literal values
+    (``success``/``failed``/``duplicate``/``business_failure``) plus an
+    internal ``pool_wait_unhandled`` for the pool-crash defensive path.
+    """
+    safe_dec(METRICS.task_queue_depth)
+    if t0 is not None:
+        try:
+            safe_observe(
+                METRICS.task_duration_seconds,
+                time.monotonic() - t0,
+                result=result_label,
+            )
+        except Exception:
+            pass
 
 
 async def _run_locked_ingest(
@@ -169,6 +192,7 @@ async def _run_pool_terminal(
     notification: IngestionNotification,
     repo: TaskRepo,
     request_id: str,
+    t0: float | None = None,
 ) -> None:
     """Await pool outcome and map to TaskRepo + parser callback.
 
@@ -204,6 +228,7 @@ async def _run_pool_terminal(
                 error_code="pool_wait_unhandled",
                 error=str(e),
             )
+        _record_terminal("pool_wait_unhandled", t0)
         return
 
     rag_status = outcome.get("rag_status")
@@ -229,6 +254,7 @@ async def _run_pool_terminal(
                 doc_id=notification.doc_hash,
                 chunks_indexed=chunks_indexed,
             )
+        _record_terminal(str(rag_status) if rag_status else "failed", t0)
     else:
         try:
             repo.mark_failed_with_error(request_id, error or "unknown")
@@ -242,6 +268,7 @@ async def _run_pool_terminal(
                 error_code=error_code or "unknown",
                 error=error or "unknown",
             )
+        _record_terminal(str(rag_status) if rag_status else "failed", t0)
 
     # Fire parser callback (best-effort; mirrors pipeline._send_callback_safely).
     # We rebuild an IngestionOutcome here because _send_callback_safely is a
@@ -287,6 +314,10 @@ async def notify(
     request_id = request_id_from_trace(
         notification.trace_id or "", doc_hash, version
     )
+    # Phase 13a T7: capture queue-entry time so the BackgroundTasks
+    # terminal path can observe end-to-end task duration. Stashed on
+    # request.state to avoid threading it through BackgroundTasks kwargs.
+    request.state.notify_t0 = time.monotonic()
 
     # P0.2: reject output_path that escapes SHARED_STORAGE_PATH
     storage_root: Path = request.app.state.shared_storage_root
@@ -401,6 +432,13 @@ async def notify(
                 )
         except Exception:
             pass
+        # Phase 13a T7: rag_doc_rejections_total counter (operator-facing
+        # metric, complements the audit emit). `reason` label matches the
+        # audit event's `reason` field so dashboards can group by it.
+        safe_inc(
+            METRICS.doc_rejections_total,
+            reason=error_code or "raw_chars_over_limit",
+        )
         try:
             repo.mark_failed_with_error(
                 request_id,
@@ -420,6 +458,10 @@ async def notify(
         repo.mark_status(request_id, "QUEUED")
     except Exception as e:
         logger.warning("mark_status QUEUED failed for %s: %s", request_id, e)
+    # Phase 13a T7: queue depth gauge inc on entry into QUEUED state.
+    # Decremented by terminal transitions below (and by the
+    # BackgroundTasks terminal path inside _run_pool_terminal).
+    safe_inc(METRICS.task_queue_depth)
 
     # Pool dispatch (T4 EncodingPool). submit is non-blocking; the spawn
     # happens in background.
@@ -432,9 +474,11 @@ async def notify(
     task_id = await pool.submit(run_step5, payload=payload)
 
     # Background: pool.wait → terminal mapping + audit + callback fire.
+    # Pass t0 so _run_pool_terminal can observe end-to-end task duration.
     background_tasks.add_task(
         _run_pool_terminal,
         pool, task_id, notification, repo, request_id,
+        request.state.notify_t0,
     )
 
     return {

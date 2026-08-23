@@ -274,6 +274,21 @@ async def lifespan(app: FastAPI):
         _redis_lock = RedisLock(_redis)
         _task_repo = TaskRepo(db_path=settings.TASK_DB_PATH)
         _task_repo.init()
+        # Phase 13a T7.2: boot-time recovery — reset any in-flight tasks
+        # (QUEUED/RUNNING) left over from a prior pod crash. Idempotency
+        # keys in the parser payload guarantee safe re-notify. Zero the
+        # queue-depth gauge to match the freshly-reset TaskRepo state.
+        try:
+            n_recovered = _task_repo.recover_in_flight()
+            if n_recovered > 0:
+                logger.info(
+                    "boot recovery: reset %d in-flight tasks to PENDING",
+                    n_recovered,
+                )
+            from .observability.metrics import METRICS
+            METRICS.task_queue_depth.set(0)
+        except Exception as e:
+            logger.warning("boot recovery failed (continuing): %s", e)
         app.state.redis = _redis
         app.state.redis_lock = _redis_lock
         app.state.task_repo = _task_repo

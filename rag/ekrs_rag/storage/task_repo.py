@@ -218,3 +218,27 @@ class TaskRepo:
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    def recover_in_flight(self) -> int:
+        """Boot-time recovery: reset in-flight (queued/running) tasks → PENDING.
+
+        Phase 13a T7.2: after a pod restart, in-memory task state is gone but
+        the TaskRepo persists. Any task still in QUEUED or RUNNING was
+        interrupted by the restart; idempotency keys in the parser
+        notification payload guarantee a re-notify replays safely.
+
+        PENDING is the right target state: it matches the "awaiting parser
+        action" semantic, so the next /v1/ingestion/notify call (or the
+        replay path) can re-claim and resume. Idempotent at the DB level:
+        second call touches 0 rows because the previous call already
+        moved everything to PENDING.
+
+        Returns the number of rows recovered.
+        """
+        cur = self._c().execute(
+            "UPDATE tasks SET status='PENDING', last_error=COALESCE(last_error, '') "
+            "|| ' [boot_recovery]' "
+            "WHERE status IN ('QUEUED','RUNNING')"
+        )
+        self._c().commit()
+        return cur.rowcount

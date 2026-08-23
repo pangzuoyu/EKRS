@@ -145,6 +145,33 @@ route_failures_total = Counter(
     ["operation"],
 )
 
+# Phase 13a T7 — production-readiness metrics
+#
+# TASK_BUCKETS is the SLO bucket list for end-to-end ingest latency. The
+# boundaries are FIXED — they govern the latency distribution operators
+# use for SLO compliance checks. Any drift in bucket boundaries silently
+# coarsens the histogram; the hard-boundary test
+# (test_task_duration_histogram_buckets) catches accidental reordering.
+TASK_BUCKETS = (10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0)
+
+task_queue_depth = Gauge(
+    "rag_task_queue_depth",
+    "Tasks in (queued + running) state right now",
+)
+
+task_duration_seconds = Histogram(
+    "rag_task_duration_seconds",
+    "End-to-end task duration (queued → terminal)",
+    ["result"],
+    buckets=TASK_BUCKETS,
+)
+
+doc_rejections_total = Counter(
+    "rag_doc_rejections_total",
+    "Documents rejected by admission gate, by reason",
+    ["reason"],
+)
+
 
 METRICS = SimpleNamespace(
     http_requests_total=http_requests_total,
@@ -162,6 +189,9 @@ METRICS = SimpleNamespace(
     qdrant_write_failures_total=qdrant_write_failures_total,
     audit_write_failures_total=audit_write_failures_total,
     route_failures_total=route_failures_total,
+    task_queue_depth=task_queue_depth,
+    task_duration_seconds=task_duration_seconds,
+    doc_rejections_total=doc_rejections_total,
 )
 
 
@@ -200,3 +230,24 @@ def safe_observe(histogram: Histogram, value: float, **labels: Any) -> None:
             histogram.observe(value)
     except Exception as e:
         logger.warning("metric observe failed: %s", e)
+
+
+def safe_dec(gauge: Gauge, **labels: Any) -> None:
+    """Decrement gauge; same cardinality guard as safe_inc.
+
+    Mirrors safe_inc — used by the queue-depth hook at terminal
+    transitions. Counterpart dec never goes below zero in steady state
+    because every inc has a matching dec on the same task_id; the only
+    transient source of drift is the boot-recovery reset (Phase 13a T7),
+    which zeros the queue depth gauge on startup so the count stays
+    consistent with the just-reset TaskRepo state.
+    """
+    if not _validate_endpoint_label(labels):
+        return
+    try:
+        if labels:
+            gauge.labels(**labels).dec()
+        else:
+            gauge.dec()
+    except Exception as e:
+        logger.warning("metric dec failed: %s", e)
