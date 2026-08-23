@@ -1,6 +1,6 @@
 # Phase 13 增补 Spec — GPU 加速通道 + CPU Fallback 架构
 
-状态: **v1.0-draft**(2026-08-23;基于用户 GPU 增补稿 + 代码库核对修正,见 §0 勘误)
+状态: **v1.1**(2026-08-23;整合用户三项修正 — CLS pooling / 方案 A 双头输出 / 离线模型+启动自检;勘误史见 §0)
 关联: docs/specs/phase13-rag-production-readiness-spec.md(P0 主 spec); Phase 12 v10 数据
 决策记录: 验收标准 = **检索等价**(Top-10 召回一致), 不要求向量数值一致(2026-08-23 user)
 
@@ -52,23 +52,32 @@ CPU 方案(ONNX 4 线程 + 微批次)正确性已验证(5724-chunk 成功入库)
 | Sparse | **learned 头 relu(W·h+b), 仓库 sparse_linear.pt**(G2) | 输出 {token_id: weight} 字典, 与 EncodedVector.sparse 同型 |
 | Batch | 32 起步, 64 需显存实测 | seq 512 与微批次一致 |
 
-### 3.2 服务要点(修正后伪码)
+### 3.2 服务要点(修正后伪码, v1.1)
 
 ```python
 model = AutoModel.from_pretrained(MODEL_DIR, torch_dtype=torch.float16).cuda().eval()
-# MODEL_DIR = 仓库内模型目录(hf-mirror 拉取后入仓), 不直连 HF
+# MODEL_DIR = 仓库内模型目录(构建期经 hf-mirror 预下载入仓/挂载), 不直连 HF
 
 @router.post("/encode")
-async def encode(texts: list[str]) -> dict:          # 返回 dense+sparse 双头!
+async def encode(texts: list[str]) -> dict:          # 返回 dense+sparse 双头(方案 A)
     for batch in split(texts, MAX_BATCH_SIZE):
         inputs = tok(batch, padding=True, truncation=True, max_length=512, return_tensors="pt")
         with torch.no_grad():
             h = model(**to_cuda(inputs)).last_hidden_state
-        dense = l2_norm(h[:, 0])                     # CLS, 不是 mean (G1)
-        sparse = relu(h @ W_lex.T + b_lex)           # learned 头 (G2)
+        dense = l2_norm(h[:, 0])                     # CLS pooling (G1) — 与官方 ONNX 一致
+        sparse = relu(h @ W_lex.T + b_lex)           # BAAI learned 头 (G2) — 权重=仓库 sparse_linear.pt
+        # 验证锚点: dense 与 ONNX FP32 输出余弦 ≥0.999
     torch.cuda.empty_cache()
     return {"dense_vecs": ..., "lexical_weights": ...}   # 兼容 OnnxBgeM3.encode 返回型
 ```
+
+**sparse 方案 A 定案依据**: 不需要 TF-IDF/BM25 降级 — CPU 路径现用的 BAAI learned 头
+(`relu(W_lex·h+b)`)权重文件 `sparse_linear.pt` 就在仓库(3.4KB, 本身是 torch state_dict),
+GPU 侧加载同一文件即得与 CPU 逐 token 对齐的 sparse, 实现成本低于任何替代方案且天然满足验收 #8。
+
+**启动自检(验收 #10)**: 容器启动后对固定探针文本集跑 GPU FP16 vs 仓库 vendored ONNX FP32
+(即 CPU 容器同款模型, 勿用第三方 ONNX 导出), dense 余弦 ≥0.999 才把 GPU 通道注册进 Router;
+失败/模型缺失 → GPU 通道不注册, 全量纯 CPU(网络降级路径, 与 §11 回滚一致)。
 
 ### 3.3 GPU 指标
 `gpu_memory_used_bytes` / `gpu_memory_peak_bytes` (Gauge) / `encode_batch_size` / `encode_latency_seconds` (Histogram) — 经 P1-3 multiproc 目录汇聚。
@@ -103,7 +112,9 @@ GPU Worker 与 CPU 容器**不共享 GPU**(显存竞争)。
 | 5 | 过载 | GPU 队列 >10 溢出 CPU |
 | 6 | 回归 | golden 208 零退化 |
 | 7 | 稳定性 | 连续 2h / 2000+ doc 无 OOM 无碎片化降速 |
-| 8 | **sparse 等价**(新增) | GPU sparse 头 vs CPU sparse 头: 黄金集 query 的 lexical weights token 重合率 ≥95%(RRF 混合质量门) |
+| 8 | **sparse 完整性**(方案 A) | GPU 服务返回 dense+sparse 双头; sparse 与 CPU 路径(ONNX learned 头)在非零 token 索引/值上一致或召回等价(重合率 ≥95%) |
+| 9 | **Pooling 一致性** | 采样集上 GPU 与 CPU 通道 CLS 向量余弦相似度 ≥0.999(两侧均 CLS pooling) |
+| 10 | **模型加载自检** | 容器启动 ≤30s 完成加载, 自检脚本(vs 仓库 vendored ONNX FP32)余弦 ≥0.999 方可接流量; 失败则不注册 GPU 通道, 纯 CPU 降级 |
 
 ### 8.2 向量一致性策略(2026-08-23 user 决策)
 不要求 GPU(FP16)与 CPU(FP32)数值一致, 以检索等价为验收。理由: 检索对微小误差不敏感; 强制一致牺牲性能; recall@10 是既有业务指标。
@@ -126,3 +137,4 @@ GPU 持续故障 → gpu_health=false 全走 CPU(= v10 架构)。OOM → batch �
 
 ## 13. 增补记录
 2026-08-23 v1.0-draft: 用户增补稿 + 8 项勘误(G1 pooling/G2 sparse 为阻断级); 检索等价验收已含回退线预置。
+2026-08-23 v1.1: 用户三项修正整合 — CLS pooling 定稿(验收 #9); sparse 方案 A 定案(验收 #8, 定案依据=仓库 sparse_linear.pt 即 BAAI learned 头, 免 TF-IDF 降级); 离线模型+启动自检(验收 #10, 自检基准=仓库 vendored ONNX 非第三方导出, 构建期 hf-mirror 预下载)。
