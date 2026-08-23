@@ -106,6 +106,14 @@ class Settings(BaseSettings):
     EMBEDDING_CACHE_TTL_SEC: int = 86400  # 24 hours
     EMBEDDING_CACHE_CAPACITY: int = 10000
 
+    # Phase 13a T2: admission gates (P0-4 doc-bomb protection).
+    # ADMISSION_RAW_CHAR_LIMIT caps raw chars across all JSONL lines
+    # (>1M strongly suggests misrouted/duplicate bundle; reject early).
+    # CHUNK_LIMIT is a hard ceiling on chunks after chunking (3000 =
+    # upper bound OK; 3001 = first reject per plan T2.1).
+    ADMISSION_RAW_CHAR_LIMIT: int = 1_000_000
+    ADMISSION_CHUNK_LIMIT: int = 3000
+
     @field_validator("PARSER_TOKEN")
     @classmethod
     def token_min_length(cls, v: str) -> str:
