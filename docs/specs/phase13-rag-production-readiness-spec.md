@@ -1,6 +1,6 @@
 # Phase 13 Spec — RAG 入库服务生产就绪化
 
-状态: **v0.9 draft**(2026-08-22;待 v10 F2 失败分类 + A 类重试实测数据后复核 → v1.0)
+状态: **v1.0**(2026-08-23;v10 五轮收敛终值回填完成 — 2814/2825 成功、C 类恒 0、A 终值=11 恰为 policy_blocked、实测数据见 §9)
 关联: Phase 12 收尾; 基线: v10 批处理(1407 doc, 含 2326-chunk 极端 doc)
 工期重估: P0 全套 6-8 人日, P1 +2-3 人日(原稿 3-5 只覆盖 happy path, 见 §2 勘误)
 优先级: P0 = 上线阻塞; P1 = 上线前; P2 = 后续迭代
@@ -96,10 +96,12 @@ v10 验证了数据面正确性: chunker(行级冲刷 d37efce + 误判修正 e2b
 微批次 4635e0c · 行级冲刷 d37efce · 误判修正 e2b4b0e · notify 退避 (60s backoff commit) ·
 分类器 `scripts/classify_ingest_failures.py` · F2 计划 docs/superpowers/plans/2026-08-21-phase12-followups.md
 
-## 9. 待决问题(F2/A-retry 后复核)
-1. 2326-chunk 实际编码时长 → 校准 P0-3 分层超时值
-2. ~~pebble 依赖受限网络可用性~~ **已验证(2026-08-22)**: aliyun 镜像含 pebble 5.2.1(34KB 纯 Python wheel 零编译依赖), rag Dockerfile 的 `PIP_INDEX_URL` build-arg(Phase 8 T8-3a)原生支持镜像覆盖 → pebble 路线定为主案, 手写 Process 降为 fallback 不预期使用
-3. ~~chunk 分布 → P0-4 阈值~~ **已拍板(2026-08-23 user)**: MAX_CHUNKS_PER_DOC=3000(覆盖 P99=2469, 拒绝率 1.1%), 慢通道随 P2-2
-4. 大 doc 假失败的 A 类重试成功率 → 60s 退避部分有效(双败率降至 31%, 残留集中于 >60s 编码窗), 末轮 v12 数据待 11:53 回填
-5. 吞吐对比(60 docs/h)与 worker 数/内存实测 → 定 max_workers
-6. monster doc 入库后 recall 影响 → 联动 F3(quality_warning 占比)决定是否收紧阈值
+## 9. 待决问题回填(v1.0, 2026-08-23 终值)
+1. ~~超时校准~~ 实测: 48 chunks/s 空闲态(2298-chunk/47.2s) / 9.4 chunks/s 病态 doc; 单 doc 上限 7787 chunks ≈ 3-14min → **P0-3 分层超时定稿: 每子批 60s + 全任务 1800s**(幂等 skip 路径 <5s 不受影响)
+2. ~~pebble 可用性~~ 已验证(2026-08-22): aliyun 镜像 5.2.1 纯 wheel, PIP_INDEX_URL build-arg 原生支持 → 主案
+3. ~~P0-4 阈值~~ 已拍板 3000(2026-08-23); **实施修订: 准入查 chunk 后实际数**(raw/500 估算对 OCR 病态行偏差 10-30×, chunker 本身 0.04-0.24s/千 chunk 零成本) — 入口粗筛 + chunk 后硬闸
+4. ~~退避有效性~~ 60s 退避把双败率从风暴级降到 31%(v11), 残余集中在多 doc 排队窗; 配合 A/B 分类器五轮全收敛(D=0), **不追求单轮零败, 收敛机制即解**
+5. ~~吞吐~~ v10 全程 ~0.5 docs/min 含停机 / chunk 吞吐 ~4000/h; **max_workers=2 起步**(2×2.2GB 模型+arena ≈ 8-10GB, 20GB 容器内), 压测后调
+6. ~~recall 影响~~ 留 F3(quality_warning 占比度量, 见 followups 文档)
+
+**v10 终值存档**: completed 2814 / blocked 11 / failed 0; Qdrant v=2 = 397,014 points; 五轮收敛 1090→130→0(v12 车队全灭)→7→2; 详见 `deployment/phase12-v10-verification.md`
