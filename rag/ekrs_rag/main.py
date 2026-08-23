@@ -413,28 +413,16 @@ def create_app() -> FastAPI:
     # Phase 10 T10d Td.2 — GET /v1/blocks/{block_id} (document deep-read
     # backing the ekrs_get_block MCP tool).
     app.include_router(blocks.router)
+    # Phase 13a T1 — /healthz slim liveness + /ready dependency probe
+    # (eng-review Issue 4 校正: separate liveness from readiness to
+    # avoid cascading restarts on transient dep hiccups).
+    from .api.routes.health import router as health_router
+    app.include_router(health_router)
 
     @app.get("/health", response_class=PlainTextResponse)
     async def health():
         """Plain liveness probe (kept for backwards compatibility)."""
         return "ok"
-
-    @app.get("/healthz")
-    async def healthz():
-        """Readiness probe: reports audit log + index health."""
-        audit_path = Path(settings.AUDIT_LOG_PATH)
-        writable = audit_path.exists() and os.access(audit_path, os.W_OK)
-        index_loaded = _audit_index is not None
-        return JSONResponse(
-            status_code=200 if (writable and index_loaded) else 503,
-            content={
-                "audit_log_writable": writable,
-                "audit_index_loaded": index_loaded,
-                "audit_index_size": _audit_index.size if _audit_index else 0,
-                "audit_index_load_seconds": _audit_index.load_seconds if _audit_index else 0.0,
-                "task_repo_initialized": _task_repo is not None,
-            },
-        )
 
     return app
 
