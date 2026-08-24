@@ -463,6 +463,8 @@ def create_app() -> FastAPI:
     app.include_router(trace.router)
     app.include_router(calculate.router)
     app.include_router(admin.router)
+    # Phase 13b T5.1 / T5.3 — /v1/admin/gpu/* (gpu_invalidate + gpu_memory_stats)
+    app.include_router(admin.gpu_router)
     # Phase 7 T7 (Decision §4): operator endpoint to flush the embedding
     # LRU cache after a model swap or suspected corruption.
     app.include_router(admin_embedding_cache.router)

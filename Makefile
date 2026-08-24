@@ -1,4 +1,4 @@
-.PHONY: dev test lint mock-notify install clean heavy-test golden-test test-e2e test-e2e-ci
+.PHONY: dev test lint mock-notify install clean heavy-test golden-test test-e2e test-e2e-ci t5-acceptance
 
 PYTHON ?= python3
 PIP ?= pip
@@ -81,3 +81,13 @@ clean:
 # Run RAG service locally (without Docker)
 run-local:
 	cd rag && $(PYTHON) -m ekrs_rag.main
+
+# Phase 13b T5: E2E acceptance suite (28-doc Phase12-v10-subset bench +
+# equiv + failover). Requires real GPU infrastructure (BGE_M3_GPU_ENABLED=true
+# in container) and ADMIN_KEY env var (for /v1/admin/gpu/invalidate).
+# requires-gpu: true — runs on dedicated GPU runner only, NOT in PR gate.
+# Exit codes: 0 = all acceptance lines pass; 1 = phase thresholds failed;
+# 2 = GT missing or auth not configured.
+t5-acceptance:
+	cd rag && pytest tests/unit/test_phase13b_t5_acceptance.py tests/unit/test_admin_gpu_endpoints.py -v
+	cd rag && pytest tests/integration/test_phase13b_t5_e2e.py -v -m heavy
