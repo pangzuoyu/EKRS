@@ -8,6 +8,150 @@ from the previous phase is readable without consulting the handbook.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) —
 `Added`, `Changed`, `Fixed`, `Removed` per release.
 
+## [phase13a] - 2026-08-24
+
+**Tag**: `phase13a` (annotated, force-moved to this closure commit per
+parent plan §111). **Version**: 0.3.0 → 0.4.0 (minor bump — Phase 13a
+ships production-readiness hardening per Keep-a-Changelog). **Phase
+13a delivered as 11 implementation tasks** under the Q4 production-
+readiness plan `docs/superpowers/plans/2026-08-23-phase13a-production-readiness.md`.
+
+**Pre-13a baseline**: phase12 closure at `d9a602c`. All Phase 12 work
+(FTS5 v2, golden 50, T10d Td.1/Td.2 MCP adapter, T10a-1..7 RRF + FTS
+sync, T10b-1 chunker refactor, T10b-3 exact-match short-circuit,
+T10b-2 cross-encoder data, Phase 12 Task D 745-bundle ingest rate,
+Task C doc-type classifier, real-infra recall@10 8/20) preserved.
+
+**Phase 13a closure scope** (T1-T10, plus Pre-Task A):
+
+### Added
+
+- **/healthz slim + /ready dependency probe** (T1, P0-1):
+  - `/healthz` returns ONLY `{status, uptime_s}` (SLO <10ms).
+  - `/ready` returns 200 only when `app.state.qdrant.count_points()` +
+    `app.state.redis.ping()` both succeed (SLO <200ms).
+  - Bug fix: `main.py:249` was setting `app.state.qdrant_manager`
+    (only-ever-written, never read), making /ready always 503 in
+    production. T10 E2E surfaced; aligned to `app.state.qdrant`
+    (convention from existing tests).
+- **Admission double-gate** (T2, P0-4):
+  - `coarse_gate(raw_chars)` rejects >1M chars at the notify handler.
+  - `chunk_gate(chunk_count)` rejects >3000 chunks as defense-in-depth
+    inside the worker.
+  - Both emit `admission_rejected` audit event with `reason` field.
+- **Step5 worker picklable module** (T3):
+  - `services/step5_worker.py` with `Step5Payload` frozen dataclass
+    + `run_step5()` top-level fn (asyncio.run wrapper).
+  - Consumes the Pre-Task A `_prepare_step5` + `_run_step5` helper —
+    single source of truth across old in-process path (replay) and
+    new subprocess path (production).
+- **pebble.ProcessPool EncodingPool** (T4, P0-2/P0-3):
+  - Pool with 1800s hard-kill timeout (settings), `task_registry`
+    bookkeeping, and 4-item `_init_child` (BGE_M3_INTRA_OP_THREADS +
+    3 thread-pool tuning knobs from Phase 12 Task D+ bench).
+  - `PoolExpired` + `FuturesTimeoutError` double-catch on submit.
+  - Boot recovery rehydrates in-flight tasks from aiosqlite TaskRepo.
+- **Notify handler rewire + status queued/running** (T5):
+  - Steps 1-4 inline coarse_gate + pool dispatch; Step 5 async.
+  - Status field values: `queued` → `running` → `success`/`failed`.
+  - Pre-existing integration failures on test_query_replay +
+    test_constraints_api noted as baseline; not T5-introduced.
+- **Audit events admission_rejected + task_timeout_killed** (T6):
+  - Registered in `main.py _EVENT_SCHEMAS` (count 20 → 24).
+  - Emit sites: coarse_gate (admission), pool kill (timeout).
+  - Real AuditWriter regression tests added per 4-step discipline.
+- **Metrics + boot recovery** (T7, P1-1/P1-2/P1-3):
+  - `ekrs_ingestion_queue_depth` + `ekrs_task_duration_seconds`
+    histogram + `ekrs_admission_rejected_total` +
+    `ekrs_task_timeout_killed_total` counters.
+  - Histogram buckets hard-asserted: `[10, 30, 60, 120, 300, 600,
+    1800]` (eng-review Issue 5 contract lock).
+  - Drift detector firing-path test: mock FTS count ≠ Qdrant count →
+    `fts_consistency_drift` audit + `ekrs_index_consistency_drift_total`
+    counter ≥ 1.
+  - Boot recovery: on lifespan startup, scan TaskRepo for tasks
+    stuck in `queued`/`running` state, requeue or mark failed.
+- **Query encode via to_thread + callback failure reconciliation**
+  (T8, P1-4/P1-5):
+  - Query embedding moved off the async loop via `asyncio.to_thread`
+    (matches T10a-4 precedent for `_StubRetriever` compat).
+  - Callback failure log: structured line to debug.log (ts, doc_hash,
+    reason) — visible for ops post-mortem.
+- **Encode backend Protocol seam for GPU channel** (T9, 13c hook):
+  - `_EncodeBackend(Protocol)` + module-level `_encode_backend(texts)
+    -> list[list[float]]` in `services/step5_worker.py`.
+  - `@runtime_checkable` so isinstance check works at test layer.
+  - Default impl delegates to `EmbeddingService().encode()` returning
+    dense vectors only (sparse stays at QdrantManager layer).
+  - YAGNI respected: no GPU code introduced; 13b is separate plan.
+- **T10 E2E acceptance + drift check + GPU rollout gate** (T10):
+  - `scripts/phase13a_t10_e2e.py`: real-container E2E (2184 /healthz
+    probes during encode, P99=32.2ms <100ms budget; over-limit
+    admission_rejected audit verified; kill-9 self-heal re-verified;
+    golden 208 + unit 861 + 1 skip zero regression).
+  - `scripts/phase13a_t10_2_drift.py`: sequential ingest → clear →
+    re-ingest of 5 docs, Qdrant=FTS=5 both rounds (within-13a paired
+    writes intact).
+  - `deployment/phase13a-rollout.md`: CPU-only post-13a canaries +
+    GPU 10%→100% gate procedure with 10 acceptance criteria. Actual
+    traffic split is operations-team work.
+
+### Changed
+
+- **IngestionOutcome contract unchanged** (R6 + parent §204):
+  `rag_status ∈ {success, failed, duplicate, business_failure}`.
+  New audit events do NOT widen the enum.
+- **Pipeline replay path preserved**: `pipeline.ingest` (the old
+  in-process path) still works for replay mode. Both paths consume
+  the same `_prepare_step5` + `_run_step5` helper — no semantic drift.
+- **App.state naming convention**: `app.state.qdrant` (not
+  `app.state.qdrant_manager`). T10 E2E surfaced a pre-existing
+  baseline bug where main.py wrote `qdrant_manager` (only-ever-
+  written, never read).
+
+### Fixed
+
+- **/ready always 503**: `main.py:249` set `app.state.qdrant_manager`
+  but health.py read `app.state.qdrant`. One-line fix + regression
+  test in `tests/integration/test_healthz.py::test_ready_200_when_
+  lifespan_set_state_qdrant`.
+
+### Pre-existing baseline failures (NOT 13a-introduced)
+
+- 10 Phase 5/7 integration tests use sync stub on `await
+  RetrievalResult` (test_query_replay + test_constraints_api). These
+  failed pre-13a; verified via `git stash` round-trip not related to
+  13a work. Tracked separately.
+
+**Verification matrix**:
+
+- Full unit: **861 passed + 1 skipped** (T1-T9 cumulative)
+- Golden: **208 passed** 0 regression
+- mypy: clean (no NEW errors relative to pre-13a baseline)
+- T10.1 E2E: all 4 checks pass (`/healthz` P99 <100ms during encode,
+  admission_rejected audit emit, kill-9 self-heal, regression)
+- T10.2 drift: paired-write Qdrant=FTS verified
+
+**Risks closed** (from eng-review Issue 1-5):
+
+- Issue 1 (T3 vs pipeline.ingest duplication drift): Pre-Task A helper
+  extraction — closed at `f78554b`.
+- Issue 2 (Settings _init_child 4 items): closed at T4 commit `30029a5`.
+- Issue 3 (/healthz <10ms + /ready <200ms SLOs): closed at T1 + T5.
+- Issue 4 (T7-T10 testing gap): all closed (T7 bucket assertion +
+  drift firing test, T9 Protocol contract, T10 E2E + drift).
+- Issue 5 (Phase 13b/c GPU shape drift risk): T9 Protocol seam +
+  runtime_checkable guard; 13b shape change will fail tests not prod.
+
+**Migration notes**:
+
+- No data migration required. Step 5 helper is identical to old path;
+  dispatch mechanism changed (sync in-process → pebble subprocess).
+- Vector store unchanged (Qdrant 1024d dense bge-m3).
+- FTS5 v2 schema unchanged.
+- Audit log readers: 2 new event types (`admission_rejected`,
+  `task_timeout_killed`) + 22 existing.
+
 ## [phase12] - 2026-08-15
 
 **Tag**: `phase12` (annotated, force-moved to this closure commit per
