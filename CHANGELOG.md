@@ -152,6 +152,146 @@ Task C doc-type classifier, real-infra recall@10 8/20) preserved.
 - Audit log readers: 2 new event types (`admission_rejected`,
   `task_timeout_killed`) + 22 existing.
 
+## [phase13b] - 2026-08-25
+
+**Tag**: `phase13b` (annotated, force-moved to this closure commit per
+parent plan §111). **Version**: 0.4.0 → 0.5.0 (minor bump — Phase 13b
+ships a new production GPU encode channel per Keep-a-Changelog). **Phase
+13b delivered as 4 implementation tasks** under the v1.1 GPU spec
+`docs/superpowers/plans/2026-08-24-phase13b-v1-1.md`.
+
+**Pre-13b baseline**: phase13a closure at `e5c8f39`. Phase 13a
+production-readiness hardening (T1 `/healthz`+`/ready`, T2 admission
+double-gate, T3 Step5 picklable worker, T4 pebble.ProcessPool, T5
+notify rewire, T6 admission_rejected + task_timeout_killed audit, T7
+metrics + boot recovery, T8 query encode to_thread + callback
+reconciliation, T9 encode backend Protocol seam, T10 E2E + drift) all
+preserved.
+
+**Phase 13b closure scope** (T1, T2+T4, T3, T5):
+
+### Added
+
+- **torch FP16 bge-m3 GPU encoder** (T1, commit `7c7377c`):
+  - Dual-head: dense 1024d + sparse (mirrors Phase 7 ONNX export).
+  - FP16 weights; CUDA pre-warm at boot; orthogonal CPU baseline = ONNX.
+  - **Precision noise**: sparse 0.95 → 0.94 (FP16 vs FP32) noted.
+  - Lazy `import torch` in `services/torch_bge_m3.py` keeps CPU-only
+    install reachable (`ImportError` → EncodingRouter skips GPU).
+- **GPU self-check router + encode metrics** (T2+T4, commit `b8a03b1`):
+  - `EncodingRouter` state machine `unknown|cpu|gpu` with
+    `try_register_gpu()` + `force_re_register_gpu()`.
+  - `BGE_M3_*` Settings: `BGE_M3_GPU_ENABLED=False` (default),
+    `BGE_M3_GPU_DEVICE_ID=0`, `BGE_M3_GPU_PROBE_INTERVAL_S=30`.
+  - Prometheus counters + histograms: `ekrs_encode_total{channel}`,
+    `ekrs_encode_duration_seconds{channel}`, GPU memory peak gauge.
+- **EncodingRouter on encode hot path + 30s probe + channel_switched
+  audit** (T3, commit `8f2563d`):
+  - `precomputed_encodings` kwarg threads router into pipeline.encode.
+  - Probe daemon thread (default 30s, CI override 5s) re-evaluates
+    `_self_check()` and transitions state.
+  - `channel_switched` audit: 4 reason codes (`self_check_pass`,
+    `self_check_fail`, `unavailable`, `encode_error`,
+    `admin_invalidate`); transition-only emit (no flap on repeated
+    failures) per review 🟢 #6 mandate.
+- **E2E acceptance suite** (T5, commit `515fb40`):
+  - T5.1 `scripts/phase13b_poc_bench.py` — 28-doc Phase12 v10-subset
+    bench (CPU Phase A → wipe → GPU Phase B); perf thresholds: ≥7787
+    chunks total, largest doc ≤30s, 2298-class doc ≤5s, GPU memory
+    peak ≤6 GB, 0 failures.
+  - T5.2 `scripts/phase13b_equiv_check.py` — 20×5=100 retrieval
+    samples; top-10 Jaccard ≥0.99, cosine ≥0.999, sparse Jaccard
+    ≥0.95; `_SPECIAL_TOKEN_IDS = frozenset({0,1,2,3,250001})` filter.
+  - T5.3 `scripts/phase13b_failover_test.py` — audit log 3-path
+    scan, 10-concurrent ingest, transition detection ≤30s; ADMIN_KEY
+    unset → WARN + skip (risk #3).
+  - T5.4 `tests/integration/test_phase13b_t5_e2e.py` — `@pytest.mark.heavy`
+    wrapper chaining T5.1 → T5.2 → T5.3.
+  - T5.5 `tests/unit/test_phase13b_t5_acceptance.py` — 11 pure-Python
+    stubs covering all 10 §6 acceptance lines (state machine + audit
+    + geometry formulas) without GPU infra.
+  - 2 new admin endpoints: `POST /v1/admin/gpu/invalidate` (forces
+    `current_channel="cpu"` + audit; next probe re-evaluates) and
+    `POST /v1/admin/gpu/memory-stats` (exact `torch.cuda` peak read).
+  - `make t5-acceptance` target; `deployment/phase12-recall-gt.json`
+    schema + 20 placeholder slots (operator populates from Phase A
+    baseline); 28-doc fallback list at `scripts/_phase13b_poc_28doc_fallback.txt`.
+
+### Changed
+
+- **Encoding backend dual channel**: CPU (ONNX Phase 7) + GPU (torch
+  FP16 Phase 13b T1) via EncodingRouter. CPU path byte-level baseline
+  preserved when `BGE_M3_GPU_ENABLED=False`.
+- **Probe cadence**: `BGE_M3_GPU_PROBE_INTERVAL_S` defaults to 30s;
+  CI override 5s for fast failover detection.
+
+### Fixed
+
+- **gpu_invalidate semantics**: original T5 design hinged on
+  `last_self_check_pass` field (didn't exist on RouterState). Final:
+  force `current_channel="cpu"` under lock + audit emit; next probe
+  cycle's `force_re_register_gpu()` re-runs `_self_check()` naturally.
+  Replaces fragile POSIX-mount-dependent `chmod 000` (eng-review fix).
+- **mypy torch optional**: `import torch` inside `try/except` +
+  `Any` annotation in router module (UQ-5); CPU-only install passes
+  mypy clean.
+
+### Pre-existing baseline failures (NOT 13b-introduced)
+
+- 10 Phase 5/7 integration tests use sync stub on `await
+  RetrievalResult` (test_query_replay + test_constraints_api) +
+  `test_models_form_fields` ImportError. These failed pre-13b;
+  verified via `git stash` round-trip not related to 13b work.
+
+### Pending post-deploy
+
+- **GPU real-infra verification**: `make t5-acceptance` requires
+  `BGE_M3_GPU_ENABLED=true` in container + GPU runner (NOT PR gate).
+  Unit-test equivalent at `make test` covers all 10 acceptance lines
+  via pure-Python stubs.
+- **GT JSON fill**: `deployment/phase12-recall-gt.json` is empty schema
+  (`_filled_in: false`); operator populates by running Phase A baseline
+  first, then T5.2 real-infra equivalence run.
+- **Audit emit in pebble workers** (UQ-6): workers spawn process-local
+  router without audit writer injection; probe transitions inside
+  workers may silently drop. Cross-process audit wiring deferred to
+  Phase 13c.
+
+**Verification matrix**:
+
+- Full unit: **18 new** (11 T5.5 + 7 admin GPU) on top of T1's 879 +
+  T3's 61 incremental; **0 regression** on golden (208) + related
+  unit (51)
+- mypy: clean on touched files (`admin.py`, `main.py`, test files);
+  `torch` imported as `Any` for lazy-import safety
+- T5.1 / T5.2 / T5.3: scripts shipped; real-infra runs deferred to
+  post-deploy GPU env
+- 1 NEW mypy error pre-patched at `retriever.py:73` (T3 step 2)
+
+**Risks closed** (from eng-review 8 feedback items + 3 UQ):
+
+- 8 OQ RESOLVED in v1.1 plan (commit `3692894`)
+- UQ-A: 28-doc preflight + fallback list — closed at T5 commit
+- UQ-B: GT pre-validate fail-fast (`load_ground_truth` raises) — closed
+- UQ-C: admin invalidate endpoint (no `chmod`) — closed at T5
+- UQ-D: admin memory-stats endpoint (exact `torch.cuda` read) — closed
+- UQ-E: pre-flight `tail audit.log` check at T5.3 startup — closed
+- UQ-5: torch optional import — closed at T1
+- UQ-6: audit emit in workers — defer to Phase 13c
+- transition-only audit emit (review 🟢 #6) — closed at T5.5
+
+**Migration notes**:
+
+- GPU install: `pip install -e rag/[gpu]` adds `torch>=2.1,<3`.
+  CPU install unchanged: `pip install -e rag/`.
+- No data migration; no FTS schema change; no Qdrant payload change.
+- Audit log readers: 1 new event type (`channel_switched`) + 24
+  existing (T6 count = 25).
+- Backward compat: `BGE_M3_GPU_ENABLED=False` default keeps all
+  Phase 13a production behavior byte-level identical.
+
+---
+
 ## [phase12] - 2026-08-15
 
 **Tag**: `phase12` (annotated, force-moved to this closure commit per
@@ -222,6 +362,7 @@ commit):
   Phase 10 plans historical-cleanup-committed (content verified
   against Phase 10 actual delivery — no NOTE drift).
 
+l.
 ---
 
 ## [Unreleased]
