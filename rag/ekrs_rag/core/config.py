@@ -129,6 +129,21 @@ class Settings(BaseSettings):
     EKRS_ENCODING_MAX_WORKERS: int = 2
     PROMETHEUS_MULTIPROC_DIR: str = ""
 
+    # Phase 13b T1: torch FP16 GPU encoder (review 🟢 #7 BGE_M3_BACKEND hook).
+    # BGE_M3_MODEL_DIR — directory holding pytorch_model.bin + sparse_linear.pt
+    # + tokenizer. CPU ONNX path stays at rag/models/bge-m3/ (EMBEDDING_MODEL_DIR);
+    # this dir is for the GPU torch path only.
+    # BGE_M3_GPU_DEVICE_ID — CUDA device ordinal (0 on single-GPU hosts).
+    # BGE_M3_GPU_ENABLED — global kill switch; False forces CPU-only even on
+    # GPU hosts (canary rollout per phase13a-rollout.md).
+    # BGE_M3_BACKEND — which GPU backend implements encode_gpu() today. Pinned
+    # to "torch" after the Phase 12 ONNX FP16 PoC decision; "onnx_gpu" remains
+    # as a hook for a future Phase 13b-ORT incremental without touching call sites.
+    BGE_M3_MODEL_DIR: Path = Path("/home/pangzy/code_project/bge-m3")
+    BGE_M3_GPU_DEVICE_ID: int = 0
+    BGE_M3_GPU_ENABLED: bool = True
+    BGE_M3_BACKEND: str = "torch"  # Literal["torch", "onnx_gpu"] per plan T1.2
+
     @field_validator("PARSER_TOKEN")
     @classmethod
     def token_min_length(cls, v: str) -> str:

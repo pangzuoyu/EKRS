@@ -1,8 +1,8 @@
 """Phase 13a T4 — EncodingPool (pebble subprocess pool).
 
 Pebble.ProcessPool wraps subprocess workers for the Step5 encode path.
-Each worker subprocess initializes once via ``_init_child`` (four explicit
-items per plan T4.3 / eng-review Issue 3):
+Each worker subprocess initializes once via ``_init_child`` (five explicit
+items per plan T4.3 / eng-review Issue 3 / 13b T1.5):
 
 1. ``PROMETHEUS_MULTIPROC_DIR`` — Prometheus child process must write to
    the shared multiproc dir; without this, child counters are silently
@@ -14,6 +14,10 @@ items per plan T4.3 / eng-review Issue 3):
    httpx trace logs that otherwise dominate the debug log under load.
 4. ``sys.excepthook`` — reports uncaught traceback via audit so a pebble
    subprocess crash doesn't disappear silently.
+5. Phase 13b T1.5 — CUDA context pre-warm: ``torch.cuda.init()`` + a
+   one-shot ``torch.tensor([0], device="cuda:N")`` so the first GPU call
+   from inside ``encode_gpu`` doesn't pay the ~1s CUDA context bring-up
+   cost during a hot task. No-op when torch / CUDA unavailable.
 
 Public API:
 - ``EncodingPool(settings)`` — wraps pebble.ProcessPool, registers tasks.
@@ -49,7 +53,7 @@ logger = logging.getLogger(__name__)
 def _init_child() -> None:
     """pebble worker subprocess initializer.
 
-    Four explicit items per plan T4.3 (eng-review Issue 3):
+    Five explicit items per plan T4.3 (eng-review Issue 3) + 13b T1.5:
 
     1. PROMETHEUS_MULTIPROC_DIR — Prometheus child process must write to
        shared multiproc dir; without this, child counters are lost.
@@ -58,6 +62,10 @@ def _init_child() -> None:
        to dummy and logs a warning — pool still serves tasks.
     3. httpx logger WARNING — silences noisy httpx trace logs.
     4. sys.excepthook — reports uncaught traceback via audit.
+    5. CUDA context pre-warm (13b T1.5 review 🟡 #5) — ``torch.cuda.init()``
+       + one-shot ``torch.tensor([0], device=f"cuda:{device_id}")`` so the
+       first GPU call from ``encode_gpu`` doesn't pay the ~1s CUDA context
+       bring-up cost during a hot task. No-op when torch / CUDA unavailable.
 
     Called by pebble once per worker. MUST NOT raise — if it does,
     the worker subprocess dies and pebble spawns another one. We
@@ -84,6 +92,31 @@ def _init_child() -> None:
 
     # Item 3: Silence httpx trace logs (bge-m3 client uses httpx internally).
     logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    # Item 5 (Phase 13b T1.5 review 🟡 #5): CUDA context pre-warm.
+    # torch.cuda.init() forces CUDA driver bring-up now (when the worker
+    # is still cold and timing matters less) instead of inside the first
+    # encode_gpu() call. No-op when BGE_M3_GPU_ENABLED is False or when
+    # torch / CUDA aren't available — the CPU path keeps working.
+    if settings.BGE_M3_GPU_ENABLED:
+        try:
+            import torch  # noqa: WPS433 — lazy import (heavy)
+
+            if torch.cuda.is_available():
+                torch.cuda.init()
+                _ = torch.tensor(
+                    [0],
+                    device=f"cuda:{settings.BGE_M3_GPU_DEVICE_ID}",
+                )
+                logger.info(
+                    "init_child: CUDA context pre-warmed on cuda:%d",
+                    settings.BGE_M3_GPU_DEVICE_ID,
+                )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(
+                "init_child: CUDA pre-warm failed (will fall back to CPU at encode time): %s",
+                e,
+            )
 
     # Item 4: sys.excepthook — report uncaught traceback via audit so a
     # pebble subprocess crash doesn't disappear silently. Best-effort;
