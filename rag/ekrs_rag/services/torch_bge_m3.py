@@ -15,18 +15,46 @@ itself is unchanged by this module — T3 will rebind it to call
 """
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from ..core.config import settings
-from ..retrieval.embedding_service import (
-    EmbeddingUnavailableError,
-    EncodedVector,
-)
+
+if TYPE_CHECKING:
+    # embedding_service is heavy (onnxruntime + bge-m3 ONNX load on import).
+    # We only need the type hints + exception class, so keep them behind
+    # TYPE_CHECKING. Runtime references use the lazy __getattr__ below.
+    from ..retrieval.embedding_service import (  # noqa: F401
+        EmbeddingUnavailableError,
+        EncodedVector,
+    )
 
 logger = logging.getLogger(__name__)
+
+# Runtime aliases — same lazy pattern as encoding_router. Tests can monkeypatch
+# these via ``torch_bge_m3._EmbeddingUnavailableError`` without paying the
+# onnxruntime load cost.
+_EmbeddingUnavailableError: type[Exception] | None = None
+_EncodedVector: Any = None
+
+
+def __getattr__(name: str) -> Any:
+    global _EmbeddingUnavailableError, _EncodedVector
+    if name == "EmbeddingUnavailableError":
+        if _EmbeddingUnavailableError is None:
+            from ..retrieval import embedding_service
+            _EmbeddingUnavailableError = embedding_service.EmbeddingUnavailableError
+        return _EmbeddingUnavailableError
+    if name == "EncodedVector":
+        if _EncodedVector is None:
+            from ..retrieval import embedding_service
+            _EncodedVector = embedding_service.EncodedVector
+        return _EncodedVector
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # Special token IDs that must be excluded from the sparse representation.
@@ -37,6 +65,42 @@ _SPECIAL_TOKEN_IDS = frozenset({0, 1, 2, 3, 250001})
 # Lazy module-level cache keyed on model_dir so multiple encode_gpu() calls
 # amortize the ~5-15s torch model cold-start on a single-GPU host.
 _model_cache: dict[Path, "_TorchBgeM3"] = {}
+
+# Path to the 4-class self-check probes fixture (review 🟡 #4 — at least 4
+# categories covered: English / Chinese / digit-symbol / empty).
+_SELF_CHECK_PROBES_PATH = (
+    Path(__file__).resolve().parent.parent.parent
+    / "tests"
+    / "fixtures"
+    / "bge_m3_self_check_probes.jsonl"
+)
+
+# Cosine threshold for the self-check probe pass criterion (验收 #10).
+# Same threshold as the unit test (dense ≥0.999 between GPU FP16 and CPU
+# ONNX FP32). Below this we refuse to register the GPU channel and the
+# router falls back to CPU.
+_SELF_CHECK_COSINE_THRESHOLD = 0.999
+
+
+def _load_self_check_probes() -> list[dict[str, str]]:
+    """Load the 4-class probe fixtures, returning [] on missing file.
+
+    Returning [] (instead of raising) lets the self-check degrade to False
+    cleanly when the fixture is missing in production deployments — the
+    caller logs a warning and the router registers CPU-only.
+    """
+    try:
+        with open(_SELF_CHECK_PROBES_PATH, encoding="utf-8") as f:
+            return [json.loads(line) for line in f if line.strip()]
+    except FileNotFoundError:
+        logger.warning(
+            "self_check: probes fixture not found at %s — GPU channel will not register",
+            _SELF_CHECK_PROBES_PATH,
+        )
+        return []
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("self_check: failed to read probes fixture: %s", e)
+        return []
 
 
 class _TorchBgeM3:
@@ -106,16 +170,31 @@ class _TorchBgeM3:
 
         Mirrors OnnxBgeM3.encode signature minus the return_dense/sparse
         flags (always returns both — plan T1.1 review 🔴 #1 mandate).
+
+        Phase 13b T4.2: emit GPU memory + batch-size + latency histograms.
+        Uses ``torch.cuda.memory_allocated(device_id)`` (review 🟡 #3 — no
+        external nvidia-smi dependency, more accurate).
         """
         import torch  # noqa: WPS433
+        from ..observability import metrics as _m
+        from ..observability.metrics import safe_observe
 
         if not texts:
             return []
 
         results: list[EncodedVector] = []
         batch_size = self._BATCH_SIZE
+        device_id = settings.BGE_M3_GPU_DEVICE_ID
         for batch_start in range(0, len(texts), batch_size):
             batch = texts[batch_start : batch_start + batch_size]
+            # Phase 13b T4.2 — emit batch size + latency histogram around
+            # each encode pass. safe_observe swallows failures so a metric
+            # outage never breaks ingestion.
+            safe_observe(_m.gpu_encode_batch_size, len(batch))
+
+            import time as _t
+            _batch_t0 = _t.perf_counter()
+
             enc = self._tokenizer(
                 list(batch),
                 padding=True,
@@ -172,6 +251,20 @@ class _TorchBgeM3:
                         sparse[int(tok_id)] = float(score)
                 results.append(EncodedVector(dense=dense_list, sparse=sparse))
 
+            # Phase 13b T4.2 — emit per-batch latency + memory after the
+            # with-block (so torch frees intermediates before we read
+            # memory_allocated). memory_allocated reads from torch's cache
+            # accounting; no nvidia-smi shell-out (review 🟡 #3).
+            _batch_dt = _t.perf_counter() - _batch_t0
+            safe_observe(_m.gpu_encode_latency_seconds, _batch_dt)
+            try:
+                used = int(torch.cuda.memory_allocated(device_id))
+                peak = int(torch.cuda.max_memory_allocated(device_id))
+                _m.gpu_memory_used_bytes.labels(device_id=str(device_id)).set(used)
+                _m.gpu_memory_peak_bytes.labels(device_id=str(device_id)).set(peak)
+            except Exception as _e:  # pragma: no cover - defensive
+                logger.debug("gpu memory metrics failed: %s", _e)
+
         return results
 
 
@@ -208,7 +301,13 @@ def encode_gpu(
     if not texts:
         return []
     if not _cuda_available():
-        raise EmbeddingUnavailableError(
+        # Lazy-resolve the production exception class on first call so
+        # unit tests that mock the GPU path don't pay the onnxruntime
+        # import cost at module load.
+        if _EmbeddingUnavailableError is None:
+            from ..retrieval import embedding_service
+            globals()["_EmbeddingUnavailableError"] = embedding_service.EmbeddingUnavailableError
+        raise globals()["_EmbeddingUnavailableError"](
             "torch.cuda.is_available() == False; encode_gpu requires CUDA",
         )
     resolved = _resolve_model_dir(model_dir)
@@ -219,4 +318,96 @@ def encode_gpu(
     return model.encode(texts)
 
 
-__all__ = ["encode_gpu", "EmbeddingUnavailableError", "EncodedVector"]
+__all__ = ["encode_gpu", "EmbeddingUnavailableError", "EncodedVector", "_self_check"]
+
+
+def _self_check(
+    *,
+    model_dir: Path | None = None,
+    probes: list[dict[str, str]] | None = None,
+) -> bool:
+    """Validate GPU channel against CPU ONNX baseline.
+
+    Returns True iff every non-empty probe's GPU/CPU cosine is at or above
+    the threshold (0.999). Empty probes are skipped — they're only there
+    to verify the empty-input contract.
+
+    Returns False (without raising) when:
+    - torch CUDA is not available
+    - probes fixture missing or empty (graceful CPU fallback)
+    - CPU baseline (EmbeddingService) is in dummy mode (no comparison)
+    - any probe's cosine dips below threshold
+
+    Args:
+        model_dir: GPU model dir override (defaults to Settings.BGE_M3_MODEL_DIR).
+        probes: probe list override (defaults to reading the fixture file).
+    """
+    if not _cuda_available():
+        logger.info("self_check: CUDA not available — GPU channel not registered")
+        return False
+
+    probe_list = probes if probes is not None else _load_self_check_probes()
+    if not probe_list:
+        logger.warning("self_check: no probes available — GPU channel not registered")
+        return False
+
+    # Lazy import — EmbeddingService pulls onnxruntime which is heavy.
+    try:
+        from ..retrieval.embedding_service import EmbeddingService
+        cpu_service = EmbeddingService()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("self_check: failed to load CPU baseline: %s", e)
+        return False
+
+    if cpu_service.is_dummy:
+        # No CPU baseline to compare against → refuse to register GPU.
+        # Plan T2.2: "无 vendored ONNX (自检基准) → 直接 False + log warning".
+        logger.warning(
+            "self_check: CPU baseline is dummy (no ONNX) — GPU channel not registered",
+        )
+        return False
+
+    resolved_model_dir = _resolve_model_dir(model_dir)
+
+    # Separate empty probes (skip from cosine math) from real ones.
+    real_probes = [p for p in probe_list if p.get("text", "").strip()]
+    if not real_probes:
+        # All empty — degenerate fixture; pass via path-availability check.
+        logger.info("self_check: all probes empty — passing vacuously")
+        return True
+
+    texts = [p["text"] for p in real_probes]
+    try:
+        gpu_vecs = encode_gpu(texts, model_dir=resolved_model_dir)
+        cpu_vecs = cpu_service.encode(texts)
+    except EmbeddingUnavailableError:
+        logger.warning("self_check: encode_gpu raised EmbeddingUnavailableError")
+        return False
+    except Exception as e:
+        logger.warning("self_check: encode failed: %s", e)
+        return False
+
+    min_cos = 1.0
+    for probe, gpu_vec, cpu_vec in zip(real_probes, gpu_vecs, cpu_vecs):
+        gpu_row = np.asarray(gpu_vec.dense, dtype=np.float64)
+        cpu_row = np.asarray(cpu_vec.dense, dtype=np.float64)
+        cos = float(np.dot(gpu_row, cpu_row) / (np.linalg.norm(gpu_row) * np.linalg.norm(cpu_row)))
+        if cos < min_cos:
+            min_cos = cos
+        logger.info(
+            "self_check: probe=%s category=%s cosine=%.4f",
+            probe.get("id", "?"), probe.get("category", "?"), cos,
+        )
+
+    if min_cos < _SELF_CHECK_COSINE_THRESHOLD:
+        logger.warning(
+            "self_check: min cosine %.4f below threshold %.4f — GPU channel not registered",
+            min_cos, _SELF_CHECK_COSINE_THRESHOLD,
+        )
+        return False
+
+    logger.info(
+        "self_check: PASSED min_cosine=%.4f across %d probes",
+        min_cos, len(real_probes),
+    )
+    return True

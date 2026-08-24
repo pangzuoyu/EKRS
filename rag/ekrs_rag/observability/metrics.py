@@ -173,6 +173,43 @@ doc_rejections_total = Counter(
 )
 
 
+# Phase 13b T4 — GPU encode metrics (P1-3 multiproc surface).
+#
+# GPU_BATCH_BUCKETS bounds the encode_batch_size histogram. The boundaries
+# are FIXED for the same reason as TASK_BUCKETS — drift silently coarsens
+# the histogram and breaks operator dashboards.
+GPU_BATCH_BUCKETS = (8, 16, 32, 64)
+
+# GPU_LATENCY_BUCKETS bounds the per-batch encode latency histogram in
+# seconds. Tuned for the Phase 13b SLO: 32-batch GPU encode should land
+# in the 0.05-0.1s bucket; longer batches may climb into 0.5-1.0s.
+GPU_LATENCY_BUCKETS = (0.01, 0.05, 0.1, 0.5, 1.0, 5.0)
+
+gpu_memory_used_bytes = Gauge(
+    "ekrs_gpu_memory_used_bytes",
+    "CUDA memory allocated right now (bytes), per device_id",
+    ["device_id"],
+)
+
+gpu_memory_peak_bytes = Gauge(
+    "ekrs_gpu_memory_peak_bytes",
+    "CUDA peak memory allocated since program start (bytes), per device_id",
+    ["device_id"],
+)
+
+gpu_encode_batch_size = Histogram(
+    "ekrs_gpu_encode_batch_size",
+    "GPU encode batch size (number of texts per batch)",
+    buckets=GPU_BATCH_BUCKETS,
+)
+
+gpu_encode_latency_seconds = Histogram(
+    "ekrs_gpu_encode_latency_seconds",
+    "GPU encode latency per batch in seconds",
+    buckets=GPU_LATENCY_BUCKETS,
+)
+
+
 METRICS = SimpleNamespace(
     http_requests_total=http_requests_total,
     http_request_duration_seconds=http_request_duration_seconds,
@@ -192,6 +229,10 @@ METRICS = SimpleNamespace(
     task_queue_depth=task_queue_depth,
     task_duration_seconds=task_duration_seconds,
     doc_rejections_total=doc_rejections_total,
+    gpu_memory_used_bytes=gpu_memory_used_bytes,
+    gpu_memory_peak_bytes=gpu_memory_peak_bytes,
+    gpu_encode_batch_size=gpu_encode_batch_size,
+    gpu_encode_latency_seconds=gpu_encode_latency_seconds,
 )
 
 

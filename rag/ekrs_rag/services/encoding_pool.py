@@ -118,6 +118,27 @@ def _init_child() -> None:
                 e,
             )
 
+    # Phase 13b T2.4 (plan §T2.4): run the GPU self-check and register
+    # the GPU channel on the per-process EncodingRouter singleton. Failure
+    # to register is non-fatal — the worker silently falls back to CPU.
+    # Wrapped in try/except because self-check imports lazy heavy modules
+    # (EmbeddingService + onnxruntime) and a cold-start OOM must not kill
+    # the worker.
+    if settings.BGE_M3_GPU_ENABLED:
+        try:
+            from . import encoding_router as _er
+            _er.reset_router()  # ensure fresh registration per worker
+            _er.get_router().try_register_gpu()
+            logger.info(
+                "init_child: GPU channel registered (current_channel=%s)",
+                _er.get_router().current_channel,
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(
+                "init_child: GPU registration failed (will use CPU): %s",
+                e,
+            )
+
     # Item 4: sys.excepthook — report uncaught traceback via audit so a
     # pebble subprocess crash doesn't disappear silently. Best-effort;
     # if AuditWriter isn't initialized (worker spawn before lifespan),

@@ -1,0 +1,5 @@
+{"id": "probe_en_short", "text": "Hello world.", "category": "english_short"}
+{"id": "probe_zh_long", "text": "钢材标准 GB/T 12459 温度 ≤ 80℃ 压力 1.6MPa 材料 A312-TP316 适用于高温高压反应釜管线系统", "category": "chinese_long"}
+{"id": "probe_digit_symbol", "text": "a=1.6e-3; T=80±0.5℃; range=[0.1, 100]; ratio=3.14159", "category": "digit_symbol"}
+{"id": "probe_empty", "text": "", "category": "empty"}
+{"id": "probe_mixed_tech", "text": "ASTM A312/A213 standard covers austenitic stainless steel piping for high-temperature service up to 650℃.", "category": "english_technical"}
