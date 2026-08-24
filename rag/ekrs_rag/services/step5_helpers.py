@@ -16,9 +16,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ekrs_shared.models import Chunk, IngestionNotification
+
+if TYPE_CHECKING:
+    # Phase 13b T3.2: type-only — keeps embedding_service import out of the
+    # helper's import graph (avoid pulling onnxruntime at module load).
+    from ..retrieval.embedding_service import EncodedVector
 
 from ..core.config import settings
 from ..ingestion.chunker import chunk_blocks
@@ -60,10 +65,20 @@ class QdrantLike(Protocol):
     Keeps helpers free of QdrantManager import; tests pass MagicMock
     with `spec=QdrantManager` and Python's structural typing handles
     the rest. Same pattern as AuditEmitter above.
+
+    Phase 13b T3.2: ``upsert_chunks`` accepts ``precomputed_encodings``
+    kwarg (review 🔴 #2 mandate). EncodingRouter.route() in _run_step5
+    produces the list; QdrantManager skips its local CPU encoder when
+    this kwarg is supplied.
     """
 
     def get_ingestion_status(self, doc_hash: str) -> Any | None: ...
-    def upsert_chunks(self, chunks: list[Chunk]) -> int: ...
+    def upsert_chunks(
+        self,
+        chunks: list[Chunk],
+        *,
+        precomputed_encodings: list["EncodedVector"] | None = None,
+    ) -> int: ...
     def delete_old_versions(self, doc_hash: str, *, keep_version: int) -> int: ...
 
 
@@ -258,10 +273,20 @@ def _run_step5(
     """
     # Step 5: Upsert to Qdrant (truth-of-record)
     try:
-        count = qdrant.upsert_chunks(chunks)
+        # Phase 13b T3.2: EncodingRouter.route() dispatches GPU when the
+        # channel is registered; falls back to CPU otherwise. The router is
+        # process-local (per pebble worker); we always call route() — its
+        # CPU fallback is already implemented. See review 🔴 #2 mandate:
+        # the router is NOT wired through the T9 _encode_backend seam
+        # (dense-only); instead, precomputed_encodings kwarg carries the
+        # dual-head EncodedVector list directly into QdrantManager.upsert_chunks.
+        from . import encoding_router as _er  # noqa: WPS433 — lazy import
+
+        precomputed = _er.get_router().route([c.text for c in chunks])
+        count = qdrant.upsert_chunks(chunks, precomputed_encodings=precomputed)
         logger.info(
-            "Ingested %d chunks for doc=%s v=%d",
-            count, doc_hash, version,
+            "Ingested %d chunks for doc=%s v=%d (channel=%s)",
+            count, doc_hash, version, _er.get_router().current_channel,
         )
     except Exception as e:
         logger.error("Qdrant upsert failed for %s: %s", doc_hash, e)

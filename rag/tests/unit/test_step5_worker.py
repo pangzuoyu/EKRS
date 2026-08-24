@@ -59,7 +59,11 @@ class _StubQdrant:
     def get_ingestion_status(self, doc_hash: str) -> Any:
         return self._ingestion_status
 
-    def upsert_chunks(self, chunks: list) -> int:
+    def upsert_chunks(self, chunks: list, *, precomputed_encodings: list | None = None) -> int:
+        # Phase 13b T3: accept the precomputed_encodings kwarg the production
+        # _run_step5 now passes (review 🔴 #2 mandate). Stub just records the
+        # positional chunks list; precomputed is dropped on the floor since
+        # this stub doesn't emulate the dual-head EncodedVector pipeline.
         self.upsert_calls.append(list(chunks))
         if self._upsert_exc is not None:
             raise self._upsert_exc

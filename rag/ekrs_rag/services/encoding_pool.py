@@ -139,6 +139,47 @@ def _init_child() -> None:
                 e,
             )
 
+        # Phase 13b T3.4 (plan §T3.4): GPU health probe daemon thread.
+        # Periodically calls ``force_re_register_gpu()`` so a transient GPU
+        # fault (CUDA OOM, driver reset, NVLink drop) is detected within
+        # ``BGE_M3_GPU_PROBE_INTERVAL_S`` and the router state machine
+        # transitions to cpu via the existing channel_switched audit.
+        # Daemon thread dies naturally with the worker subprocess; we
+        # don't track it (worker lifetime == thread lifetime).
+        if settings.BGE_M3_GPU_PROBE_ENABLED:
+            try:
+                import threading as _t  # noqa: WPS433 — lazy import
+
+                _stop_event = _t.Event()
+
+                def _probe_loop() -> None:
+                    while not _stop_event.is_set():
+                        _stop_event.wait(settings.BGE_M3_GPU_PROBE_INTERVAL_S)
+                        if _stop_event.is_set():
+                            break
+                        try:
+                            _er.get_router().force_re_register_gpu()
+                        except Exception as _probe_err:  # pragma: no cover
+                            logger.debug(
+                                "init_child: GPU probe force_re_register failed: %s",
+                                _probe_err,
+                            )
+
+                _t.Thread(
+                    target=_probe_loop,
+                    name="ekrs_gpu_probe",
+                    daemon=True,
+                ).start()
+                logger.info(
+                    "init_child: GPU health probe spawned (interval=%ds)",
+                    settings.BGE_M3_GPU_PROBE_INTERVAL_S,
+                )
+            except Exception as _probe_spawn_err:  # pragma: no cover
+                logger.warning(
+                    "init_child: GPU health probe spawn failed: %s",
+                    _probe_spawn_err,
+                )
+
     # Item 4: sys.excepthook — report uncaught traceback via audit so a
     # pebble subprocess crash doesn't disappear silently. Best-effort;
     # if AuditWriter isn't initialized (worker spawn before lifespan),

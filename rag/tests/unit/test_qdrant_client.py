@@ -222,6 +222,102 @@ def test_upsert_chunks_raises_when_embedding_service_dummy(
             mgr.upsert_chunks(chunks)
 
 
+# ----------------------------------------------------------------------------
+# Phase 13b T3.1 — precomputed_encodings kwarg
+# ----------------------------------------------------------------------------
+
+
+def _precomputed_vec(seed: int = 1) -> Any:
+    """Build a minimal EncodedVector for precomputed tests."""
+    from ekrs_rag.retrieval.embedding_service import EncodedVector
+    return EncodedVector(
+        dense=[float(seed) / 1024.0] * 1024,
+        sparse={seed: 0.5, seed + 1: 0.3},
+    )
+
+
+def test_upsert_chunks_with_precomputed_skips_is_dummy_guard(
+    dummy_embedding_service: EmbeddingService,
+) -> None:
+    """Phase 13b T3.1: precomputed_encodings bypasses the dummy-mode guard.
+
+    When precomputed vectors are supplied, the dummy-mode guard must NOT
+    fire — caller has independently obtained valid vectors (e.g., via
+    EncodingRouter GPU path that succeeded).
+    """
+    from ekrs_shared.models import Chunk
+    chunks = [
+        Chunk(text="x", scope_path=[], source_block_ids=["b1"],
+              token_count=1, doc_hash="d1", version=1, page_numbers=[]),
+    ]
+    client = _make_qdrant(existing_size=1024)
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=dummy_embedding_service,
+        )
+        # No raise — guard is bypassed when precomputed is provided.
+        n = mgr.upsert_chunks(chunks, precomputed_encodings=[_precomputed_vec(1)])
+    assert n == 1
+
+
+def test_upsert_chunks_with_precomputed_validates_length(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """Phase 13b T3.1: precomputed_encodings length must match chunks length."""
+    from ekrs_shared.models import Chunk
+    chunks = [
+        Chunk(text="a", scope_path=[], source_block_ids=["b1"],
+              token_count=1, doc_hash="d1", version=1, page_numbers=[]),
+        Chunk(text="b", scope_path=[], source_block_ids=["b2"],
+              token_count=1, doc_hash="d1", version=1, page_numbers=[]),
+        Chunk(text="c", scope_path=[], source_block_ids=["b3"],
+              token_count=1, doc_hash="d1", version=1, page_numbers=[]),
+    ]
+    client = _make_qdrant(existing_size=1024)
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service,
+        )
+        with pytest.raises(ValueError, match="precomputed_encodings length"):
+            mgr.upsert_chunks(
+                chunks,
+                precomputed_encodings=[_precomputed_vec(1), _precomputed_vec(2)],
+            )
+
+
+def test_upsert_chunks_with_precomputed_uses_supplied_vectors_directly(
+    mock_embedding_service: EmbeddingService,
+) -> None:
+    """Phase 13b T3.1: when precomputed is provided, EmbeddingService.encode is NOT called.
+
+    Spy on the underlying _model.encode to confirm the kwarg path skips the
+    local CPU encoder entirely. Qdrant receives the supplied dense + sparse.
+    """
+    from ekrs_shared.models import Chunk
+    chunks = [
+        Chunk(text="a", scope_path=[], source_block_ids=["b1"],
+              token_count=1, doc_hash="d1", version=1, page_numbers=[]),
+        Chunk(text="b", scope_path=[], source_block_ids=["b2"],
+              token_count=1, doc_hash="d1", version=1, page_numbers=[]),
+    ]
+    client = _make_qdrant(existing_size=1024)
+    with patch("ekrs_rag.retrieval.qdrant_client.QdrantClient", return_value=client):
+        mgr = QdrantManager(
+            host="localhost", port=6333, embedding_service=mock_embedding_service,
+        )
+        n = mgr.upsert_chunks(
+            chunks,
+            precomputed_encodings=[_precomputed_vec(7), _precomputed_vec(8)],
+        )
+    # EmbeddingService._model.encode must NOT be called.
+    mock_embedding_service._model.encode.assert_not_called()  # type: ignore[attr-defined]
+    assert n == 2
+    points = client.upsert.call_args.kwargs["points"]
+    assert len(points) == 2
+    # The supplied dense vector (= 7/1024) is what landed in Qdrant.
+    assert points[0].vector["dense"][0] == pytest.approx(7 / 1024.0)
+
+
 def test_search_calls_query_points(
     mock_embedding_service: EmbeddingService,
 ) -> None:

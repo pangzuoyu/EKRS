@@ -537,11 +537,14 @@ RAG 服务暴露两个端口：
 
 审计日志不记录令牌
 
-审计日志 `audit.log` 永久保存，按 100 MB × 5 轮转（gzip 压缩，标准库 RotatingFileHandler）。`/healthz` 请求不写入审计（k8s 探活高频调用）。轮转后 AuditIndex 自动重建（仅扫描当前文件，跳过 `.gz` 历史）。**24 个事件名/schema 不可变更**（Phase 5: 15 个基线 + Phase 6A Task 2 注册 `document_metadata_failed` 孤儿事件 + doc-to-md 集成 T6/T9 注册 3 个回调事件 + Phase 10 T10a-7 注册 2 个 FTS 事件 `fts_synced`/`fts_searched` + Phase 13a T6 注册 2 个准入/超时事件 `admission_rejected`/`task_timeout_killed`）：constraint_solve_started/solved/failed, endpoint_started/completed, query_replay_executed, ingestion_received/completed/failed/replay_started/replay_completed/replay_sha256_mismatch, compensation_retry, qdrant_write_failed, lock_acquire_failed, document_metadata_failed, callback_url_blocked, callback_auth_missing, callback_best_effort_failed, fts_synced, fts_searched, admission_rejected, task_timeout_killed。Phase 6A Task 4 新增 2 个可选字段 `lineage_snapshot` + `conflict_details`（不进入 required schema，通过 `_PHASE6A_OPTIONAL` 白名单透传）。
+审计日志 `audit.log` 永久保存，按 100 MB × 5 轮转（gzip 压缩，标准库 RotatingFileHandler）。`/healthz` 请求不写入审计（k8s 探活高频调用）。轮转后 AuditIndex 自动重建（仅扫描当前文件，跳过 `.gz` 历史）。**25 个事件名/schema 不可变更**（Phase 5: 15 个基线 + Phase 6A Task 2 注册 `document_metadata_failed` 孤儿事件 + doc-to-md 集成 T6/T9 注册 3 个回调事件 + Phase 10 T10a-7 注册 2 个 FTS 事件 `fts_synced`/`fts_searched` + Phase 13a T6 注册 2 个准入/超时事件 `admission_rejected`/`task_timeout_killed` + Phase 13b T3 注册 1 个 GPU 通道切换事件 `channel_switched`）：constraint_solve_started/solved/failed, endpoint_started/completed, query_replay_executed, ingestion_received/completed/failed/replay_started/replay_completed/replay_sha256_mismatch, compensation_retry, qdrant_write_failed, lock_acquire_failed, document_metadata_failed, callback_url_blocked, callback_auth_missing, callback_best_effort_failed, fts_synced, fts_searched, admission_rejected, task_timeout_killed, channel_switched。Phase 6A Task 4 新增 2 个可选字段 `lineage_snapshot` + `conflict_details`（不进入 required schema，通过 `_PHASE6A_OPTIONAL` 白名单透传）。
 
 Phase 13a T6 schema 新增项：
 - `admission_rejected {doc_hash, reason, actual_chunks}` — 由 `notify()` 在粗筛 (`raw_chars_over_limit`) 或 chunk 门 (`chunks_over_limit`) 拒绝时 emit。`reason` 字段直接承载 `error_code` (`raw_chars_over_limit` | `chunks_over_limit` | `jsonl_unreadable`)。`actual_chunks` 是 best-effort 块计数（文件不可读 → 0）。
 - `task_timeout_killed {doc_hash, task_id, timeout_s}` — 由 `EncodingPool.wait()` 在 pebble 子进程被超时（30 分钟）杀死时 emit。`doc_hash` 由 `notify()` 通过 `pool.wait(task_id, doc_hash=...)` 传入；缺省时为空字符串。
+
+Phase 13b T3 schema 新增项：
+- `channel_switched {from_channel, to_channel, reason}` — 由 `EncodingRouter._record_transition()` 在 GPU↔CPU 状态机转移时 emit。`from_channel`/`to_channel` 取值 `{unknown, cpu, gpu}`。`reason` 字段承载触发原因 (`register_failed` | `oom` | `driver_reset` | `nvlink_drop` | `force_re_register_failed` | `self_check_unavailable`)。**Pebble worker 子进程内 AuditWriter 可能未初始化 → emit 静默丢失**，观测路径通过 `ekrs_gpu_memory_*` Gauge（Phase 13b T4）+ INFO log 兜底。
 
 17. 错误码参考
 HTTP	业务错误码	说明

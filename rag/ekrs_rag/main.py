@@ -127,6 +127,14 @@ _EVENT_SCHEMAS = {
     # Event count: 22 → 24.
     "admission_rejected": {"doc_hash", "reason", "actual_chunks"},
     "task_timeout_killed": {"doc_hash", "task_id", "timeout_s"},
+    # Phase 13b T3: GPU↔CPU channel transitions. ``channel_switched``
+    # emitted by EncodingRouter._emit_channel_switched() — invoked from
+    # _record_transition on every actual state mutation (review 🟢 #6
+    # transition-only guard ensures no flap). 4-step discipline:
+    # schema (this entry) + emit site (encoding_router.py:270-296) +
+    # ekrs-handbook §16 inventory + real AuditWriter regression test.
+    # Event count: 24 → 25.
+    "channel_switched": {"from_channel", "to_channel", "reason"},
 }
 
 

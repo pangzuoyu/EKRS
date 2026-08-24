@@ -112,14 +112,32 @@ def test_main_event_schemas_contains_fts_synced_and_searched() -> None:
 
 
 def test_main_event_schemas_count_24() -> None:
-    """``_EVENT_SCHEMAS`` has 24 entries (T10a-7 closed: +2 from 20 baseline;
-    Phase 13a T6 closed: +2 admission_rejected + task_timeout_killed = 24)."""
+    """``_EVENT_SCHEMAS`` has 25 entries (T10a-7 closed: +2 from 20 baseline;
+    Phase 13a T6 closed: +2 admission_rejected + task_timeout_killed = 24;
+    Phase 13b T3 closed: +1 channel_switched = 25)."""
     from ekrs_rag.main import _EVENT_SCHEMAS
 
-    assert len(_EVENT_SCHEMAS) == 24, (
-        f"Expected 24 event schemas (T6 closure: admission_rejected + "
-        f"task_timeout_killed); got {len(_EVENT_SCHEMAS)}"
+    assert len(_EVENT_SCHEMAS) == 25, (
+        f"Expected 25 event schemas (T3 closure: channel_switched); "
+        f"got {len(_EVENT_SCHEMAS)}"
     )
+
+
+def test_main_event_schemas_contains_channel_switched() -> None:
+    """``rag/ekrs_rag/main.py`` ``_EVENT_SCHEMAS`` includes channel_switched.
+
+    Phase 13b T3.3: 4-step discipline step #1 — schema registered for
+    required-field validation. Without this entry, the AuditLogger would
+    silently accept malformed channel_switched payloads (no field check).
+    """
+    from ekrs_rag.main import _EVENT_SCHEMAS
+
+    assert "channel_switched" in _EVENT_SCHEMAS, (
+        "main.py _EVENT_SCHEMAS must register channel_switched (T3)"
+    )
+    assert _EVENT_SCHEMAS["channel_switched"] == {
+        "from_channel", "to_channel", "reason",
+    }
 
 
 # ============================================================================

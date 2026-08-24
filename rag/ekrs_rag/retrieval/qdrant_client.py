@@ -32,6 +32,7 @@ from tenacity import (
 from ekrs_shared.models import Chunk, IngestionStatus
 from ekrs_rag.observability.audit import get_writer
 from ekrs_rag.retrieval.embedding_service import (
+    EncodedVector,
     EmbeddingService,
     EmbeddingUnavailableError,
 )
@@ -179,25 +180,45 @@ class QdrantManager:
         stop=stop_after_attempt(3),
         wait=wait_exponential(min=2, max=10),
     )
-    def upsert_chunks(self, chunks: list[Chunk]) -> int:
+    def upsert_chunks(
+        self,
+        chunks: list[Chunk],
+        *,
+        precomputed_encodings: list[EncodedVector] | None = None,
+    ) -> int:
         """Batch upsert chunks with real bge-m3 embeddings (B3 fix).
 
         D1: Raises EmbeddingUnavailableError if embedding service is dummy.
         Returns number of points upserted.
+
+        Phase 13b T3.1: when ``precomputed_encodings`` is supplied (e.g., from
+        EncodingRouter.route() — review 🔴 #2 mandate), skip the local CPU
+        encoder entirely and use the supplied vectors directly. The dummy-mode
+        guard is bypassed in this case because the caller has independently
+        obtained valid vectors. Length mismatch raises ValueError (positional
+        alignment between ``chunks[i]`` and ``encodings[i]`` is load-bearing
+        for the Qdrant point_id UUID5 input).
         """
         try:
             if not chunks:
                 return 0
 
-            if self._embedding_service.is_dummy:
-                raise EmbeddingUnavailableError(
-                    "Cannot upsert: EmbeddingService is in dummy mode. "
-                    "Model files missing or failed to load. "
-                    "Check rag/models/bge-m3/ and audit log."
-                )
-
-            texts = [c.text for c in chunks]
-            encoded = self._embedding_service.encode(texts)
+            if precomputed_encodings is not None:
+                if len(precomputed_encodings) != len(chunks):
+                    raise ValueError(
+                        f"precomputed_encodings length {len(precomputed_encodings)} "
+                        f"!= chunks length {len(chunks)}",
+                    )
+                encoded = precomputed_encodings
+            else:
+                if self._embedding_service.is_dummy:
+                    raise EmbeddingUnavailableError(
+                        "Cannot upsert: EmbeddingService is in dummy mode. "
+                        "Model files missing or failed to load. "
+                        "Check rag/models/bge-m3/ and audit log."
+                    )
+                texts = [c.text for c in chunks]
+                encoded = self._embedding_service.encode(texts)
 
             points = []
             for idx, (chunk, vec) in enumerate(zip(chunks, encoded)):

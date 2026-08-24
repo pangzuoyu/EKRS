@@ -48,6 +48,13 @@ dev = [
     # `pip install -e rag[dev]` then run `streamlit run dev_ui/app.py`.
     "streamlit>=1.30",
 ]
+# Phase 13b T3 — torch FP16 GPU encoder (eng-review UQ-5 decision).
+# CPU-only install: `pip install -e rag/`. GPU install: `pip install -e rag/[gpu]`.
+# Runtime: lazy import in torch_bge_m3.py handles missing-torch gracefully
+# (ImportError → EncodingRouter.try_register_gpu returns False → CPU fallback).
+gpu = [
+    "torch>=2.1,<3",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

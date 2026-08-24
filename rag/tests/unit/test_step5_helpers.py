@@ -19,8 +19,10 @@ import pytest
 
 from ekrs_rag.ingestion.outcome import IngestionOutcome
 from ekrs_rag.ingestion.pipeline import AuditEmitter
+from ekrs_rag.retrieval.embedding_service import EncodedVector
 from ekrs_rag.retrieval.fts_manager import FTSManager
 from ekrs_rag.retrieval.qdrant_client import QdrantManager
+from ekrs_rag.services import encoding_router
 from ekrs_rag.services.step5_helpers import (
     Step5Preparation,
     _prepare_step5,
@@ -65,6 +67,41 @@ def _qdrant_mock(*, ingestion_status: Any = None, upsert_count: int = 1) -> Any:
     q.upsert_chunks = MagicMock(return_value=upsert_count)
     q.delete_old_versions = MagicMock(return_value=0)
     return q
+
+
+class _StubRouter:
+    """Process-local EncodingRouter stub for _run_step5 tests.
+
+    Phase 13b T3.2: _run_step5 dispatches EncodingRouter.route() on every
+    ingest. Tests replace get_router() so the dispatch is deterministic and
+    doesn't trigger the real GPU self-check or CPU encoder.
+    """
+
+    def __init__(self, vec_factory: Any | None = None) -> None:
+        self._vec_factory = vec_factory or self._default_vec
+        self.route_calls: list[list[str]] = []
+        self.current_channel = "cpu"
+
+    @staticmethod
+    def _default_vec(texts: list[str]) -> list[EncodedVector]:
+        return [EncodedVector(dense=[0.1] * 1024, sparse={i: 0.5}) for i, _ in enumerate(texts)]
+
+    def route(self, texts: list[str]) -> list[EncodedVector]:
+        self.route_calls.append(list(texts))
+        return self._vec_factory(texts)
+
+
+@pytest.fixture(autouse=True)
+def _stub_encoding_router(monkeypatch: pytest.MonkeyPatch) -> _StubRouter:
+    """Auto-stub EncodingRouter.get_router for every test in this module.
+
+    Without this, _run_step5 would call the real router (which spawns
+    self_check or loads ONNX). Tests that need a custom stub can override
+    via ``monkeypatch.setattr(encoding_router, "get_router", ...)``.
+    """
+    stub = _StubRouter()
+    monkeypatch.setattr(encoding_router, "get_router", lambda: stub)
+    return stub
 
 
 # ============================================================================
@@ -177,7 +214,10 @@ def test_run_step5_happy_path_qdrant_fts_audit(tmp_path: Path) -> None:
 
     assert outcome.rag_status == "success"
     assert outcome.chunks_indexed == 3
-    qdrant.upsert_chunks.assert_called_once_with(chunks)
+    qdrant.upsert_chunks.assert_called_once()
+    call = qdrant.upsert_chunks.call_args
+    assert call.args[0] == chunks  # positional
+    assert "precomputed_encodings" in call.kwargs  # Phase 13b T3.2 kwarg
     fts.replace_doc.assert_called_once()
     qdrant.delete_old_versions.assert_called_once_with("d1", keep_version=2)
     audit.write.assert_called_once()
@@ -245,3 +285,64 @@ def test_run_step5_delete_old_versions_failure_does_not_fail_outcome(tmp_path: P
 
     assert outcome.rag_status == "success"
     assert outcome.chunks_indexed == 1
+
+
+# ============================================================================
+# Phase 13b T3.2 — _run_step5 EncodingRouter dispatch
+# ============================================================================
+
+
+def test_run_step5_uses_encoding_router_precomputed_kwarg(
+    _stub_encoding_router: _StubRouter,
+) -> None:
+    """Phase 13b T3.2: _run_step5 calls EncodingRouter.route() and passes result to qdrant.
+
+    Review 🔴 #2 mandate: EncodingRouter is dispatched via the
+    precomputed_encodings kwarg (NOT via the T9 _encode_backend seam which
+    is dense-only). Verifies route() is invoked with chunk texts and the
+    returned EncodedVector list is forwarded to QdrantManager.upsert_chunks.
+    """
+    vec_a = EncodedVector(dense=[0.1] * 1024, sparse={1: 0.5})
+    vec_b = EncodedVector(dense=[0.2] * 1024, sparse={2: 0.3})
+    _stub_encoding_router._vec_factory = lambda texts: [vec_a, vec_b]
+
+    qdrant = _qdrant_mock(upsert_count=2)
+    audit = MagicMock(spec=AuditEmitter)
+    chunks = [_chunk("hello"), _chunk("world", block_id="b2")]
+
+    outcome = _run_step5(chunks, qdrant, fts=None, audit_writer=audit, doc_hash="d1", version=1)
+
+    assert outcome.rag_status == "success"
+    assert outcome.chunks_indexed == 2
+    # Router.route() was called with the chunk texts.
+    assert _stub_encoding_router.route_calls == [["hello", "world"]]
+    # Qdrant received the precomputed vectors via kwarg.
+    qdrant.upsert_chunks.assert_called_once()
+    call_kwargs = qdrant.upsert_chunks.call_args.kwargs
+    assert call_kwargs.get("precomputed_encodings") == [vec_a, vec_b]
+
+
+def test_run_step5_router_cpu_fallback_propagates(
+    _stub_encoding_router: _StubRouter,
+) -> None:
+    """Phase 13b T3.2: when router.route() returns CPU vectors, precomputed kwarg
+    is still populated and upsert proceeds.
+
+    Confirms the router's CPU fallback path lands in the qdrant call —
+    no special branching in _run_step5 (review edge case #1).
+    """
+    cpu_vec = EncodedVector(dense=[0.5] * 1024, sparse={10: 0.4})
+    _stub_encoding_router._vec_factory = lambda texts: [cpu_vec]
+    _stub_encoding_router.current_channel = "cpu"  # GPU never registered
+
+    qdrant = _qdrant_mock(upsert_count=1)
+    audit = MagicMock(spec=AuditEmitter)
+    chunks = [_chunk("test")]
+
+    outcome = _run_step5(chunks, qdrant, fts=None, audit_writer=audit, doc_hash="d1", version=1)
+
+    assert outcome.rag_status == "success"
+    assert outcome.chunks_indexed == 1
+    assert _stub_encoding_router.route_calls == [["test"]]
+    call_kwargs = qdrant.upsert_chunks.call_args.kwargs
+    assert call_kwargs.get("precomputed_encodings") == [cpu_vec]

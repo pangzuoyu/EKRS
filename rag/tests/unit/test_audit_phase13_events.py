@@ -290,3 +290,88 @@ async def test_task_timeout_killed_not_emitted_on_normal_completion(audit_writer
     assert killed == [], (
         f"normal completion must not emit task_timeout_killed; got {killed}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 13b T3.3 — channel_switched 4-step audit event
+#
+# 4-step discipline (cerebrum checklist):
+# 1. register schema in _EVENT_SCHEMAS (main.py) ✓ done
+# 2. write-site emits on the actual production path
+#    (encoding_router._emit_channel_switched invoked from _record_transition
+#     on every actual state mutation) ✓ done
+# 3. ekrs-handbook §16 inventory updated ✓ done
+# 4. real AuditWriter regression test (this section)
+# ---------------------------------------------------------------------------
+
+
+def test_channel_switched_emitted_on_real_audit_writer(audit_writer) -> None:
+    """Phase 13b T3.3 step #4: real AuditWriter round-trip for channel_switched.
+
+    The EncodingRouter emit code path is already wired in
+    ``encoding_router._emit_channel_switched`` (commit b8a03b1). This test
+    verifies the end-to-end shape: register schema → emit through the
+    router's transition funnel → read JSONL → assert event lands with
+    all 3 required fields.
+    """
+    writer, audit_path = audit_writer
+    # Register channel_switched schema on top of the fixture's default schemas.
+    writer.register_event_schema(
+        "channel_switched", {"from_channel", "to_channel", "reason"},
+    )
+
+    # Drive the real EncodingRouter emit code path: register GPU that fails,
+    # which triggers a transition unknown→cpu via _record_transition.
+    from ekrs_rag.services import encoding_router
+
+    encoding_router.reset_router()
+    router = encoding_router.get_router()
+
+    # Monkeypatch try_register_gpu to simulate GPU-failed registration.
+    def _fake_try_register(*, model_dir=None, probes=None) -> bool:  # noqa: ARG001
+        router._record_transition(
+            from_channel="unknown", to_channel="cpu", reason="register_failed",
+        )
+        return False
+
+    import unittest.mock as _um
+    with _um.patch.object(router, "try_register_gpu", _fake_try_register):
+        # First call: state goes unknown→cpu; emit fires.
+        router.try_register_gpu()
+
+    events = _read_events(audit_path)
+    switched = [e for e in events if e["event"] == "channel_switched"]
+    assert len(switched) == 1, (
+        f"Expected exactly 1 channel_switched emit on GPU register failure; "
+        f"got {len(switched)}: {switched}"
+    )
+    ev = switched[0]
+    assert ev["from_channel"] == "unknown"
+    assert ev["to_channel"] == "cpu"
+    assert ev["reason"] == "register_failed"
+
+
+def test_channel_switched_payload_matches_registered_schema(audit_writer) -> None:
+    """Phase 13b T3.3: schema enforcement — write with extra kwarg is rejected.
+
+    Validates the 4-step #1 contract: with the schema registered, an emit
+    that includes an unexpected kwarg is still accepted (extra fields are
+    allowed; only missing required fields raise). Conversely, a payload
+    missing a required field returns False.
+    """
+    writer, _audit_path = audit_writer
+    writer.register_event_schema(
+        "channel_switched", {"from_channel", "to_channel", "reason"},
+    )
+
+    # Valid: all required + extra kwarg (should return True).
+    assert writer.write(
+        "channel_switched",
+        from_channel="gpu", to_channel="cpu", reason="oom",
+        extra_metadata="harmless",
+    ) is True
+
+    # Invalid: missing reason → returns False (validation rejection).
+    assert writer.write(
+        "channel_switched", from_channel="gpu", to_channel="cpu",
+    ) is False

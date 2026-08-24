@@ -141,7 +141,15 @@ class Settings(BaseSettings):
     # as a hook for a future Phase 13b-ORT incremental without touching call sites.
     BGE_M3_MODEL_DIR: Path = Path("/home/pangzy/code_project/bge-m3")
     BGE_M3_GPU_DEVICE_ID: int = 0
-    BGE_M3_GPU_ENABLED: bool = True
+    # Phase 13b T3 eng-review UQ-6: default False (Phase 13a 灰度节奏); env var
+    # `BGE_M3_GPU_ENABLED=true` opts in per pod. CPU remains production baseline.
+    BGE_M3_GPU_ENABLED: bool = False
+    # Phase 13b T3.4: GPU health probe knobs. _init_child spawns a daemon
+    # thread that calls EncodingRouter.force_re_register_gpu() every
+    # BGE_M3_GPU_PROBE_INTERVAL_S seconds. Transition-only emit (review 🟢 #6)
+    # means no audit flap when state is stable.
+    BGE_M3_GPU_PROBE_ENABLED: bool = True
+    BGE_M3_GPU_PROBE_INTERVAL_S: int = 30
     BGE_M3_BACKEND: str = "torch"  # Literal["torch", "onnx_gpu"] per plan T1.2
 
     @field_validator("PARSER_TOKEN")
