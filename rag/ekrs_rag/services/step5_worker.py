@@ -33,7 +33,7 @@ import logging
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Protocol, runtime_checkable
 
 from ekrs_shared.models import IngestionNotification
 
@@ -43,6 +43,56 @@ from .admission import chunk_gate
 from .step5_helpers import _prepare_step5, _run_step5
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Encode backend seam — Phase 13c GPU channel hook (T9, eng-review Issue 5)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class _EncodeBackend(Protocol):
+    """Encode backend contract for Phase 13b/c GPU channel.
+
+    Today, dense encoding happens inside ``QdrantManager.upsert_chunks``
+    (CPU bge-m3 ONNX path). Phase 13b (separate plan
+    ``docs/superpowers/plans/2026-08-23-phase13b-gpu-container.md``)
+    replaces the default implementation with a torch FP16 GPU encoder;
+    Phase 13c then wires the GPU container into the request path.
+
+    Contract locks return shape as ``list[list[float]]`` so any 13b
+    shape change (e.g. ``list[torch.Tensor]``) fails this Protocol's
+    TypeGuard at runtime — caught by tests, not production.
+
+    Subclassing a runtime_checkable Protocol with the matching
+    ``__call__`` is enough to satisfy ``isinstance(x, _EncodeBackend)``.
+    """
+
+    def __call__(self, texts: list[str]) -> list[list[float]]: ...
+
+
+def _encode_backend(texts: list[str]) -> list[list[float]]:
+    """Default CPU bge-m3 ONNX encode → dense vectors only.
+
+    Phase 13a T9: seam for Phase 13b GPU channel replacement. The
+    function is the swap point — 13b replaces the body (or rebinds the
+    module attribute) with a torch FP16 implementation. Today's caller
+    path goes through ``QdrantManager.upsert_chunks``; introducing this
+    seam at module level lets future wiring point here without changing
+    the contract test surface.
+
+    Sparse vectors are out of scope for this seam — Qdrant hybrid
+    indexing still needs sparse, which lives in ``QdrantManager``
+    (``to_qdrant_sparse``). The GPU channel contract covers the dense
+    path only; sparse stays CPU until proven otherwise.
+    """
+    if not texts:
+        return []
+    from ..retrieval.embedding_service import EmbeddingService
+
+    service = EmbeddingService()
+    encoded = service.encode(texts)
+    return [vec.dense for vec in encoded]
 
 
 @dataclass(frozen=True)
