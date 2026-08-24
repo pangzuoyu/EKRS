@@ -51,6 +51,33 @@ def test_ready_503_when_dependencies_not_initialized(client):
     assert resp.json() == {"detail": "dependency unavailable"}
 
 
+def test_ready_200_when_lifespan_set_state_qdrant(client):
+    """T10 E2E regression: lifespan sets ``app.state.qdrant`` (NOT
+    ``app.state.qdrant_manager``); /ready returns 200 when both deps
+    ping OK.
+
+    Bug surfaced by T10 real-container E2E: main.py was setting
+    ``app.state.qdrant_manager`` (only-ever-written, never read) so
+    /ready always 503'd in production. Fix: main.py now writes
+    ``app.state.qdrant`` matching the convention used by
+    test_notify_step5_wiring / test_blocks_route / test_health_ready.
+    """
+    import fakeredis.aioredis
+
+    class _PingableQdrant:
+        def count_points(self) -> int:
+            return 0
+
+    # Starlette State is a custom object — setattr works directly even
+    # if the attr didn't exist before.
+    client.app.state.qdrant = _PingableQdrant()
+    client.app.state.redis = fakeredis.aioredis.FakeRedis()
+
+    resp = client.get("/ready")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ready"}
+
+
 def test_plain_health_endpoint_still_returns_ok(client):
     """/health (plain text, kept for backward compat) is unchanged."""
     resp = client.get("/health")

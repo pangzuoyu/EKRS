@@ -246,7 +246,11 @@ async def lifespan(app: FastAPI):
             embedding_service = None
 
         app.state.embedding_service = embedding_service
-        app.state.qdrant_manager = _qdrant
+        # Convention from existing tests (test_blocks_route,
+        # test_notify_step5_wiring, test_health_ready): app.state.qdrant.
+        # T10 E2E surfaced: this was app.state.qdrant_manager (only-ever-
+        # written, never read), so /ready always 503'd. One-line fix.
+        app.state.qdrant = _qdrant
 
         # Phase 2b: retriever (no longer takes embedder — qdrant.search
         # handles embedding internally via injected EmbeddingService).
