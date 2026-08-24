@@ -21,7 +21,7 @@ class _Qdrant:
         self.hits = hits
         self.calls = []
 
-    def search(self, **kwargs):
+    async def search(self, **kwargs):
         self.calls.append(kwargs)
         return self.hits
 

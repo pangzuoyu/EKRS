@@ -145,7 +145,7 @@ class _StubQdrant:
     def __init__(self) -> None:
         self.calls: List = []
 
-    def search(self, query_text: str, top_k: int) -> List:
+    async def search(self, query_text: str, top_k: int) -> List:
         self.calls.append((query_text, top_k))
         return []
 
@@ -276,7 +276,7 @@ def test_retriever_emits_fusion_stats_fields_when_both_retrievers_hit() -> None:
     }
 
     class _VecQdrant:
-        def search(self, query_text, top_k):
+        async def search(self, query_text, top_k):
             return [(payload_a, 0.9)]
 
     class _FtsWithHit:

@@ -26,7 +26,7 @@ class _MockQdrant:
     def __init__(self, hits=None):
         self.hits = hits or []
 
-    def search(self, **kwargs):
+    async def search(self, **kwargs):
         return self.hits
 
 

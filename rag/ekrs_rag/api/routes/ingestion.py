@@ -23,12 +23,18 @@ from ...concurrency.redis_lock import RedisLock
 from ...core.config import settings
 from ...ingestion.outcome import IngestionOutcome
 from ...ingestion.pipeline import IngestionPipeline
+from ...observability.callback_failure_log import (
+    CallbackFailureLog,
+    record_callback_failure,
+)
 from ...observability.metrics import METRICS, safe_dec, safe_inc, safe_observe
 from ...services.encoding_pool import EncodingPool
 from ...services.inline_steps import run_inline_admission
 from ...services.step5_worker import Step5Payload, run_step5
 from ...storage.task_repo import TaskRepo
 from ...storage.documents import Document
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +66,65 @@ def _record_terminal(result_label: str, t0: float | None) -> None:
             )
         except Exception:
             pass
+
+
+# Module-level singleton: the rotating handler is keyed on the path
+# string in CallbackFailureLog, so reusing it across calls is safe.
+_callback_failure_log = CallbackFailureLog(
+    log_path=settings.CALLBACK_FAILURES_LOG_PATH,
+)
+
+
+async def _fire_parser_callback(
+    notification: IngestionNotification,
+    rag_status: str,
+    error: str | None = None,
+) -> None:
+    """Phase 13a T8 / P1-5: best-effort POST to parser callback URL.
+
+    On any failure (timeout / network error / 4xx / 5xx), write a
+    structured line to ``logs/callback_failures.log`` for offline
+    replay. The callback itself never raises — failures are
+    observation, not control flow. ``_run_pool_terminal`` keeps the
+    parser terminal confirmation through TaskRepo polling even when
+    the callback URL is unreachable.
+    """
+    url = notification.callback_url
+    if not url:
+        return
+
+    payload = {
+        "doc_hash": notification.doc_hash,
+        "version": notification.version,
+        "rag_status": rag_status,
+        "trace_id": notification.trace_id or "",
+    }
+    if error:
+        payload["error"] = error[: settings.CALLBACK_ERROR_MAX_CHARS]
+
+    try:
+        timeout = settings.PIPELINE_CALLBACK_TIMEOUT_SEC
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code >= 400:
+                record_callback_failure(
+                    _callback_failure_log,
+                    doc_hash=notification.doc_hash,
+                    reason=f"http_{resp.status_code}",
+                    status_code=resp.status_code,
+                )
+    except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as e:
+        record_callback_failure(
+            _callback_failure_log,
+            doc_hash=notification.doc_hash,
+            reason=f"{type(e).__name__}: {e}"[:1024],
+        )
+    except Exception as e:  # defensive — must never block ingestion
+        record_callback_failure(
+            _callback_failure_log,
+            doc_hash=notification.doc_hash,
+            reason=f"unexpected: {type(e).__name__}: {e}"[:1024],
+        )
 
 
 async def _run_locked_ingest(
@@ -284,6 +349,16 @@ async def _run_pool_terminal(
             "pool_terminal: callback_url=%s would fire here; T5 keeps "
             "callback fire-and-forget, full retry semantics land in T8",
             notification.callback_url,
+        )
+
+    # Phase 13a T8 / P1-5: actually fire the callback. Failures are
+    # written to logs/callback_failures.log for offline replay; the
+    # call itself never raises (best-effort).
+    if notification.callback_url:
+        await _fire_parser_callback(
+            notification,
+            rag_status=str(rag_status) if rag_status else "failed",
+            error=error,
         )
 
 

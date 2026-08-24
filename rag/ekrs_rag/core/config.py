@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     # Phase 5: observability
     AUDIT_LOG_PATH: str = "audit.log"
     DEBUG_LOG_PATH: str = "logs/debug.log"
+    # Phase 13a T8 / P1-5: callback failure reconciliation log path.
+    # Lives under logs/ alongside debug.log (NOT /tmp) so operators can
+    # find the file in the standard observability directory and so it
+    # survives container restarts that wipe /tmp.
+    CALLBACK_FAILURES_LOG_PATH: str = "logs/callback_failures.log"
 
     # Server
     HOST: str = "0.0.0.0"

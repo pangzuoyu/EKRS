@@ -13,6 +13,7 @@ whether dim mismatch triggers automatic delete+recreate.
 from __future__ import annotations
 
 import logging
+import asyncio
 import time
 import uuid
 from typing import Any, Dict, Optional
@@ -389,13 +390,18 @@ class QdrantManager:
         # the field; treat as missing for downstream typing.
         return dict(payload) if payload is not None else None
 
-    def search(
+    async def search(
         self,
         query_text: str,
         top_k: int = 40,
         score_threshold: Optional[float] = None,
     ) -> list[tuple[dict, float]]:
         """Hybrid search by query text. B1 fix: uses query_points (1.17.1).
+
+        Phase 13a T8 / P1-4: ``async def`` so the bge-m3 ONNX encode +
+        the sync qdrant-client call both run via ``asyncio.to_thread`` —
+        the event loop stays unblocked while query latency is dominated
+        by ONNX inference. Retriever callers ``await`` this method.
 
         Encodes query via EmbeddingService, then query_points with
         Prefetch (dense + sparse) + FusionQuery(RRF). Preserves 6A's
@@ -412,10 +418,19 @@ class QdrantManager:
             return []  # Safe degradation; no match possible
 
         try:
-            encoded = self._embedding_service.encode([query_text])[0]
-            sparse_qdrant = self._embedding_service.to_qdrant_sparse(encoded.sparse)
+            # Both calls are sync + CPU/IO blocking. Run them in the
+            # default thread pool so the event loop stays responsive
+            # for the rest of the request. P1-4 / T8.
+            encoded_list = await asyncio.to_thread(
+                self._embedding_service.encode, [query_text]
+            )
+            encoded = encoded_list[0]
+            sparse_qdrant = await asyncio.to_thread(
+                self._embedding_service.to_qdrant_sparse, encoded.sparse
+            )
 
-            results = self._client.query_points(
+            results = await asyncio.to_thread(
+                self._client.query_points,
                 collection_name=self._collection_name,
                 prefetch=[
                     models.Prefetch(

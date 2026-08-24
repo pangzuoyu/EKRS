@@ -120,7 +120,10 @@ class EKRSRetriever:
         # degrades to vector-only results (logged at WARNING).
         if self._fts is not None:
             vector_hits, fts_hits = await asyncio.gather(
-                asyncio.to_thread(self._qdrant.search, query_text=query, top_k=top_k),
+                # Phase 13a T8 / P1-4: qdrant.search is now async (encode
+                # runs via asyncio.to_thread internally); no outer
+                # to_thread wrap needed.
+                self._qdrant.search(query_text=query, top_k=top_k),
                 asyncio.to_thread(self._fts.search_with_payload, query),  # type: ignore[attr-defined]
                 return_exceptions=True,
             )
@@ -134,7 +137,7 @@ class EKRSRetriever:
             assert isinstance(vector_hits, list)
             assert isinstance(fts_hits, list)
         else:
-            vector_hits = self._qdrant.search(query_text=query, top_k=top_k)
+            vector_hits = await self._qdrant.search(query_text=query, top_k=top_k)
             fts_hits = []
 
         # Build Chunk list for both paths. For FTS hits the payload dict

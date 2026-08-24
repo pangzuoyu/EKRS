@@ -9,6 +9,7 @@ Mock FlagEmbedding via EmbeddingService; mock QdrantClient.
 """
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -236,7 +237,7 @@ def test_search_calls_query_points(
         mgr = QdrantManager(
             host="localhost", port=6333, embedding_service=mock_embedding_service
         )
-        results = mgr.search(query_text="hello", top_k=5)
+        results = asyncio.run(mgr.search(query_text="hello", top_k=5))
 
     assert client.query_points.called
     client.search.assert_not_called()  # B1: .search removed in 1.17.1
@@ -253,7 +254,7 @@ def test_search_encodes_query_text_via_service(
         mgr = QdrantManager(
             host="localhost", port=6333, embedding_service=mock_embedding_service
         )
-        mgr.search(query_text="user query", top_k=10)
+        asyncio.run(mgr.search(query_text="user query", top_k=10))
 
     encode_args = mock_embedding_service._model.encode.call_args[0]  # type: ignore[attr-defined]
     assert "user query" in encode_args[0]
@@ -269,7 +270,7 @@ def test_search_passes_named_vectors_to_query_points(
         mgr = QdrantManager(
             host="localhost", port=6333, embedding_service=mock_embedding_service
         )
-        mgr.search(query_text="q", top_k=3)
+        asyncio.run(mgr.search(query_text="q", top_k=3))
 
     call_kwargs = client.query_points.call_args.kwargs
     # Two prefetches: dense + sparse
@@ -312,7 +313,7 @@ def test_search_passes_search_params_hnsw_ef(
         mgr = QdrantManager(
             host="localhost", port=6333, embedding_service=mock_embedding_service
         )
-        mgr.search(query_text="q", top_k=3)
+        asyncio.run(mgr.search(query_text="q", top_k=3))
 
     call_kwargs = client.query_points.call_args.kwargs
     # Preserve 6A Task 8 commit 033a8a3 optimization
@@ -400,7 +401,7 @@ def test_search_logs_warning_when_dummy(
             host="localhost", port=6333, embedding_service=dummy_embedding_service
         )
         with caplog.at_level(logging.WARNING, logger="ekrs_rag.retrieval.qdrant_client"):
-            results = mgr.search(query_text="q", top_k=5)
+            results = asyncio.run(mgr.search(query_text="q", top_k=5))
 
     assert results == []
     assert any("dummy mode" in rec.message for rec in caplog.records)
@@ -504,7 +505,7 @@ class TestQdrantWriteFailedAuditEmit:
                 embedding_service=mock_embedding_service,
             )
             with pytest.raises(ConnectionError):
-                mgr.search(query_text="q", top_k=5)
+                asyncio.run(mgr.search(query_text="q", top_k=5))
 
         # search() is NOT retry-wrapped → exactly 1 emit.
         assert mock_writer.write.call_count == 1

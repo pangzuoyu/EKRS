@@ -42,7 +42,7 @@ class _MockQdrant:
         self.search_count = 0
         self.latency_s = latency_s  # synthetic latency for parallel test
 
-    def search(self, **kwargs):
+    async def search(self, **kwargs):
         self.calls.append(kwargs)
         self.search_count += 1
         if self.latency_s > 0:
@@ -376,7 +376,7 @@ async def test_retrieve_no_fts_search_call_when_disabled() -> None:
 async def test_retrieve_concurrency_gather_with_dual_exception() -> None:
     """Both vector and FTS raise in parallel → retriever returns empty, no exception."""
     class _BoomQdrant:
-        def search(self, **kwargs):
+        async def search(self, **kwargs):
             raise RuntimeError("qdrant dead")
 
     boom_fts = _fts_stub(RuntimeError("fts dead"))

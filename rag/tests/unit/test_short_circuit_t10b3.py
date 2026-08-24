@@ -121,7 +121,7 @@ class _VecQdrantSingleHit:
         }
         self.calls: list = []
 
-    def search(self, query_text, top_k):
+    async def search(self, query_text, top_k):
         self.calls.append((query_text, top_k))
         return [(self.payload, 0.85)]
 
@@ -290,7 +290,7 @@ def test_short_circuit_respects_active_scope_filter() -> None:
     }
 
     class _MultiVec:
-        def search(self, query_text, top_k):
+        async def search(self, query_text, top_k):
             return [(payload_a, 0.9), (payload_b, 0.8)]
 
     qdrant = _MultiVec()
