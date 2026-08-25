@@ -19,3 +19,72 @@ services:
     # Skip prometheus — the upstream `prom/prometheus:latest` pull times
     # out on this network. UI and RAG API work fine without it.
     profiles: ["never"]
+
+  # Phase 13b GPU 部署 — rag-gpu service.
+  # profiles: ["gpu"] 默认不启, docker compose --profile gpu up -d 拉起.
+  # runtime: nvidia 在本机 docker daemon 没注册 (Runtimes: 仅 runc),
+  # 改用 deploy.resources.reservations.devices + nvidia-container-toolkit
+  # (现代 Docker 19.03+ 支持 compose-only GPU reservation, nvidia-ctk 处理 passthrough).
+  # bind-mount host /home/pangzy/code_project/bge-m3 提供 torch pytorch_model.bin
+  # (transformers runtime auto-downcast FP32 → FP16, 不需要预转换权重).
+  rag-gpu:
+    build:
+      context: ..
+      dockerfile: rag/Dockerfile.gpu
+      args:
+        # 同 rag 块, 用 daocloud.io 镜像加速
+        PYTHON_BASE_IMAGE: docker.m.daocloud.io/library/python:3.11-slim
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+        # torch 走 pytorch.org 官方 wheel index (无国内镜像, 直连 ~5min build)
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu130
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      # 复用 rag 服务 env (compose 不自动继承, 显式列)
+      - PARSER_TOKEN=${PARSER_TOKEN:-change-me-to-a-secure-random-string-32chars}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_GRPC_PORT=6334
+      - REDIS_URL=redis://redis:6379
+      - SHARED_STORAGE_PATH=/parsed_lib
+      - EKRS_DEBUG=${EKRS_DEBUG:-false}
+      - COLLECTION_NAME=rag_documents
+      - MAX_CHUNK_TOKENS=768
+      - EMBEDDING_MODEL_DIR=/opt/ekrs/models/bge-m3
+      - EMBEDDING_MODEL=bge-m3
+      - METRICS_HOST=0.0.0.0
+      # GPU 差异
+      - BGE_M3_GPU_ENABLED=true
+      - BGE_M3_GPU_PROBE_ENABLED=true
+      - BGE_M3_MODEL_DIR=/opt/ekrs/models/bge-m3-torch
+      # UQ-6: 验收期间加速 probe (T5.3 failover 检测更快)
+      - BGE_M3_GPU_PROBE_INTERVAL_S=5
+      # Admin endpoints (memory-stats + invalidate) require ADMIN_KEY
+      - ADMIN_KEY=${ADMIN_KEY:-dev-admin-key-32chars-aaaaaaaaaa}
+    volumes:
+      # Bind-mount host FP32 weights (transformers auto-downcast to FP16 at load):
+      - /home/pangzy/code_project/bge-m3:/opt/ekrs/models/bge-m3-torch:ro
+      # 复用 rag 的 parsed_lib volume (SHARED_STORAGE_PATH 必需)
+      - parsed_lib:/parsed_lib
+    ports:
+      - "8001:8000"
+    mem_limit: 20g
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # Phase 11 T11-5 修复版 (bash /dev/tcp, dash /bin/sh 不支持)
+      test:
+        - "CMD-SHELL"
+        - 'bash -c "exec 3<>/dev/tcp/localhost/8000 && printf \"GET /healthz HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n\" >&3 && head -1 <&3 | grep -q 200"'
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    profiles: ["gpu"]

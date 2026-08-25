@@ -1,4 +1,4 @@
-.PHONY: dev test lint mock-notify install clean heavy-test golden-test test-e2e test-e2e-ci t5-acceptance
+.PHONY: dev test lint mock-notify install clean heavy-test golden-test test-e2e test-e2e-ci t5-acceptance gpu-up gpu-down gpu-acceptance
 
 PYTHON ?= python3
 PIP ?= pip
@@ -91,3 +91,32 @@ run-local:
 t5-acceptance:
 	cd rag && pytest tests/unit/test_phase13b_t5_acceptance.py tests/unit/test_admin_gpu_endpoints.py -v
 	cd rag && pytest tests/integration/test_phase13b_t5_e2e.py -v -m heavy
+
+# Phase 13b GPU 部署 — PoC 验收 (T5.1 smoke bench).
+# UQ-2: precheck host 模型目录 (低成本失败预防)
+# UQ-4: T5.1 容器内 exec 跑 (RAG_URL=http://localhost:8000 = 容器内 GPU 服务)
+# UQ-5: gpu-up 自动停 CPU rag 防 Qdrant wipe 冲突, gpu-down 自动恢复
+# UQ-6: BGE_M3_GPU_PROBE_INTERVAL_S=5 已写死在 compose override (T5.3 failover)
+gpu-up:
+	@test -d /home/pangzy/code_project/bge-m3 || \
+		(echo "ERROR: /home/pangzy/code_project/bge-m3 missing — bind-mount would fail" && exit 1)
+	cd deployment && docker compose stop rag 2>/dev/null || true
+	cd deployment && docker compose --profile gpu up -d rag-gpu
+	@echo "Waiting for rag-gpu healthz..."
+	@for i in $$(seq 1 30); do \
+		if curl -s http://localhost:8001/healthz | grep -q '"status":"ok"'; then \
+			echo "rag-gpu healthy"; break; \
+		fi; sleep 2; \
+	done
+
+gpu-down:
+	cd deployment && docker compose --profile gpu down
+	@echo "Restart CPU rag service for normal ops..."
+	cd deployment && docker compose up -d rag
+
+# T5.1 smoke bench — 28 篇 ingest, peak mem, ingest p99.
+# T5.2 (equiv) + T5.3 (failover) 单独 follow-up — 不阻塞 phase13b 合入.
+gpu-acceptance:
+	docker compose -f deployment/docker-compose.yml exec -T rag-gpu \
+		bash -c 'RAG_URL=http://localhost:8000 \
+		         python /app/rag/scripts/phase13b_poc_bench.py --phase full'

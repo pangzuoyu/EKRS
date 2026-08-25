@@ -127,13 +127,23 @@ async def gpu_invalidate() -> dict:
 
 @gpu_router.post("/memory-stats", dependencies=[Depends(require_admin_key)])
 async def gpu_memory_stats() -> dict:
-    """Return exact GPU memory stats via ``torch.cuda``.
+    """Return driver-level GPU memory stats via ``torch.cuda.mem_get_info``.
 
-    Provides ``peak_bytes`` (``max_memory_allocated``) and
-    ``allocated_bytes`` (``memory_allocated``) for a given device —
-    bypassing Prometheus multiproc scrape lag (5s default) for
-    benchmark scripts that need a precise peak right after Phase B
-    completes.
+    IMPORTANT: uses ``mem_get_info()`` (driver-level, cross-process), NOT
+    ``memory_allocated()`` / ``max_memory_allocated()`` (per-process CUDA
+    context, returns 0 from the parent process because the model lives in
+    a subprocess worker — Phase 13a T4 pebble pool — not in this process).
+    ``mem_get_info`` returns ``(free_bytes, total_bytes)`` from the NVIDIA
+    driver, identical to what ``nvidia-smi`` shows; ``used = total - free``
+    reflects whatever processes (including the worker pool) are holding.
+
+    ``peak_bytes`` is a high-water mark tracked by the driver: ``max(free)
+    observed since driver boot`` — approximated here as ``total - free`` at
+    scrape time, since the driver doesn't expose a true high-water API for
+    cross-process usage. Operators reading peak for capacity planning
+    should also consult the per-process torch memory events emitted by the
+    worker (Phase 13b T4.2 — visible via Prometheus once the multiproc
+    dir propagates through _init_child, Phase 13c).
 
     Returns:
         ``{"peak_bytes": int, "allocated_bytes": int, "device": "cuda:0"}``
@@ -163,8 +173,12 @@ async def gpu_memory_stats() -> dict:
     device_str = f"cuda:{device_id}"
 
     try:
-        peak = int(torch.cuda.max_memory_allocated(device_id))
-        allocated = int(torch.cuda.memory_allocated(device_id))
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device_id)
+        allocated = int(total_bytes - free_bytes)
+        # Driver-level peak: best signal we have without per-process torch
+        # context. For worker-process peak, read the T4.2 emitted metric
+        # via Prometheus (when multiproc dir propagation lands).
+        peak = allocated
     except Exception as e:
         # Defensive: catch any torch-side fault (driver reset, MIG
         # misconfig, etc.) and surface as 500 — parent §204 says we

@@ -35,24 +35,37 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Runtime aliases — same lazy pattern as encoding_router. Tests can monkeypatch
-# these via ``torch_bge_m3._EmbeddingUnavailableError`` without paying the
-# onnxruntime load cost.
-_EmbeddingUnavailableError: type[Exception] | None = None
-_EncodedVector: Any = None
+# Runtime aliases — resolve eagerly at module load so function-body
+# references (``EncodedVector(...)`` inside ``_TorchBgeM3.encode``,
+# ``except EmbeddingUnavailableError`` in ``_self_check``) resolve through
+# the module globals dict. Module-level ``__getattr__`` only fires on
+# ``module.attr`` dotted access — bare names in function bodies look up
+# ``module.__dict__`` directly and bypass it. The previous lazy pattern
+# therefore NameError'd the moment GPU encoding actually ran. Discovered
+# 2026-08-25 during Phase 13b T5.1 GPU real-infra bench; smoke-test mocks
+# never exercised the GPU path so the bug never fired in CI.
+try:
+    from ..retrieval.embedding_service import (  # noqa: F401
+        EmbeddingUnavailableError as _EmbeddingUnavailableError,
+        EncodedVector as _EncodedVector,
+    )
+except Exception as _e:  # pragma: no cover - onnxruntime unavailable
+    # Test env without onnxruntime — GPU path is unreachable anyway, so
+    # let downstream NameError surface clearly if anyone tries to use it.
+    logger.warning(
+        "torch_bge_m3: failed eager import of embedding_service (%s); "
+        "GPU encode path will be unreachable", _e,
+    )
+    _EmbeddingUnavailableError = None  # type: ignore[assignment]
+    _EncodedVector = None  # type: ignore[assignment]
 
 
 def __getattr__(name: str) -> Any:
-    global _EmbeddingUnavailableError, _EncodedVector
+    # Backwards-compat: tests monkeypatching the bare names
+    # (``torch_bge_m3.EmbeddingUnavailableError``) still work.
     if name == "EmbeddingUnavailableError":
-        if _EmbeddingUnavailableError is None:
-            from ..retrieval import embedding_service
-            _EmbeddingUnavailableError = embedding_service.EmbeddingUnavailableError
         return _EmbeddingUnavailableError
     if name == "EncodedVector":
-        if _EncodedVector is None:
-            from ..retrieval import embedding_service
-            _EncodedVector = embedding_service.EncodedVector
         return _EncodedVector
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
@@ -249,7 +262,7 @@ class _TorchBgeM3:
                         and score > 0
                     ):
                         sparse[int(tok_id)] = float(score)
-                results.append(EncodedVector(dense=dense_list, sparse=sparse))
+                results.append(_EncodedVector(dense=dense_list, sparse=sparse))
 
             # Phase 13b T4.2 — emit per-batch latency + memory after the
             # with-block (so torch frees intermediates before we read
@@ -301,13 +314,7 @@ def encode_gpu(
     if not texts:
         return []
     if not _cuda_available():
-        # Lazy-resolve the production exception class on first call so
-        # unit tests that mock the GPU path don't pay the onnxruntime
-        # import cost at module load.
-        if _EmbeddingUnavailableError is None:
-            from ..retrieval import embedding_service
-            globals()["_EmbeddingUnavailableError"] = embedding_service.EmbeddingUnavailableError
-        raise globals()["_EmbeddingUnavailableError"](
+        raise _EmbeddingUnavailableError(
             "torch.cuda.is_available() == False; encode_gpu requires CUDA",
         )
     resolved = _resolve_model_dir(model_dir)
@@ -380,7 +387,7 @@ def _self_check(
     try:
         gpu_vecs = encode_gpu(texts, model_dir=resolved_model_dir)
         cpu_vecs = cpu_service.encode(texts)
-    except EmbeddingUnavailableError:
+    except _EmbeddingUnavailableError:
         logger.warning("self_check: encode_gpu raised EmbeddingUnavailableError")
         return False
     except Exception as e:

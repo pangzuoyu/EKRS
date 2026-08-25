@@ -1,0 +1,53 @@
+# Phase 13b GPU 部署 — PoC. Sibling of rag/Dockerfile.
+# 复用 base 层 (PYTHON_BASE_IMAGE / shared install / rag install / ONNX vendor),
+# 加 torch CUDA wheel install. Bind-mount host weights via compose override
+# (PoC 模式, 不内嵌 pytorch_model.bin).
+#
+# Build context (set by deployment/docker-compose.yml) = REPO ROOT.
+ARG PYTHON_BASE_IMAGE=python:3.11-slim
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130
+
+FROM ${PYTHON_BASE_IMAGE}
+
+# ARGs declared before FROM not visible inside stages unless redeclared
+ARG PIP_INDEX_URL
+ARG TORCH_INDEX_URL
+
+WORKDIR /app
+
+# Install shared package first (cache layer) — 跟 rag/Dockerfile 一致
+COPY shared /app/shared
+RUN pip install --no-cache-dir \
+        --index-url "${PIP_INDEX_URL}" \
+        /app/shared
+
+# Install RAG package — 跟 rag/Dockerfile 一致 (含 [gpu] extra 是 host-side dev-only,
+# 容器内直接 install torch 绕过 extras 解析, 锁 cu130 wheel)
+COPY rag /app/rag
+RUN pip install --no-cache-dir \
+        --index-url "${PIP_INDEX_URL}" \
+        /app/rag
+
+# GPU 关键差异 (Phase 13b 部署):
+# torch==2.11.* 允许 patch 上游 bug fix (UQ-1 决议).
+# transformers 已在 rag deps 里, 无需重复 install.
+RUN pip install --no-cache-dir \
+        --index-url "${TORCH_INDEX_URL}" \
+        "torch==2.11.*" 2>&1 | tail -5
+
+# Vendor ONNX model (跟 rag/Dockerfile:54 一致 — _self_check 需要它并存)
+COPY rag/models/bge-m3/ /opt/ekrs/models/bge-m3/
+
+ENV EMBEDDING_MODEL_DIR=/opt/ekrs/models/bge-m3 \
+    EMBEDDING_MODEL=bge-m3 \
+    # 默认 GPU off, 容器启动时 compose env override 到 true
+    BGE_M3_GPU_ENABLED=false \
+    # bind-mount host /home/pangzy/code_project/bge-m3 在 compose override 里
+    BGE_M3_MODEL_DIR=/opt/ekrs/models/bge-m3-torch
+
+WORKDIR /app/rag
+
+EXPOSE 8000
+
+CMD ["python", "-m", "ekrs_rag.main"]
