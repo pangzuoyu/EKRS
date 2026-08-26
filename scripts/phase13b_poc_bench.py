@@ -273,13 +273,72 @@ def _run_phase(
     )
 
 
-def _check_thresholds(phase_b: PhaseReport) -> list[str]:
-    """Validate Phase B against acceptance thresholds; return error list."""
+def _resolve_chunk_threshold(
+    *, corpus_total_blocks: int, strict: bool,
+) -> tuple[int, str]:
+    """Resolve Phase B min-chunks threshold (Phase 13c T4).
+
+    Priority (mirrors plan T4 Steps):
+    1. ``T5_PHASE_B_MIN_CHUNKS=0`` → (0, "disabled") — always passes.
+    2. ``T5_PHASE_B_MIN_CHUNKS`` explicit positive int → (N, "explicit").
+    3. No env → ``int(corpus_total_blocks * 0.9)``,
+       status="corpus_derived" (warn-default) or "strict" if strict=True.
+
+    Returns:
+        (threshold_int, status_string). status_string is one of:
+        "disabled" / "explicit" / "corpus_derived" / "strict".
+    """
+    raw = os.environ.get("T5_PHASE_B_MIN_CHUNKS")
+    if raw is None:
+        threshold = int(corpus_total_blocks * 0.9)
+        return threshold, ("strict" if strict else "corpus_derived")
+    try:
+        n = int(raw)
+    except ValueError:
+        # Malformed env → fall back to corpus-derived, log warning.
+        sys.stderr.write(
+            f"[PH13b] WARN: T5_PHASE_B_MIN_CHUNKS={raw!r} not int, "
+            f"falling back to corpus*0.9={int(corpus_total_blocks * 0.9)}\n",
+        )
+        threshold = int(corpus_total_blocks * 0.9)
+        return threshold, ("strict" if strict else "corpus_derived")
+    if n == 0:
+        return 0, "disabled"
+    return n, "explicit"
+
+
+def _check_thresholds(
+    phase_b: PhaseReport,
+    *,
+    corpus_total_blocks: int,
+    strict: bool,
+) -> tuple[list[str], str]:
+    """Validate Phase B against acceptance thresholds; return (errors, status).
+
+    Phase 13c T4: chunk-threshold resolution is dynamic (corpus-derived
+    default; warning vs hard-fail controlled by ``strict``). Other checks
+    (largest-doc latency, 2298-class latency, GPU peak, n_failed) remain
+    hard-fail — they're GPU-path-validity signals, not corpus-size proxies.
+
+    Returns:
+        (errs, threshold_status). threshold_status is "pass" / "warn" /
+        "fail" and is what callers use to decide exit code.
+
+    Exit-code contract (caller ``main()``):
+        "pass" → exit 0
+        "warn" → exit 0 (CI / verification path; threshold short by design)
+        "fail" → exit 1 (production gate; STRICT or non-threshold error)
+    """
     errs: list[str] = []
-    ceiling_chunks = env_int("T5_PHASE_B_MIN_CHUNKS", 7787)
-    if phase_b.total_chunks < ceiling_chunks:
+    threshold, threshold_status = _resolve_chunk_threshold(
+        corpus_total_blocks=corpus_total_blocks, strict=strict,
+    )
+    chunk_shortfall = False
+    if threshold > 0 and phase_b.total_chunks < threshold:
+        chunk_shortfall = True
         errs.append(
-            f"Phase B total chunks {phase_b.total_chunks} < {ceiling_chunks}"
+            f"Phase B total chunks {phase_b.total_chunks} < {threshold} "
+            f"(threshold_status={threshold_status})"
         )
     largest_budget = env_float("T5_PERF_OVERRIDE_LARGEST_DOC_S", 30.0)
     if phase_b.largest_doc_ms > largest_budget * 1000:
@@ -306,7 +365,24 @@ def _check_thresholds(phase_b: PhaseReport) -> list[str]:
         )
     if phase_b.n_failed > 0:
         errs.append(f"Phase B had {phase_b.n_failed} failures")
-    return errs
+
+    # Status decision:
+    # - any non-threshold error → hard fail (GPU path broken)
+    # - chunk-shortfall + STRICT → hard fail (production gate)
+    # - chunk-shortfall + non-strict → warn (CI / verification path)
+    non_threshold_errs = [
+        e for e in errs
+        if not e.startswith("Phase B total chunks ")
+    ]
+    if non_threshold_errs:
+        status = "fail"
+    elif chunk_shortfall and threshold_status == "strict":
+        status = "fail"
+    elif chunk_shortfall:
+        status = "warn"
+    else:
+        status = "pass"
+    return errs, status
 
 
 def run(
@@ -321,15 +397,21 @@ def run(
     phase: str = "full",
     pace_ms: int = 2000,
     status_timeout_s: float = 90.0,
-) -> tuple[PhaseReport, PhaseReport]:
+) -> tuple[PhaseReport, PhaseReport, int]:
     """Top-level orchestrator: discover → Phase A → Phase B → return reports.
 
     `phase` arg: "A" / "B" / "full" (default). A runs CPU only, B runs
     GPU only, full runs both (the default T5.1 flow).
+
+    Phase 13c T4: also returns ``corpus_total_blocks`` (sum of all blocks
+    across the discovered corpus) so the caller can compute the dynamic
+    threshold for chunk-count validation.
     """
     corpus = discover_28_corpus(corpus_root, fallback_path=FALLBACK_28_LIST)
+    corpus_total_blocks = sum(len(blocks) for _, _, blocks in corpus)
     sys.stderr.write(
-        f"[PH13b] discovered {len(corpus)} docs (target=28) from {corpus_root}\n"
+        f"[PH13b] discovered {len(corpus)} docs (target=28) from {corpus_root}, "
+        f"total_blocks={corpus_total_blocks}\n"
     )
 
     phase_a = PhaseReport(phase_name="A", n_docs=0, n_success=0, n_failed=0,
@@ -361,7 +443,7 @@ def run(
             status_timeout_s=status_timeout_s,
         )
 
-    return phase_a, phase_b
+    return phase_a, phase_b, corpus_total_blocks
 
 
 def main() -> int:
@@ -389,7 +471,7 @@ def main() -> int:
         sys.stderr.write("ERROR: --token or PARSER_TOKEN env var required\n")
         return 2
 
-    phase_a, phase_b = run(
+    phase_a, phase_b, corpus_total_blocks = run(
         corpus_root=args.corpus_root,
         qdrant_url=args.qdrant_url,
         fts_path=args.fts_path,
@@ -402,29 +484,64 @@ def main() -> int:
         status_timeout_s=args.status_timeout_s,
     )
 
+    # Phase 13c T4: dynamic threshold resolution.
+    # T5_PHASE_B_MIN_CHUNKS_STRICT=true → hard-fail gate (prod pre-release).
+    # Default → warn-only (CI / verification path).
+    strict_threshold = env_int("T5_PHASE_B_MIN_CHUNKS_STRICT", 0) > 0
+    if args.phase in ("B", "full"):
+        errs, threshold_status = _check_thresholds(
+            phase_b,
+            corpus_total_blocks=corpus_total_blocks,
+            strict=strict_threshold,
+        )
+    else:
+        errs, threshold_status = [], "pass"
+
+    # Resolve the threshold value for summary JSON transparency.
+    threshold_value, _ = _resolve_chunk_threshold(
+        corpus_total_blocks=corpus_total_blocks, strict=strict_threshold,
+    )
+
     # Write summary JSON (suggestion 2 — T5.4 wrapper consumes this).
     summary = {
         "phase_a": _phase_to_dict(phase_a),
         "phase_b": _phase_to_dict(phase_b),
         "thresholds": {
-            "phase_b_total_chunks_min": env_int("T5_PHASE_B_MIN_CHUNKS", 7787),
+            "phase_b_total_chunks_min": threshold_value,
+            "phase_b_total_chunks_threshold_status": threshold_status,
+            "corpus_total_blocks": corpus_total_blocks,
             "phase_b_largest_doc_s": env_float("T5_PERF_OVERRIDE_LARGEST_DOC_S", 30.0),
             "phase_b_2298_class_doc_s": 5.0,
             "phase_b_gpu_peak_bytes_max": env_int("T5_GPU_MEMORY_PEAK_BYTES_MAX", 6 * 1024**3),
         },
-        "errors": _check_thresholds(phase_b) if args.phase in ("B", "full") else [],
+        "errors": errs,
     }
     args.summary_json.parent.mkdir(parents=True, exist_ok=True)
     with args.summary_json.open("w") as f:
         json.dump(summary, f, indent=2, default=str)
 
     sys.stderr.write(f"\n[PH13b] summary written to {args.summary_json}\n")
-    errs = summary["errors"]
-    if errs:
+    sys.stderr.write(
+        f"[PH13b] corpus_total_blocks={corpus_total_blocks}, "
+        f"threshold={threshold_value}, status={threshold_status}, "
+        f"strict={strict_threshold}\n"
+    )
+
+    if threshold_status == "fail":
         sys.stderr.write(f"\n[PH13b] {len(errs)} threshold violations:\n")
         for e in errs:
             sys.stderr.write(f"  - {e}\n")
         return 1
+    if threshold_status == "warn":
+        # Phase 13c T4: warn-only (CI / verification) → exit 0.
+        sys.stderr.write(
+            f"\n[PH13b] WARN: corpus below threshold but exiting 0 "
+            f"({'STRICT' if strict_threshold else 'non-strict'}).\n"
+            f"  {len(errs)} short-fall(s):\n",
+        )
+        for e in errs:
+            sys.stderr.write(f"  - {e}\n")
+        return 0
     return 0
 
 

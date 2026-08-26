@@ -242,9 +242,14 @@ class IngestionNotification(BaseModel):
 
 
 class IngestionStatus(BaseModel):
-    """Response from GET /v1/ingestion/status/{doc_hash}."""
+    """Response from GET /v1/ingestion/status/{doc_hash}.
 
-    status: str  # processing|success|failed
+    Phase 13c T3 D1: ``status`` is now a 4-value Literal enum (was free-form
+    ``str``). Internal TaskRepo values (queued/running/...) must be mapped
+    via ``map_row_status_to_ingestion_status`` before being assigned here.
+    """
+
+    status: Literal["pending", "processing", "success", "failed"]
     chunks_indexed: int = 0
     version: int = 0
     error: Optional[str] = None

@@ -595,27 +595,38 @@ async def get_status(
         # Map internal PENDING/QUEUED/RUNNING/COMPLETED/FAILED to the
         # IngestionStatus-compatible shape. For non-terminal states,
         # we return a partial IngestionStatus with status='pending'.
-        if status in ("queued", "running"):
+        if status in ("queued", "running", "pending"):
             # Synthesize a minimal IngestionStatus; the contract allows
-            # in-flight docs to surface queued/running.
+            # in-flight docs to surface queued/running/pending via the
+            # mapper (Phase 13c T3 D1: internal→external Literal enum).
             from ekrs_shared.models import IngestionStatus
+            from ekrs_rag.services.ingestion_mapper import (
+                map_row_status_to_ingestion_status,
+            )
             return IngestionStatus(
                 doc_hash=doc_hash,
                 version=int(row.get("version", 0)),
-                status="pending",  # IngestionStatus enum: success/pending/...
+                status=map_row_status_to_ingestion_status(status),
                 chunks_indexed=0,
             )
         elif status in ("completed",):
             # Already-indexed in qdrant (or row + qdrant should agree);
             # fall through to qdrant lookup for terminal shape.
             pass  # fallthrough
-        elif status in ("failed", "pending"):
+        elif status == "failed":
+            # Phase 13c T3 fix: split from the pending-bucket. Pre-13c this
+            # branch returned status="pending" wrongly; now uses the mapper
+            # so failed docs surface honestly in /v1/ingestion/status.
             from ekrs_shared.models import IngestionStatus
+            from ekrs_rag.services.ingestion_mapper import (
+                map_row_status_to_ingestion_status,
+            )
             return IngestionStatus(
                 doc_hash=doc_hash,
                 version=int(row.get("version", 0)),
-                status="pending",
+                status=map_row_status_to_ingestion_status(status),
                 chunks_indexed=0,
+                error=row.get("failure_reason") or row.get("error"),
             )
 
     # Terminal: query Qdrant for the canonical IngestionStatus (Phase 6A contract).

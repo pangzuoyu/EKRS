@@ -292,6 +292,166 @@ preserved.
 
 ---
 
+## [phase13c] - 2026-08-26
+
+**Version**: 0.5.0 → 0.6.0 (minor bump — Phase 13c ships GPU bge-m3
+production-readiness hardening per Keep-a-Changelog). **Phase 13c
+delivered as 4 implementation tasks + ops runbook** under
+`docs/superpowers/plans/2026-08-26-phase13c-prod-readiness.md`. No
+new tag (`phase13b` stays locked at `4d9523d`; per post-closure
+incremental pattern, Phase 13c absorbs into Phase 13b's shipping
+release with a fresh version bump).
+
+**Pre-13c baseline**: phase13b closure at `4d9523d`. Phase 13b GPU
+bge-m3 channel (T1 torch FP16 encoder, T2+T4 EncodingRouter + metrics,
+T3 hot-path wiring + 30s probe + `channel_switched` audit, T5 E2E
+acceptance) all preserved. Phase 13a production-readiness (T1-T10) all
+preserved.
+
+**Phase 13c closure scope** (T1+T2, T3, T4, T5):
+
+### Added
+
+- **Cross-process AuditWriter bridge** (T1, `observability/audit_bridge.py`):
+  - `AuditEventBridge` = `multiprocessing.Manager().Queue()` + main-side
+    drain thread + worker-side `from_addr` factory.
+  - `EKRS_AUDIT_QUEUE_ADDR` env var round-trips Manager address from
+    main → pebble worker subprocesses.
+  - **Layered fault tolerance** (D2):
+    - Manager startup failure → lifespan retry-once → fail-loud (audit
+      pipeline is required for ops).
+    - `bridge.put()` runtime queue.Full / serialization → silent drop +
+      counter (encoding hot path must never block on audit backpressure).
+    - Consumer thread writer raises → exception isolated, drain keeps
+      running (next event still lands).
+  - `stop()` does inline drain before joining (handles 1000s of queued
+    items at shutdown without waiting for consumer's 0.5s `get` timeout).
+  - 9 unit tests (round-trip, FIFO, queue-full drop, never-raises
+    serialization, writer exception isolation, stop drains, etc.).
+- **`mark_process_dead` atexit + stale Prometheus multiproc cleanup**
+  (T2, `services/stale_cleanup.py`):
+  - `_init_child` Item 6: `atexit.register(mark_process_dead, os.getpid())`
+    so graceful worker shutdown cleans up its multiproc files (not just
+    SIGKILL paths).
+  - 5-minute `asyncio` background task scans `PROMETHEUS_MULTIPROC_DIR`
+    for stale `.db` files; `mtime < time.time() - 60` AND
+    `os.kill(pid, 0)` raises (defensive) → delete.
+  - `asyncio.to_thread` wraps the file scan to avoid event-loop block.
+  - 10 unit + 1 skip (Windows atexithook skip) tests.
+- **IngestionStatus.status Literal + single-source mapper** (T3,
+  `shared/ekrs_shared/models.py` + `services/ingestion_mapper.py`):
+  - `status: str` → `Literal["pending","processing","success","failed"]`
+    (Pydantic 2.8 enum contract replaces free-form string).
+  - `map_row_status_to_ingestion_status()` = single source of truth:
+    `queued|running|pending → pending/processing/pending`,
+    `completed → success`, `failed → failed`, unknown → `failed`.
+  - 5 model + 7 mapper + 3 get_status unit tests.
+- **Phase 13b bench dynamic threshold** (T4, `scripts/phase13b_poc_bench.py`):
+  - `_resolve_chunk_threshold()` priority: 0=disabled, explicit=int,
+    default=`corpus_total_blocks * 0.9` (real-infra-calibrated).
+  - `_check_thresholds()` returns `(errs, status)` ∈
+    `{pass, warn, fail}`; STRICT mode (`T5_PHASE_B_MIN_CHUNKS_STRICT=1`)
+    triggers hard-fail below threshold.
+  - `make gpu-acceptance` exit 0 on `pass`/`warn`, exit 1 on `fail`.
+  - 9 unit tests covering env override / corpus-derived / disabled /
+    STRICT paths + `n_failed` hard-fail invariant.
+- **Production ops runbook** (T5, `deployment/phase13c-ops-guide.md`):
+  - 8 sections: pre-conditions / build / startup / acceptance /
+    troubleshooting (6 cases) / rollback / upgrade path / quick-ref.
+  - T3 regression recipe (§4.3) for `get_status` FAILED branch.
+  - T5.1 STRICT mode gate (§4.1) for pre-release verification.
+  - 13c acceptance checklist (§7.1) for on-call 30min GPU boot.
+
+### Changed
+
+- **`_emit_channel_switched` dual-path**: main-process fast path
+  (`get_writer()` direct) preserved for parent process; worker subprocess
+  path forwards via `AuditEventBridge.put()` (Phase 13c T1).
+- **`/v1/ingestion/status` FAILED branch**: pre-13c bug returned
+  `status: pending` for row_status `failed` (wrong branch in ternary).
+  Fixed: split FAILED branch, call mapper, return `failure_reason` /
+  `error` fields. (Phase 13c T3.)
+- **`EncodingPool._init_child`**: 5 items → 6 items (added atexit
+  mark_process_dead registration).
+- **Main lifespan startup**: after `set_writer`, retry-once Manager +
+  `bridge.start()` + `bridge.export_addr()`; spawn `asyncio.create_task`
+  stale_cleanup loop with 300s interval. Shutdown: bridge.stop() +
+  cancel stale task + pop env var.
+
+### Fixed
+
+- **get_status FAILED regression**: empty JSONL / no_chunks documents
+  now correctly report `{"status": "failed", ...}` instead of
+  `{"status": "pending", ...}`. Pre-13c bug noted in Phase 12
+  full-745 ingest observations (4 silent failures were misreported as
+  pending, blocking reconciliation).
+- **Stale Prometheus `gpu_memory_peak_bytes`**: workers exiting via
+  SIGKILL or graceful shutdown previously left `.db` files in
+  `PROMETHEUS_MULTIPROC_DIR`, polluting `/metrics` with peak values
+  from dead PIDs. Mark_process_dead atexithook + 5min background
+  cleanup keeps the gauge honest.
+
+### Deferred (T6)
+
+- **channel_switched audit suppression** (P2): T5.1 28-doc bench only
+  observed 1-2 `channel_switched` events across the full run. With noise
+  not yet material, the suppression logic (rate-limit / windowed dedup)
+  is **deferred to Phase 14 or a standalone patch**. Plan section
+  marked as `~~T6 deferred~~` + `phase13c-t6-deferred.md` Memory entry
+  captures the trigger conditions for future re-evaluation.
+
+### Pre-existing baseline failures (NOT 13c-introduced)
+
+- 12 Phase 5/7 integration tests use sync stub on `await
+  RetrievalResult` (test_query_replay + test_constraints_api) +
+  `test_models_form_fields` ImportError + a handful of stale fixtures.
+  These failed pre-13c; verified via `git stash` round-trip not related
+  to 13c work.
+
+**Verification matrix**:
+
+- **T1** cross-process audit: 9 unit pass (after fixing
+  `test_stop_drains_remaining_events` flaky via inline-drain refactor).
+- **T2** stale cleanup: 10 unit pass + 1 skip (atexit Windows skip).
+- **T3** Literal + FAILED fix: 5 model + 7 mapper + 3 get_status = 15
+  unit pass.
+- **T4** dynamic threshold: 9 unit pass.
+- **T5** ops guide: doc-only deliverable, no automated test.
+- **Full unit suite**: 946 pass + 2 skip + 12 fail = **0 new regression**
+  (12 pre-existing baseline failures preserved).
+- **mypy**: clean on `audit_bridge.py`, `stale_cleanup.py`,
+  `ingestion_mapper.py`, all touched files (1 NEW error
+  pre-patched at `main.py` for module-level `AuditEventBridge` import
+  to satisfy finally-block after raise).
+
+**Risks closed** (Phase 13b closure §Pending post-deploy):
+
+- UQ-6 (audit emit in pebble workers) — closed at T1: cross-process
+  AuditWriter bridge ships `channel_switched` to main-process
+  audit.log via Manager queue.
+- Phase 13b post-deploy note "Stale counter drift" — closed at T2:
+  atexit + 5min background cleanup keep `/metrics` `gpu_memory_peak_bytes`
+  honest.
+- Phase 12 Task D full-745 silent failure note — closed at T3:
+  `get_status` FAILED branch correctly reports failed documents.
+
+**Risks tracked** (not closed):
+
+- T6 channel_switched 抑制 — deferred (see above).
+
+**Migration notes**:
+
+- No new dependency: `multiprocessing.Manager` + `asyncio.to_thread` are
+  stdlib (Phase 13a already depends on these).
+- No data migration; no FTS schema change; no Qdrant payload change.
+- Audit log readers: no new event types; `channel_switched` now reaches
+  audit.log from worker subprocesses (previously silently dropped).
+- Backward compat: ops with `BGE_M3_GPU_ENABLED=False` (CPU path) sees
+  no behavior change — bridge.start() runs but no workers exist; bridge
+  receives zero events and exits cleanly on stop.
+
+---
+
 ## [phase12] - 2026-08-15
 
 **Tag**: `phase12` (annotated, force-moved to this closure commit per

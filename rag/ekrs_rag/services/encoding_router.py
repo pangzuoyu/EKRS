@@ -276,24 +276,50 @@ class EncodingRouter:
     ) -> None:
         """Best-effort emit of channel_switched audit event.
 
-        Swallows all errors per parent §204. Audit writer may not be
-        initialized at registration time (worker subprocess cold-start);
-        in that case the event is dropped silently — operators see the
-        log line above instead.
+        Swallows all errors per parent §204. Two paths:
+
+        1. **Main process fast path**: ``AuditWriter`` available → call
+           ``writer.write`` directly. Old behavior preserved for the
+           parent process (Phase 5.5 audit).
+
+        2. **Worker subprocess path** (Phase 13c T1): no in-process
+           writer (worker doesn't init one), so we forward via the
+           cross-process ``AuditEventBridge``. The bridge consumes the
+           event on the main process and writes to the same audit.log
+           the rest of the system uses.
+
+        If neither path is available, the event is silently dropped
+        — operators see the router state-transition log line instead.
         """
+        # Main-process fast path
         try:
             from ..observability.audit import get_writer
             writer = get_writer()
-            if writer is None:
+            if writer is not None:
+                writer.write(
+                    "channel_switched",
+                    from_channel=from_channel,
+                    to_channel=to_channel,
+                    reason=reason,
+                )
                 return
-            writer.write(
-                "channel_switched",
-                from_channel=from_channel,
-                to_channel=to_channel,
-                reason=reason,
-            )
         except Exception as e:  # pragma: no cover - defensive
-            logger.debug("channel_switched audit emit dropped: %s", e)
+            logger.debug("channel_switched main-path writer dropped: %s", e)
+            # fall through to bridge path
+
+        # Worker-process bridge path (Phase 13c T1)
+        try:
+            from ..observability.audit_bridge import get_worker_bridge
+            worker_bridge = get_worker_bridge()
+            if worker_bridge is not None:
+                worker_bridge.put(
+                    "channel_switched",
+                    from_channel=from_channel,
+                    to_channel=to_channel,
+                    reason=reason,
+                )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("channel_switched bridge-path dropped: %s", e)
 
 
 # Module-level singleton — pebble _init_child is called once per worker

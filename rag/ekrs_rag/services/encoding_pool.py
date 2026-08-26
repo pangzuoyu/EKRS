@@ -206,6 +206,28 @@ def _init_child() -> None:
 
     sys.excepthook = _child_excepthook
 
+    # Item 6 (Phase 13c T2): atexit-register mark_process_dead so a graceful
+    # worker shutdown (not SIGKILL) cleans up its prometheus multiproc files.
+    # Without this, the sidecar exporter reads stale ``gpu_memory_peak_bytes``
+    # values whenever a worker exits cleanly via lifespan stop or pebble
+    # ProcessPool.close().
+    try:
+        import atexit  # noqa: WPS433 — lazy import (heavy stdlib)
+
+        from prometheus_client.multiprocess import (  # noqa: WPS433
+            mark_process_dead,
+        )
+        atexit.register(mark_process_dead, os.getpid())
+        logger.info(
+            "init_child: atexit(mark_process_dead) registered for pid=%d",
+            os.getpid(),
+        )
+    except Exception as _atexit_err:  # pragma: no cover - defensive
+        logger.warning(
+            "init_child: failed to register atexit(mark_process_dead): %s",
+            _atexit_err,
+        )
+
 
 # ---------------------------------------------------------------------------
 # EncodingPool

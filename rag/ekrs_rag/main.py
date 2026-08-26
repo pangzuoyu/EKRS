@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import multiprocessing
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -24,7 +26,9 @@ from .concurrency.redis_lock import RedisLock
 from .core.config import settings
 from .core.logging import setup_logging
 from .ingestion.pipeline import IngestionPipeline
+from .observability import audit_bridge as _audit_bridge_mod
 from .observability.audit import AuditWriter, attach_index, set_writer
+from .observability.audit_bridge import AuditEventBridge
 from .observability.audit_index import AuditIndex
 from .retrieval.embedding_service import EmbeddingService
 from .retrieval.qdrant_client import QdrantManager
@@ -390,6 +394,64 @@ async def lifespan(app: FastAPI):
         set_writer(_audit_writer)
         app.state.audit_writer = _audit_writer
 
+        # Phase 13c T1: cross-process AuditWriter bridge (multiprocessing.Queue).
+        # Workers call bridge.put("channel_switched", ...) → consumer thread
+        # drains → forwards to _audit_writer.write (same audit.log as main).
+        # D2 layered fault tolerance: Manager startup → retry once (5s gap) →
+        # raise on final failure (fail-loud); bridge.put() runtime errors →
+        # silent drop (encoding hot path must not block).
+
+        _audit_manager = None
+        _audit_bridge = None
+        for _attempt in range(2):  # D2: retry once
+            try:
+                _audit_manager = multiprocessing.Manager()
+                _audit_queue = _audit_manager.Queue(maxsize=10000)
+                _audit_bridge = AuditEventBridge(writer=_audit_writer, queue=_audit_queue)
+                _audit_bridge.start()
+                AuditEventBridge.export_addr(_audit_manager)
+                logger.info(
+                    "audit_bridge: started (Manager addr exported to env %s)",
+                    AuditEventBridge._QUEUE_ADDR_ENV,
+                )
+                break
+            except Exception as _bridge_err:
+                logger.warning(
+                    "audit_bridge: Manager startup attempt %d failed: %s",
+                    _attempt + 1, _bridge_err,
+                )
+                if _attempt == 1:
+                    # D2: fail-loud on final failure — application must
+                    # not run without audit pipeline.
+                    raise RuntimeError(
+                        f"Failed to start audit_bridge after 2 attempts: {_bridge_err}"
+                    ) from _bridge_err
+                time.sleep(1.0)  # gap between retries
+        app.state.audit_bridge = _audit_bridge
+
+        # Phase 13c T2: stale Prometheus multiproc file cleanup (D3 to_thread).
+        # Runs every 5 min in the background; scans multiproc_dir, removes
+        # dead-worker .db files. mtime guard prevents killing active workers.
+        from .services.stale_cleanup import async_cleanup_loop as _cleanup
+
+        _stale_cleanup_stop = asyncio.Event()
+        _stale_cleanup_task: asyncio.Task | None = None
+        if multiproc_dir:
+            _stale_cleanup_task = asyncio.create_task(
+                _cleanup(
+                    multiproc_dir,
+                    interval_s=300.0,
+                    stop_event=_stale_cleanup_stop,
+                ),
+                name="ekrs_stale_cleanup",
+            )
+            logger.info(
+                "stale_cleanup: background task started (interval=300s, dir=%s)",
+                multiproc_dir,
+            )
+        app.state.stale_cleanup_stop = _stale_cleanup_stop
+        app.state.stale_cleanup_task = _stale_cleanup_task
+
         # Build audit index async (don't block readiness on multi-GB scan)
         _audit_index = AuditIndex(audit_path)
         try:
@@ -431,6 +493,32 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning("encoding_pool.stop raised: %s", e)
             logger.info("EncodingPool stopped")
+
+        # Phase 13c T1: stop audit_bridge + clean env (T1 §2 note: 防 env leak
+        # 到下个测试 / 进程).
+        audit_bridge = getattr(app.state, "audit_bridge", None)
+        if audit_bridge is not None:
+            try:
+                audit_bridge.stop(timeout_s=5.0)
+                logger.info("audit_bridge stopped")
+            except Exception as e:
+                logger.warning("audit_bridge.stop raised: %s", e)
+
+        # Phase 13c T2: cancel stale_cleanup background task.
+        stale_cleanup_stop = getattr(app.state, "stale_cleanup_stop", None)
+        stale_cleanup_task = getattr(app.state, "stale_cleanup_task", None)
+        if stale_cleanup_stop is not None:
+            stale_cleanup_stop.set()
+        if stale_cleanup_task is not None:
+            try:
+                await asyncio.wait_for(stale_cleanup_task, timeout=2.0)
+            except asyncio.TimeoutError:
+                stale_cleanup_task.cancel()
+            logger.info("stale_cleanup: background task stopped")
+
+        # Section 2 note (T1): del env var so subsequent test runs / subprocess
+        # spawns don't inherit a stale Manager address.
+        os.environ.pop(_audit_bridge_mod._QUEUE_ADDR_ENV, None)
 
         logger.info("Shutting down EKRS RAG service")
 

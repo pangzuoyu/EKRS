@@ -164,3 +164,27 @@ class TestIngestionStatus:
     def test_failed(self):
         s = IngestionStatus(status="failed", error="Qdrant unavailable")
         assert s.chunks_indexed == 0
+
+    def test_pending(self):
+        """Phase 13c D1: IngestionStatus.status accepts 'pending' Literal value."""
+        s = IngestionStatus(status="pending", chunks_indexed=0)
+        assert s.status == "pending"
+
+    def test_processing(self):
+        """Phase 13c D1: IngestionStatus.status accepts 'processing' Literal value."""
+        s = IngestionStatus(status="processing", chunks_indexed=0)
+        assert s.status == "processing"
+
+    def test_invalid_status_rejected(self):
+        """Phase 13c D1: Literal enum rejects foreign values (validation error).
+
+        Pre-13c contract: ``status: str  # processing|success|failed`` was free-form
+        so any string would silently pass. New Literal guard ensures producers
+        align with the 4-value enum (pending/processing/success/failed).
+        """
+        with pytest.raises(ValidationError):
+            IngestionStatus(status="queued")  # 'queued' is internal TaskRepo value, NOT exposed
+        with pytest.raises(ValidationError):
+            IngestionStatus(status="running")  # same — internal only
+        with pytest.raises(ValidationError):
+            IngestionStatus(status="unknown_garbage")

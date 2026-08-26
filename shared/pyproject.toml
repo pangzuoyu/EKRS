@@ -1,6 +1,6 @@
 [project]
 name = "ekrs-shared"
-version = "0.5.0"
+version = "0.6.0"
 description = "EKRS shared models, normalizer, and utilities"
 requires-python = ">=3.11"
 dependencies = [
