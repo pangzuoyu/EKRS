@@ -103,7 +103,11 @@ def _smoke_bench_largest_doc(
         return
     largest = max(corpus, key=lambda x: len(x[2]))
     doc_id, _, blocks = largest
-    output_path = f"/parsed_lib/{doc_id}/data.jsonl"
+    # Phase 13a T2 contract: output_path is the parser's output DIRECTORY
+    # (coarse_gate appends /data.jsonl). Earlier /parsed_lib/<doc>/data.jsonl
+    # broke after admission.py:42 started computing Path(p) / "data.jsonl"
+    # — that became /parsed_lib/<doc>/data.jsonl/data.jsonl = unreadable.
+    output_path = f"/parsed_lib/{doc_id}"
     payload = build_notify_payload(doc_id, Path(output_path), callback_url)
 
     sys.stderr.write(
@@ -111,11 +115,17 @@ def _smoke_bench_largest_doc(
         f"budget {largest_doc_timeout_s}s\n"
     )
     code, body, _ = notify_one(rag_url, token, payload)
-    if code != 200:
+    # /v1/ingestion/notify is async: 200 = sync accepted (rare), 202 = queued
+    # / duplicate / running. Both proceed to status poll. Only 4xx/5xx fail.
+    if code not in (200, 202):
         sys.stderr.write(
             f"[PH13b SMOKE] notify failed code={code} body={body}; skipping\n"
         )
         return
+    if code == 202 and body.get("status") == "duplicate":
+        sys.stderr.write(
+            f"[PH13b SMOKE] doc already ingested (duplicate); polling\n"
+        )
     status, elapsed_ms, _ = poll_status(
         rag_url, doc_id, status_timeout_s,
     )
@@ -143,10 +153,14 @@ def _run_phase(
     """Run one phase (A or B) end-to-end."""
     sys.stderr.write(f"\n[PH13b PHASE {phase_name}] starting with {len(corpus)} docs\n")
 
-    # 1. Drain any pending (eng-review fix #1).
+    # 1. Drain any pending (eng-review fix #1). force=True so a fresh
+    # container (tasks.db empty → all docs return pending/404) skips the
+    # 5-min drain wait. Operators pre-warm should set T5_DRAIN_FORCE=0
+    # if they actually want to wait for real in-flight tasks.
     drain_all_pending(
         rag_url, [c[0] for c in corpus],
         timeout_s=env_float("T5_DRAIN_TIMEOUT_S", 300.0),
+        force=env_int("T5_DRAIN_FORCE", 1) == 1,
     )
 
     # 2. Wipe state (suggestion 1 — encapsulate Qdrant + FTS).
@@ -169,19 +183,31 @@ def _run_phase(
     outcomes: list[DocOutcome] = []
     for doc_id, _, blocks in corpus:
         outcome = DocOutcome(doc_hash=doc_id)
-        output_path = f"/parsed_lib/{doc_id}/data.jsonl"
+        # See _smoke_bench_largest_doc — output_path is the parser's
+        # output DIRECTORY; coarse_gate appends /data.jsonl itself.
+        output_path = f"/parsed_lib/{doc_id}"
         payload = build_notify_payload(doc_id, Path(output_path), callback_url)
 
-        code, _, notify_ms = notify_one(rag_url, token, payload)
+        code, body, notify_ms = notify_one(rag_url, token, payload)
         outcome.notify_ms = notify_ms
 
-        if code != 200:
+        # /v1/ingestion/notify is async: 202 = queued/duplicate/running
+        # (already accepted), proceed to poll. Only 4xx/5xx are failures.
+        if code not in (200, 202):
             outcome.status = "failed"
-            outcome.failure_reason = f"notify code={code}"
+            outcome.failure_reason = f"notify code={code} body={body}"
             outcomes.append(outcome)
             if pace_ms > 0:
                 time.sleep(pace_ms / 1000.0)
             continue
+        # 202 with status="duplicate" is an idempotency hit — the doc was
+        # already ingested (or in-flight) under the same version. Treat as
+        # accepted; the poll below will resolve the actual terminal state.
+        if code == 202 and body.get("status") == "duplicate":
+            sys.stderr.write(
+                f"[PH13b] [{phase_name}] [{doc_id}] notify duplicate (v={body.get('version', '?')}); "
+                f"polling status\n"
+            )
 
         # /v1/ingestion/status terminal
         status, terminal_ms, reason = poll_status(

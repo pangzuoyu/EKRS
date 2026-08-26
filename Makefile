@@ -116,7 +116,23 @@ gpu-down:
 
 # T5.1 smoke bench — 28 篇 ingest, peak mem, ingest p99.
 # T5.2 (equiv) + T5.3 (failover) 单独 follow-up — 不阻塞 phase13b 合入.
+# EKRS_RATE_LIMIT=6000 抬到 100 req/s 防 status poll 撞 429 (Phase 8 默认 60/min 太严).
+# /healthz / /health / /metrics 已 exempt, 不受 EKRS_RATE_LIMIT 影响.
+# T5_DRAIN_TIMEOUT_S=1: fresh container 上 tasks.db 为空, drain 等于空跑; 1s 跳过 (drain 在
+# force=True 时 第一轮 28 个 poll_status 各最多 1s → ~28s 总; 实战比 5min 节省 4 分钟).
+# host /home/pangzy/code_project/EKRS/scripts bind-mount 到容器内 /app/rag/scripts-host
+# (docker-compose.override.yml rag-gpu 服务); 跑脚本前 PYTHONPATH=/app/rag/scripts-host 让
+# _phase13b_common 跟 phase13b_* 能互相 import。
+# 容器内 qdrant URL 是 docker 服务名 `qdrant:6333` (DNS), 不是 localhost。
+# PARSER_TOKEN / ADMIN_KEY 默认 compose override 的 dev 值 (生产用 .env override)。
 gpu-acceptance:
 	docker compose -f deployment/docker-compose.yml exec -T rag-gpu \
-		bash -c 'RAG_URL=http://localhost:8000 \
-		         python /app/rag/scripts/phase13b_poc_bench.py --phase full'
+		bash -c 'EKRS_RATE_LIMIT=6000 \
+		         RAG_URL=http://localhost:8000 \
+		         T5_DRAIN_TIMEOUT_S=1 \
+		         PYTHONPATH=/app/rag/scripts-host \
+		         python /app/rag/scripts-host/phase13b_poc_bench.py \
+		             --phase full \
+		             --qdrant-url http://qdrant:6333 \
+		             --token $${PARSER_TOKEN:-change-me-to-a-secure-random-string-32chars} \
+		             --admin-key $${ADMIN_KEY:-dev-admin-key-32chars-aaaaaaaaaa}'

@@ -88,7 +88,9 @@ async def _concurrent_ingest(
 
     async def _one(idx: int) -> bool:
         doc_hash = f"failover_test_{int(time.time())}_{idx}"
-        output_path = f"/parsed_lib/{doc_hash}/data.jsonl"
+        # Phase 13a T2 contract: output_path is the parser's output DIRECTORY;
+        # admission.coarse_gate appends /data.jsonl (see services/admission.py:42).
+        output_path = f"/parsed_lib/{doc_hash}"
         payload = build_notify_payload(doc_hash, Path(output_path), callback_url)
         await asyncio.sleep(idx * pace_ms / 1000.0)
         code, _, _ = await loop.run_in_executor(

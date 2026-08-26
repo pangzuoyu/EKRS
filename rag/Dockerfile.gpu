@@ -36,6 +36,16 @@ RUN pip install --no-cache-dir \
         --index-url "${TORCH_INDEX_URL}" \
         "torch==2.11.*" 2>&1 | tail -5
 
+# bge-m3 tokenizer 强依赖 (2026-08-25 bench 发现: 缺这个包导致
+# AutoTokenizer.from_pretrained 抛 "You need to have sentencepiece or
+# tiktoken installed", embedding_service 静默 fallback 到 dummy encoder,
+# EncodingRouter 看不到 GPU encoder 可用, 路由到 ONNX CPU → 显存 2568MiB
+# 已加载但 util 0%, CPU 反而 340%+。 sentencepiece ~5MB, transformers
+# 自己不 pre-install 这个是已知坑 (transformers #13567).
+RUN pip install --no-cache-dir \
+        --index-url "${PIP_INDEX_URL}" \
+        "sentencepiece>=0.2.0"
+
 # Vendor ONNX model (跟 rag/Dockerfile:54 一致 — _self_check 需要它并存)
 COPY rag/models/bge-m3/ /opt/ekrs/models/bge-m3/
 

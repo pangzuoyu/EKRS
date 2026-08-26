@@ -71,6 +71,20 @@ services:
       - /home/pangzy/code_project/bge-m3:/opt/ekrs/models/bge-m3-torch:ro
       # 复用 rag 的 parsed_lib volume (SHARED_STORAGE_PATH 必需)
       - parsed_lib:/parsed_lib
+      # Phase 13b T5.1: bench 脚本构造 notify 时 output_path = /parsed_lib/<doc>/data.jsonl,
+      # RAG 启动后会读这个文件。把 doc-to-md corpus 直接 bind-mount 到 /parsed_lib 上,
+      # 容器内 /parsed_lib/<doc>/data.jsonl 立即可见 (3809 dirs × JSONL, ro 防误写)。
+      - /home/pangzy/code_project/doc-to-md/output/text:/parsed_lib:ro
+      # Phase 13b T5.x: bind-mount host scripts/ → /app/rag/scripts/
+      # Makefile `gpu-acceptance` 容器内 exec 跑 phase13b_poc_bench.py + _phase13b_common.py,
+      # 这俩脚本不在 rag/ 包里, COPY 时不会进 image。Bind-mount 让容器内 /app/rag/scripts/
+      # 等于 host /home/pangzy/code_project/EKRS/scripts/ (ro: 防容器意外改 host 源码)。
+      # 容器内 /app/rag/scripts/ 已存在 (rag/scripts/ COPY 进去过 eval_pseudo_sparse.py),
+      # 但不在路径里 — python 调脚本时直接 cd /app/rag/scripts 跑就行。
+      - /home/pangzy/code_project/EKRS/scripts:/app/rag/scripts-host:ro
+      # Phase 13b T5.1 corpus_root (/home/pangzy/code_project/doc-to-md/output/text) 在 host 上,
+      # 容器内走默认路径找不到。同 path bind-mount 让 bench 脚本默认配置可见 corpus (3809 dirs × JSONL)。
+      - /home/pangzy/code_project/doc-to-md/output/text:/home/pangzy/code_project/doc-to-md/output/text:ro
     ports:
       - "8001:8000"
     mem_limit: 20g

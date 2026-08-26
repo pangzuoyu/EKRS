@@ -243,11 +243,20 @@ def build_notify_payload(
     doc_hash: str,
     output_path: Path,
     callback_url: str,
-    version: int = 1,
+    version: int | None = None,
 ) -> dict:
     """Construct the /v1/ingestion/notify request body. Verbatim from
-    live_stress_60.py:632-645."""
+    live_stress_60.py:632-645.
+
+    2026-08-26 Phase 13b PoC fix: default version is `int(time.time())` so
+    each bench run uses a fresh (doc_hash, version) tuple — the notify
+    handler's idempotency check returns 202 "duplicate" for repeated runs
+    that reuse version=1, which trips the chunk-count threshold. Override
+    with explicit version when callers want reproducible runs.
+    """
     trace_id = f"trace_{doc_hash}"
+    if version is None:
+        version = int(time.time())
     return {
         "trace_id": trace_id,
         "doc_hash": doc_hash,
@@ -397,12 +406,27 @@ def reset_state(
     qdrant_url: str,
     fts_path: Path,
     collection: str = "rag_documents",
+    vector_size: int = 1024,
 ) -> None:
     """Wipe Qdrant collection + FTS SQLite file — T5.1/5.2 suggestion 1.
 
     Encapsulates the destructive clean-slate between Phase A and Phase B
     so callers don't sprinkle `docker compose down && up` glue. Safe to
     call when the collection is missing (delete is a no-op).
+
+    After DELETE we PUT the collection back with the dense (bge-m3
+    vector_size) + sparse schema. Without recreate, the pool worker's
+    first upsert hits `Unexpected Response: 404 ... Collection
+    rag_documents doesn't exist` (caught 2026-08-25: bench ran 4 min
+    then 100% FAILED with qdrant_upsert_failed). ensure_collection runs
+    only in uvicorn lifespan at startup, not per-upsert.
+
+    2026-08-26 Phase 13b PoC: tasks.db is NOT wiped here — TaskRepo holds
+    a long-lived sqlite3 connection and unlinking the file out from under
+    it breaks notify handlers (500 on insert, no schema to insert into).
+    Duplicate detection is avoided upstream via time-based payload versions
+    (`build_notify_payload` defaults to `int(time.time())`), so each bench
+    run gets a fresh (doc_hash, version) tuple.
 
     Raises on Qdrant error — caller decides whether to fall back to
     `docker compose down -v` (Phase 12 Task D fallback).
@@ -414,6 +438,28 @@ def reset_state(
     )
     if code not in (200, 404):
         raise RuntimeError(f"Qdrant DELETE failed: code={code} body={body}")
+
+    # Recreate with the same schema uvicorn uses in lifespan startup
+    # (qdrant_client.py:154-170). PUT so we don't depend on Qdrant
+    # internals; matches `QdrantManager.ensure_collection` output.
+    # Body MUST be bytes (urllib rejects str) — encode here.
+    create_body = json.dumps({
+        "vectors": {
+            "dense": {"size": vector_size, "distance": "Cosine"},
+        },
+        "sparse_vectors": {
+            "sparse": {"index": {"on_disk": False}},
+        },
+    }).encode("utf-8")
+    code, body = _http(
+        "PUT", f"{qdrant_url}/collections/{collection}",
+        headers={"Content-Type": "application/json"},
+        body=create_body, timeout=10.0,
+    )
+    if code not in (200, 201, 409):
+        raise RuntimeError(
+            f"Qdrant PUT (recreate) failed: code={code} body={body}",
+        )
 
     # FTS: unlink SQLite file (Phase 10 T10a-1 FTS5 db).
     if fts_path.exists():
