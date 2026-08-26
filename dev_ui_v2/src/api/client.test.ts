@@ -1,7 +1,7 @@
 /**
  * Phase 11 T11-2 — typed fetch client RED tests.
  *
- * `createApiClient({ baseUrl, getAdminKey? })` returns:
+ * `createApiClient({ baseUrl, getAdminKey?, getParserToken? })` returns:
  *   { notifyIngest, getIngestionStatus, queryConstraints,
  *     flushEmbeddingCache, getHealth }
  *
@@ -9,7 +9,10 @@
  *   - uses Zod schema to parse the response,
  *   - throws `ApiError(statusCode, body)` on 4xx/5xx,
  *   - attaches X-Admin-Key when `getAdminKey` returns a value AND the path
- *     is `/v1/admin/*` (NOT for `/v1/constraints`, `/v1/ingestion/*`).
+ *     is `/v1/admin/*` (NOT for `/v1/constraints`, `/v1/ingestion/*`),
+ *   - attaches X-Parser-Token when `getParserToken` returns a value AND
+ *     the path is `/v1/constraints`, `/v1/ingestion/*`, or `/v1/blocks/*`
+ *     (NOT for `/v1/admin/*`).
  *
  * TanStack Query hooks live in `src/api/hooks.ts` (separate file) so the
  * pure client stays testable without React. This file tests the client only;
@@ -208,5 +211,174 @@ describe("ApiError", () => {
     expect(e.name).toBe("ApiError");
     expect(e.statusCode).toBe(400);
     expect(e.body).toEqual({ detail: "bad" });
+  });
+});
+
+/**
+ * Phase 13c post-closure patch — X-Parser-Token header attachment.
+ *
+ * The RAG backend gates `/v1/constraints`, `/v1/ingestion/notify`,
+ * `/v1/ingestion/status/{hash}`, and `/v1/blocks/{id}` behind the
+ * `X-Parser-Token` header (see `rag/ekrs_rag/security.py:require_parser_token`).
+ * Without it, those endpoints return 403. Operators paste the local
+ * PARSER_TOKEN into ConstraintsView Settings; the value lives in localStorage
+ * (`ekrs.parser_token`) and the typed client attaches it only to parser-gated
+ * paths.
+ *
+ * Negative tests:
+ *   - getParserToken not supplied → header never attached
+ *   - getParserToken returns null → header not attached
+ *   - path is /v1/admin/* → parser token NOT attached (admin uses X-Admin-Key)
+ *   - path is /healthz → parser token NOT attached (unauthenticated)
+ *
+ * Note: getBlock was added on the backend in Phase 10 Td.2 (HTTP route
+ * `GET /v1/blocks/{block_id}`) but a typed client method was not added.
+ * The path-prefix match is `/v1/blocks/` so a future getBlock will work
+ * without code changes here.
+ */
+describe("createApiClient — X-Parser-Token header", () => {
+  it("attaches X-Parser-Token on /v1/constraints when getParserToken returns a value", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({
+        branches: {},
+        primary_branch: null,
+        conflicts: [],
+        trace: [],
+        mode: "single",
+      }),
+    );
+    const client = createApiClient({
+      baseUrl: BASE,
+      getParserToken: () => "dev-local-token-32chars-aaaaaaaaaa",
+    });
+    await client.queryConstraints({ query: "x" });
+    expect(fetchSpy.mock.calls[0]?.[1]?.headers).toMatchObject({
+      "X-Parser-Token": "dev-local-token-32chars-aaaaaaaaaa",
+    });
+  });
+
+  it("attaches X-Parser-Token on /v1/ingestion/notify when getParserToken returns a value", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({ status: "success", chunks_indexed: 1, version: 1 }));
+    const client = createApiClient({
+      baseUrl: BASE,
+      getParserToken: () => "dev-local-token-32chars-aaaaaaaaaa",
+    });
+    await client.notifyIngest({
+      doc_hash: "demo_doc_001",
+      version: 1,
+      output_path: "/shared/demo/output",
+    });
+    expect(fetchSpy.mock.calls[0]?.[1]?.headers).toMatchObject({
+      "X-Parser-Token": "dev-local-token-32chars-aaaaaaaaaa",
+    });
+  });
+
+  it("attaches X-Parser-Token on /v1/ingestion/status/{hash} when getParserToken returns a value", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({ status: "success", chunks_indexed: 1, version: 1 }));
+    const client = createApiClient({
+      baseUrl: BASE,
+      getParserToken: () => "dev-local-token-32chars-aaaaaaaaaa",
+    });
+    await client.getIngestionStatus("doc_abc");
+    expect(fetchSpy.mock.calls[0]?.[1]?.headers).toMatchObject({
+      "X-Parser-Token": "dev-local-token-32chars-aaaaaaaaaa",
+    });
+  });
+
+  it("does NOT attach X-Parser-Token when getParserToken returns null", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({
+        branches: {},
+        primary_branch: null,
+        conflicts: [],
+        trace: [],
+        mode: "single",
+      }),
+    );
+    const client = createApiClient({ baseUrl: BASE, getParserToken: () => null });
+    await client.queryConstraints({ query: "x" });
+    const headers = fetchSpy.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    expect(headers["X-Parser-Token"]).toBeUndefined();
+  });
+
+  it("does NOT attach X-Parser-Token when getParserToken is not supplied", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({
+        branches: {},
+        primary_branch: null,
+        conflicts: [],
+        trace: [],
+        mode: "single",
+      }),
+    );
+    const client = createApiClient({ baseUrl: BASE });
+    await client.queryConstraints({ query: "x" });
+    const headers = fetchSpy.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    expect(headers["X-Parser-Token"]).toBeUndefined();
+  });
+
+  it("does NOT attach X-Parser-Token on /v1/admin/* even when getParserToken returns a value", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse({ status: "ok", cleared: 0, model_version: "x", cache_size_after: 0 }),
+      );
+    const client = createApiClient({
+      baseUrl: BASE,
+      getAdminKey: () => "admin-secret",
+      getParserToken: () => "parser-token",
+    });
+    await client.flushEmbeddingCache();
+    const headers = fetchSpy.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    expect(headers["X-Parser-Token"]).toBeUndefined();
+    expect(headers["X-Admin-Key"]).toBe("admin-secret");
+  });
+
+  it("does NOT attach X-Parser-Token on /healthz", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({ status: "ok" }));
+    const client = createApiClient({
+      baseUrl: BASE,
+      getParserToken: () => "parser-token",
+    });
+    await client.getHealth();
+    const headers = fetchSpy.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    expect(headers["X-Parser-Token"]).toBeUndefined();
+  });
+
+  it("attaches X-Admin-Key + X-Parser-Token on independent paths when both keys are supplied", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse({ status: "ok", cleared: 0, model_version: "x", cache_size_after: 0 }),
+      );
+    const client = createApiClient({
+      baseUrl: BASE,
+      getAdminKey: () => "admin-key",
+      getParserToken: () => "parser-token",
+    });
+    await client.flushEmbeddingCache();
+    const headers = fetchSpy.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    expect(headers["X-Admin-Key"]).toBe("admin-key");
+    expect(headers["X-Parser-Token"]).toBeUndefined();
+
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse({
+        branches: {},
+        primary_branch: null,
+        conflicts: [],
+        trace: [],
+        mode: "single",
+      }),
+    );
+    await client.queryConstraints({ query: "x" });
+    const headers2 = fetchSpy.mock.calls[1]?.[1]?.headers as Record<string, string>;
+    expect(headers2["X-Parser-Token"]).toBe("parser-token");
+    expect(headers2["X-Admin-Key"]).toBeUndefined();
   });
 });

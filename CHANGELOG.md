@@ -450,6 +450,66 @@ preserved.
   no behavior change — bridge.start() runs but no workers exist; bridge
   receives zero events and exits cleanly on stop.
 
+### [phase13c-patch] - 2026-08-26 — dev_ui_v2 X-Parser-Token wiring
+
+Post-closure incremental absorbed under `phase13c` (no new tag, follows
+the same discipline as Phase 10 T10b-3 + T10d Td.1/Td.2 and Phase 11
+post-closure follow-ups). Surfaces only via real-infra smoke (browser
+→ `make dev` UI); unit tests passed silently because the gap was the
+absence of a path-prefix matcher, not a broken one.
+
+**Added**:
+
+- `dev_ui_v2/src/lib/auth.ts` — `useParserToken` / `setParserToken` /
+  `clearParserToken` / `getParserToken` / `hasParserToken` plus
+  `PARSER_TOKEN_STORAGE_KEY = "ekrs.parser_token"` mirror the
+  admin-key pattern with a distinct storage key so admin operators and
+  parser-side operators don't collide.
+- `dev_ui_v2/src/api/client.ts` — `getParserToken?: () => string | null`
+  on `ApiClientOptions`; centralised `needsParserToken(path)` helper
+  attaches `X-Parser-Token` for `/v1/constraints`, `/v1/ingestion/*`,
+  `/v1/blocks/*` (so a future `getBlock` typed method inherits the
+  header with no further wiring).
+- `dev_ui_v2/src/views/ConstraintsView.tsx` — collapsible Settings panel
+  with token input + Save / Clear + status badge (`PARSER_TOKEN saved`
+  / `PARSER_TOKEN not set — 403`) so operators see the auth state
+  before submitting a query.
+- `dev_ui_v2/src/main.tsx` — wires `getParserToken` into the default
+  client.
+
+**Tests added** (22 new, all pass; 91/91 dev_ui_v2 suite, 0 regression):
+
+- `dev_ui_v2/src/lib/auth.test.ts` — 11 new tests (helpers + hook,
+  round-trip / clear / collision-with-admin-key / same-tab / cross-tab
+  storage event / unrelated-key ignore).
+- `dev_ui_v2/src/api/client.test.ts` — 8 new tests (positive
+  attachment on each parser-gated path, negative null-missing, negative
+  /v1/admin/* path, negative /healthz path, both-keys-set independence).
+
+**Fixed**:
+
+- dev_ui_v2 UI returning 403 on `POST /v1/constraints` (and the same
+  gap that would have affected `/v1/ingestion/notify`,
+  `/v1/ingestion/status/{hash}`, `/v1/blocks/{id}` — closed in one
+  pass via the centralised `needsParserToken` matcher). Backend has
+  required `X-Parser-Token` since Phase 4 (`security.py:
+  require_parser_token`); UI side never wired it.
+- Operator-experience gap: there was no UI surface to paste a
+  PARSER_TOKEN at all — operators had no recourse except curl. The
+  Settings panel + localStorage persistence + reactive hook closes
+  this for the dev UI.
+
+**Migration notes**:
+
+- No new dependency. No backend changes (the backend already required
+  `X-Parser-Token`). No DB / Qdrant / FTS schema change.
+- Operator action: open Settings → paste `PARSER_TOKEN` value from
+  `.env` → Save → run query. Token persists across reloads
+  (localStorage) and tabs (storage event).
+- Audit / metrics: no new event types. No Prometheus counter change.
+
+**Buglog**: `phase11-t11-2-parser-token-gap` (150th entry).
+
 ---
 
 ## [phase12] - 2026-08-15

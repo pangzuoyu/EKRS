@@ -15,7 +15,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App } from "./App";
 import { ApiClientProvider } from "./api/context";
 import { createApiClient } from "./api/client";
-import { getAdminKey } from "./lib/auth";
+import { getAdminKey, getParserToken } from "./lib/auth";
 import "./index.css";
 
 const queryClient = new QueryClient({
@@ -32,9 +32,14 @@ const queryClient = new QueryClient({
 
 // Default client points at the same origin — Vite dev proxy (vite.config.ts)
 // forwards /v1/* to the RAG service in dev; nginx reverse proxy in production.
+// `getParserToken` (Phase 13c post-closure patch) attaches X-Parser-Token to
+// /v1/constraints, /v1/ingestion/*, /v1/blocks/* paths. Without it, those
+// endpoints return 403 — the operator pastes the local PARSER_TOKEN into the
+// ConstraintsView Settings input.
 const apiClient = createApiClient({
   baseUrl: "",
   getAdminKey,
+  getParserToken,
 });
 
 const rootEl = document.getElementById("root");

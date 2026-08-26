@@ -2,8 +2,8 @@
  * Phase 11 T11-2 — typed fetch client.
  *
  * Pure (no React). Returns 5 methods that wrap `fetch`, attach headers
- * (X-Admin-Key only for `/v1/admin/*`), and validate the response with a
- * Zod schema before returning.
+ * (X-Admin-Key only for `/v1/admin/*`, X-Parser-Token only for parser-gated
+ * paths), and validate the response with a Zod schema before returning.
  *
  * Vite dev proxy: in dev mode, the host (`http://127.0.0.1:5173`) proxies
  * `/v1/*` to the RAG service (see `vite.config.ts → server.proxy`). So
@@ -12,6 +12,12 @@
  *
  * TanStack Query hooks live in `hooks.ts` (separate file). This split lets
  * the pure client be tested with `fetch` mocks without React.
+ *
+ * Phase 13c post-closure patch: X-Parser-Token attached to `/v1/constraints`,
+ * `/v1/ingestion/*`, `/v1/blocks/*` paths. Phase 11 T11-2 originally only
+ * attached X-Admin-Key for admin paths; this patch closes a Phase 11 ship
+ * gap where UI returned 403 on /v1/constraints (operator's local
+ * PARSER_TOKEN was never sent).
  */
 import type { z } from "zod";
 import {
@@ -41,6 +47,23 @@ export class ApiError extends Error {
 export interface ApiClientOptions {
   baseUrl: string;
   getAdminKey?: () => string | null;
+  /** Phase 13c post-closure patch: returns the operator's PARSER_TOKEN used
+   *  for `/v1/constraints`, `/v1/ingestion/*`, `/v1/blocks/*`. */
+  getParserToken?: () => string | null;
+}
+
+// Paths the backend gates behind `X-Parser-Token` (see
+// `rag/ekrs_rag/security.py:require_parser_token`). Centralised so future
+// additions (e.g. `/v1/blocks/{id}` typed methods) inherit the header
+// attachment without touching `request()`.
+function needsParserToken(path: string): boolean {
+  return (
+    path === "/v1/constraints" ||
+    path.startsWith("/v1/constraints/") ||
+    path === "/v1/ingestion/notify" ||
+    path.startsWith("/v1/ingestion/status/") ||
+    path.startsWith("/v1/blocks/")
+  );
 }
 
 // Use `z.input` for caller-facing arguments (lets the caller omit fields
@@ -58,7 +81,7 @@ export interface ApiClient {
 }
 
 export function createApiClient(opts: ApiClientOptions): ApiClient {
-  const { baseUrl, getAdminKey } = opts;
+  const { baseUrl, getAdminKey, getParserToken } = opts;
 
   async function request<S extends z.ZodTypeAny>(args: {
     path: string;
@@ -74,6 +97,12 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
       const key = getAdminKey();
       if (key !== null) {
         headers["X-Admin-Key"] = key;
+      }
+    }
+    if (getParserToken && needsParserToken(args.path)) {
+      const token = getParserToken();
+      if (token !== null) {
+        headers["X-Parser-Token"] = token;
       }
     }
     const res = await fetch(url, {

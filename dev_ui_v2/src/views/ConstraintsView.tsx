@@ -4,6 +4,16 @@
  * Form: query (textarea) + strict checkbox + top_k + trace_id
  * Submit → POST /v1/constraints via useQueryConstraints
  *
+ * Phase 13c post-closure patch — Settings panel for PARSER_TOKEN:
+ * the RAG backend gates `/v1/constraints`, `/v1/ingestion/notify`,
+ * `/v1/ingestion/status/{hash}`, `/v1/blocks/{id}` behind `X-Parser-Token`
+ * (see `rag/ekrs_rag/security.py:require_parser_token`). Without it, the
+ * backend returns 403. Operators paste the local PARSER_TOKEN into the
+ * Settings panel; the value lives in localStorage (`ekrs.parser_token`) and
+ * the typed client attaches the header automatically for parser-gated paths.
+ * The panel is collapsible so it doesn't dominate the form view, and the
+ * "Saved / not saved" badge lets the operator confirm before running a query.
+ *
  * Output sections:
  *   - Mode badge (single / multi_branch)
  *   - Primary branch (highlighted)
@@ -11,8 +21,14 @@
  *   - Branches JSON tree
  *   - Trace expander (collapsible debug)
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQueryConstraints } from "../api/hooks";
+import {
+  clearParserToken,
+  hasParserToken,
+  setParserToken,
+  useParserToken,
+} from "../lib/auth";
 
 export function ConstraintsView(): JSX.Element {
   const [query, setQuery] = useState("高温环境温度限制");
@@ -23,16 +39,126 @@ export function ConstraintsView(): JSX.Element {
 
   const mutation = useQueryConstraints();
 
+  // Phase 13c post-closure patch: parser-token Settings panel.
+  const storedToken = useParserToken();
+  const [tokenDraft, setTokenDraft] = useState(storedToken ?? "");
+  // Reset the input when the stored value changes from another tab / source.
+  useEffect(() => {
+    setTokenDraft(storedToken ?? "");
+  }, [storedToken]);
+  const [showSettings, setShowSettings] = useState(false);
+  const tokenSaved = hasParserToken();
+
   return (
     <div
       data-testid="constraints-view"
       style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}
     >
       <section>
-        <h3 style={{ margin: "0 0 0.5rem" }}>POST /v1/constraints</h3>
+        <div style={{ display: "flex", alignItems: "baseline", gap: "0.75rem" }}>
+          <h3 style={{ margin: "0 0 0.5rem" }}>POST /v1/constraints</h3>
+          <button
+            type="button"
+            onClick={() => setShowSettings((v) => !v)}
+            data-testid="settings-toggle"
+            style={{
+              padding: "0.2rem 0.6rem",
+              background: "transparent",
+              color: "#7d8590",
+              border: "1px solid #30363d",
+              borderRadius: "4px",
+              cursor: "pointer",
+              fontSize: "0.75rem",
+            }}
+          >
+            {showSettings ? "Hide settings" : "Settings"}
+          </button>
+          <span
+            data-testid="token-status"
+            style={{
+              fontSize: "0.7rem",
+              padding: "0.1rem 0.5rem",
+              borderRadius: "10px",
+              background: tokenSaved ? "#1f6feb" : "#3a1e1e",
+              color: tokenSaved ? "#e6edf3" : "#ff7b72",
+            }}
+          >
+            {tokenSaved ? "PARSER_TOKEN saved" : "PARSER_TOKEN not set — 403"}
+          </span>
+        </div>
         <p style={{ margin: "0 0 1rem", color: "#7d8590", fontSize: "0.875rem" }}>
           Three-gate pipeline: recall → extract → solve.
         </p>
+        {showSettings ? (
+          <div
+            data-testid="settings-panel"
+            style={{
+              padding: "0.75rem",
+              background: "#161b22",
+              border: "1px solid #30363d",
+              borderRadius: "6px",
+              marginBottom: "1rem",
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.5rem",
+              maxWidth: "640px",
+            }}
+          >
+            <label style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+              <span style={{ fontSize: "0.75rem", color: "#7d8590" }}>
+                PARSER_TOKEN (X-Parser-Token header; stays in browser localStorage)
+              </span>
+              <input
+                type="password"
+                value={tokenDraft}
+                onChange={(e) => setTokenDraft(e.target.value)}
+                placeholder="paste from .env (PARSER_TOKEN=...)"
+                style={{ fontFamily: "monospace", fontSize: "0.875rem" }}
+              />
+            </label>
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <button
+                type="button"
+                onClick={() => setParserToken(tokenDraft)}
+                disabled={tokenDraft.length === 0}
+                data-testid="token-save"
+                style={{
+                  padding: "0.3rem 0.8rem",
+                  background: "#238636",
+                  color: "white",
+                  border: "none",
+                  borderRadius: "4px",
+                  cursor: "pointer",
+                  fontSize: "0.875rem",
+                }}
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                onClick={() => clearParserToken()}
+                data-testid="token-clear"
+                style={{
+                  padding: "0.3rem 0.8rem",
+                  background: "#21262d",
+                  color: "#e6edf3",
+                  border: "1px solid #30363d",
+                  borderRadius: "4px",
+                  cursor: "pointer",
+                  fontSize: "0.875rem",
+                }}
+              >
+                Clear
+              </button>
+            </div>
+            <p style={{ margin: 0, fontSize: "0.7rem", color: "#7d8590" }}>
+              Dev-only. Without a token, the backend returns 403 for every
+              parser-gated endpoint. Value persists in localStorage
+              (<code>ekrs.parser_token</code>) and is sent only to the RAG
+              service via the same-origin proxy.
+            </p>
+          </div>
+        ) : null}
         <label
           style={{ display: "flex", flexDirection: "column", gap: "0.25rem", maxWidth: "640px" }}
         >
