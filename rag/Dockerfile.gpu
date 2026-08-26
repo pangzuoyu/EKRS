@@ -32,9 +32,26 @@ RUN pip install --no-cache-dir \
 # GPU 关键差异 (Phase 13b 部署):
 # torch==2.11.* 允许 patch 上游 bug fix (UQ-1 决议).
 # transformers 已在 rag deps 里, 无需重复 install.
-RUN pip install --no-cache-dir \
+#
+# ⚠️ DO NOT change this RUN. Earlier attempt to add pipefail + tail -20 broke
+# BuildKit cache reuse, forcing re-download of torch 2.5GB on slow network.
+# Subsequent verification step (below) catches the silent-empty-layer bug
+# introduced by `| tail -5` masking pip failures — when torch is missing,
+# `python -c "import torch"` raises ModuleNotFoundError → build fails loudly.
+RUN pip install --no-cache-dir --timeout 1800 \
         --index-url "${TORCH_INDEX_URL}" \
+        --extra-index-url https://pypi.nvidia.com \
         "torch==2.11.*" 2>&1 | tail -5
+
+# Phase 13c-C13: verify torch is actually installed (parent §204 audit isolation).
+# The line above's `| tail -5` can mask pip failures when the network drops
+# mid-download (Docker caches an empty ~4kB layer). This guard catches that
+# silent-fallback bug loudly — without it, self_check logs "CUDA not available"
+# and silently routes to CPU despite BGE_M3_GPU_ENABLED=true.
+RUN python -c "import torch; assert torch.__version__.startswith('2.11'), \
+    'torch version mismatch — expected 2.11.*'" && \
+    python -c "import torch; assert hasattr(torch.cuda, 'is_available'), \
+    'torch CUDA backend missing — torch package incomplete'"
 
 # bge-m3 tokenizer 强依赖 (2026-08-25 bench 发现: 缺这个包导致
 # AutoTokenizer.from_pretrained 抛 "You need to have sentencepiece or

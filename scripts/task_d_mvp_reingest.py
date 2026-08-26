@@ -201,6 +201,8 @@ def save_checkpoint(path: Path, state: dict) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--token-env", default="PARSER_TOKEN")
+    ap.add_argument("--corpus", type=Path, default=CORPUS_ROOT,
+                    help=f"Corpus root directory (default {CORPUS_ROOT})")
     ap.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
                     help=f"Max bundles to ingest (default {DEFAULT_LIMIT})")
     ap.add_argument("--min-blocks", type=int, default=0,
@@ -222,6 +224,8 @@ def main() -> int:
                     help="Resume checkpoint file (default /tmp/task_d_checkpoint.json)")
     ap.add_argument("--reset-checkpoint", action="store_true",
                     help="Ignore existing checkpoint and start fresh")
+    ap.add_argument("--skip-cp", action="store_true",
+                    help="Skip docker cp step (use when bind-mount already exposes bundles inside container at SHARED_STORAGE_PATH)")
     args = ap.parse_args()
 
     token = os.environ.get(args.token_env)
@@ -229,8 +233,9 @@ def main() -> int:
         print(f"FATAL: env var {args.token_env} not set", file=sys.stderr)
         return 2
 
-    bundles = pick_bundles(CORPUS_ROOT, args.limit, args.min_blocks, args.max_blocks)
-    print(f"Picked {len(bundles)} bundles (min={args.min_blocks}, max={args.max_blocks or '∞'}, sorted by size)")
+    bundles = pick_bundles(args.corpus, args.limit, args.min_blocks, args.max_blocks)
+    print(f"Picked {len(bundles)} bundles from {args.corpus} "
+          f"(min={args.min_blocks}, max={args.max_blocks or '∞'}, sorted by size)")
     if len(bundles) < args.limit:
         print(f"  NOTE: only {len(bundles)} bundles available in corpus (asked for {args.limit})")
 
@@ -248,13 +253,16 @@ def main() -> int:
     print(f"  Pending after checkpoint filter: {len(pending)}")
 
     # Step 1: docker cp each pending bundle into /parsed_lib/
-    print(f"\n=== Step 1: docker cp {len(pending)} bundles into {DOCKER_TARGET}:{SHARED_STORAGE_PATH}/ ===")
-    for b in pending:
-        ok, err = _docker_cp(b, SHARED_STORAGE_PATH)
-        if not ok:
-            print(f"  FAIL cp {b.name}: {err}", file=sys.stderr)
-            return 3
-    print(f"  All {len(pending)} bundles copied")
+    if args.skip_cp:
+        print(f"\n=== Step 1: SKIPPED (--skip-cp, bind-mount assumed to expose bundles at {SHARED_STORAGE_PATH}/) ===")
+    else:
+        print(f"\n=== Step 1: docker cp {len(pending)} bundles into {DOCKER_TARGET}:{SHARED_STORAGE_PATH}/ ===")
+        for b in pending:
+            ok, err = _docker_cp(b, SHARED_STORAGE_PATH)
+            if not ok:
+                print(f"  FAIL cp {b.name}: {err}", file=sys.stderr)
+                return 3
+        print(f"  All {len(pending)} bundles copied")
 
     # Step 2: send notification + poll status (with retry)
     print(f"\n=== Step 2: notify (v={args.version}) + poll ===")
