@@ -412,7 +412,7 @@ async def lifespan(app: FastAPI):
                 AuditEventBridge.export_addr(_audit_manager)
                 logger.info(
                     "audit_bridge: started (Manager addr exported to env %s)",
-                    AuditEventBridge._QUEUE_ADDR_ENV,
+                    _audit_bridge_mod._QUEUE_ADDR_ENV,
                 )
                 break
             except Exception as _bridge_err:
