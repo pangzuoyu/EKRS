@@ -335,7 +335,52 @@ EKRS 端承诺：
    - **预期综合通过率**: 取决于 EKRS chunker 对 R9/R10/R14 的容忍度, ≥90/96 = 93.7% 概率高
 4. **P3 image_classifier**: 15 bundle (mixed_type_large 13 + oversized_image_block 2) 单独立项, 不阻塞本文档
 
-### 9.6 §5 五个问题回复
+### 9.7 D2.5 fix — coalesce 真正接入 (2026-08-31)
+
+> **Trigger**: EKRS D5 灰度 ingest 报告 27/96 失败 (13 raw_chars_over_limit + 14 chunks_over_limit).
+> 11 个 `tiny_content_fragmented` bundle 的 5K-12K blocks 没被合并 = D2.4 coalesce 函数只定义未调用.
+
+**修复** (commit `661c973`):
+
+1. `parsers/block_assigner.py coalesce_dict_blocks()` 升级:
+   - 长 run (>800 chars 合并内容) 现在 emit **多个** coalesced blocks, 每个 ≤ 3072 chars (mirrors EKRS R9 raw 上限)
+   - 加 `_text_payload()` helper 处理 `content` 为 dict/str 两种形态
+   - coalesced block 现在带 `block_id` (UUID v4) + `doc_id` + `lineage` 字段, 满足 EKRS R2/R13
+   - `content` 现在是 `{raw, md_preview, structured: None}` (D2.5 契约修复)
+
+2. `scripts/repair_96_failed_bundles.py`:
+   - 在 per-block 修复 **之前** 调 coalesce (新 `--no-coalesce` flag 可关闭, A/B 对比)
+   - summary 加 `original_blocks` / `coalesced` / `coalesced_reduction` 字段
+
+**效果** (`/tmp/d25_repair_report.json`):
+
+| 指标 | 修前 | 修后 |
+|------|------|------|
+| 处理 bundle | 96 | 96 |
+| 总 block 减少 | 0 | **-79,960** |
+| coalesce 生效 bundle | 0 | **16** |
+| bundle 仍 >3000 blocks | 17 (含全部 11 fragmented) | **3** (image-dominated / mixed-types) |
+| R2 missing block_id | 7017 | **0** |
+| R13 invalid doc_id | 7017 | **0** |
+
+**剩余 3 个 chunks_over_limit 风险 bundle** (类型多样性, text-coalesce 帮不了):
+
+| doc_hash | 原始 → v1.1 | 类型分布 | 性质 |
+|----------|-------------|----------|------|
+| `db3664c7` | 3718 → 3718 | text=1196 image=1269 table=1253 | 纯 mixed-types, text run 不连续 |
+| `ad58aff5` | 14451 → 12735 | image=9624 text=3640 | oversized_image_block (OCR 漏召) |
+| `d7f974d0` | 5443 → 4253 | text=3118 image=1323 table=198 | mixed_type_large |
+
+这 3 个需要 P3 image_classifier (单独立项, 不阻塞本文档).
+
+### 9.8 建议 D5 重跑灰度
+
+请求 EKRS 端重新跑 D5 灰度 ingest 50 bundle, 验证:
+
+1. R8 single_cell_placeholder = 0 (已确认)
+2. R2/R4/R7/R12/R13 = 0 (新确认)
+3. chunks_over_limit 失败从 14 → ≤3 (image/mixed-type cases)
+4. 综合通过率目标: ≥90/96 = 93.7% (计划) → 预计 95%+ (D2.5 修复后)
 
 完整回复见 `/home/pangzy/code_project/EKRS/docs/solutions/integration-issues/ekrs-monolithic-tables-coord-reply-2026-08-27.md` (11.5K, 167 行)。要点:
 
@@ -344,6 +389,18 @@ EKRS 端承诺：
 - **Q3** metadata.caption: 已 ship (v1.1 schema D2.4)
 - **Q4** validate vs audit: validate 是 fail-fast (R8=0 必须), audit 是统计 (R9/R10/R14 趋势)
 - **Q5** 96 bundle 路径: `/mnt/disk/text/v1.1/` (R6 承诺), 不动原 `/mnt/disk/text/`
+
+### 9.7 双仓库当前状态 + 下一步动作 (2026-08-31)
+
+| Repo | Branch | Status |
+|------|--------|--------|
+| doc-to-md | feat-v11-schema | clean (b32eaa7 + ad9bdf2) |
+| EKRS | master | ahead 1 (82ba83c) |
+
+**下一步动作**:
+
+1. **EKRS 端**: 接收 82ba83c, 切换 `SHARED_STORAGE_PATH` 至 `/mnt/disk/text/v1.1` 跑 D5 50-bundle 灰度
+2. **doc-to-md 端**: D5 灰度结果回来后跑 `validate_against_ekrs_contract.py --strict` (R8=0 应为绿)
 
 ---
 
