@@ -1,6 +1,6 @@
 # Changelog
 
-> **DEPRECATED (2026-08-27)**: This file froze at phase6c-minor (2026-07-21). The canonical changelog is now the **top-level [`CHANGELOG.md`](../../CHANGELOG.md)** (1468+ lines, covers Phase 7 → Phase 13c-C13). External links from `README.md` and `CONTRIBUTING.md` still point here for backward compat — please update them when next touching those files.
+> **DEPRECATED (2026-08-27)**: This file froze at phase6c-minor (2026-07-21). The canonical changelog is now the **top-level [`CHANGELOG.md`](../../CHANGELOG.md)** (1468+ lines, covers Phase 7 → Phase 13c-C13). `README.md` and `CONTRIBUTING.md` already point at the top-level file as of 2026-08-27.
 
 > Phase-by-phase summary. Authoritative commit history is `git log`; this file explains the **shape** of each shipped phase for external collaborators.
 

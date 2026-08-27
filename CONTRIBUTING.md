@@ -95,16 +95,16 @@ Iron Rule R8 reminder: the **index layer may only filter illegal status**
 
 If the new field changes the embedding vector dimension (e.g., switching
 back from 1024d to 384d), see `docs/DEPLOYMENT.md` §Embedding dim migration
-and the rollback section of `docs/CHANGELOG.md` — **dim changes are NOT
-backward-compatible**.
+and the rollback section of `CHANGELOG.md` (top-level) — **dim changes are
+NOT backward-compatible**.
 
 ---
 
 ## Extension 3 — Adding a new audit event
 
-The audit event registry is **frozen at 16 schemas** (handbook §16). Adding
-a new event name is forbidden; broadening the semantics of an existing event
-is allowed.
+The audit event registry is **frozen at 24 schemas** (handbook §16; counted
+2026-08-27 from `rag/ekrs_rag/main.py:_EVENT_SCHEMAS`). Adding a new event
+name is forbidden; broadening the semantics of an existing event is allowed.
 
 If you need a new event:
 
@@ -158,5 +158,5 @@ Attribution is disabled globally in `~/.claude/settings.json`.
 - [ ] No `console.log` / debug prints (use `logger.debug` under `EKRS_DEBUG`)
 - [ ] No Iron Rule violations (see handbook §Iron Rules)
 - [ ] Audit event emitted for any new failure branch
-- [ ] Docs updated (README, USAGE, ARCHITECTURE, CHANGELOG as applicable)
+- [ ] Docs updated (README, USAGE, ARCHITECTURE, CHANGELOG (top-level) as applicable)
 - [ ] If behavior change: spec amendment in `ekrs-handbook.md`

@@ -158,9 +158,9 @@ Pure solver (R2) means replay by `trace_id` is deterministic — re-running the 
 ## Cross-cutting concerns
 
 - **Observability middleware** wraps every request: emits `endpoint_started`/`endpoint_completed`, tracks latency histogram.
-- **Audit** events: 16 schemas frozen (see `ekrs-handbook.md` §Audit). Phase 6B broadened `qdrant_write_failed` semantic to include any Qdrant op (`operation: read|write|delete`).
+- **Audit** events: 24 schemas frozen (see `ekrs-handbook.md` §Audit; counted 2026-08-27 from `rag/ekrs_rag/main.py:_EVENT_SCHEMAS`). Phase 6B broadened `qdrant_write_failed` semantic to include any Qdrant op (`operation: read|write|delete`); subsequent phases added `document_metadata_failed`, 3 callback best-effort events, `fts_consistency_drift`, `fts_synced` + `fts_searched` (Phase 10 T10a-2/7), `admission_rejected` + `task_timeout_killed` (Phase 13a T6), and `channel_switched` (Phase 13b T3).
 - **Replay**: `AuditIndex` byte-offset index into `audit.log` enables re-running a past trace without re-ingesting.
-- **Compensation**: at startup, `CompensationScanner` finds task rows older than 60s that haven't moved; retries or marks `compensation_retry` if `handler_is_wired` (currently `False` — stub logs warning).
+- **Compensation**: at startup, `CompensationScanner` finds task rows older than 60s that haven't moved; retries or marks `compensation_retry`. `handler_is_wired` defaults to `True` (Phase 7 T3 — was stub before). Schema carries `reingest_outcome` + `reingest_duration_ms` for forensic replay.
 
 ---
 

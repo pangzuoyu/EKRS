@@ -2,7 +2,7 @@
 
 > RAG service that extracts structured engineering constraints (temperature, pressure, material limits) from unstructured engineering documents (PDF/Word/DWG), computes parameter feasible ranges via a deterministic solver, and exposes scope-aware conflict detection via HTTP API.
 
-**Status:** 545 tests passing · coverage 86.75% · 8 phase tags shipped (`phase5` … `phase6c-minor`).
+**Status:** 946 tests passing · coverage ≥85% · 14 phase tags shipped (`phase5` … `phase13c-c13`). See `CHANGELOG.md` (top-level) for the phase-by-phase history; this README only summarizes the current state.
 
 ---
 
@@ -35,14 +35,17 @@ See `docs/USAGE.md` for end-to-end curl examples and
 ## What's inside
 
 ```
-shared/ekrs_shared/   Pydantic models · unit normalizer (affine temp conversion) · audit base
-rag/ekrs_rag/         FastAPI service: ingestion, retrieval (Qdrant), constraint solving, observability
-dev_ui/               Streamlit debug UI — placeholder only; **not enabled in Phase 6** (planned Phase 7). Do not rely on it.
-deployment/           docker-compose.yml, prometheus.yml, scrape config
-docs/                 Public-facing documentation (ARCHITECTURE, USAGE, CHANGELOG, DEPLOYMENT)
-docs/superpowers/     Internal design specs & implementation plans
-ekrs-handbook.md      Authoritative spec (Iron Rules, schema, audit events)
-CONTRIBUTING.md       How to extend the codebase (Hint patterns, Qdrant fields, audit events)
+shared/ekrs_shared/    Pydantic models · unit normalizer (affine temp conversion) · audit base
+rag/ekrs_rag/          FastAPI service: ingestion, retrieval (Qdrant), constraint solving, observability
+dev_ui/                DEPRECATED by Phase 11 T11-5; coexists 1 quarter as fallback. Use `dev_ui_v2/`.
+dev_ui_v2/             React SPA (Phase 11) — Vite 5 + TanStack Query + Zod + MSW; Docker + nginx proxy
+deployment/            docker-compose.yml, prometheus.yml, scrape config, GPU profile (Phase 13b)
+docs/                  Public-facing documentation (ARCHITECTURE, USAGE, DEPLOYMENT, SECRET-ROTATION)
+docs/coordinations/    Cross-team hand-offs (e.g. 2026-08-27 doc-to-md monolithic-tables contract)
+docs/superpowers/      Internal design specs & implementation plans
+ekrs-handbook.md       Authoritative spec (Iron Rules, schema, audit events)
+CONTRIBUTING.md        How to extend the codebase (Hint patterns, Qdrant fields, audit events)
+CHANGELOG.md           Canonical phase-by-phase history (top-level; `docs/CHANGELOG.md` is deprecated facade)
 ```
 
 **Pipeline** (Parser → RAG → Solver):
@@ -68,9 +71,17 @@ Full architecture diagram and module layout: `docs/ARCHITECTURE.md`.
 | `make test-cov` | Same with coverage report (gate ≥85%) |
 | `make lint` | flake8 + mypy on shared/ and rag/ |
 | `make heavy-test` | Run `@pytest.mark.heavy` (real bge-m3 load; requires Python 3.11) |
-| `make golden-test` | Run the 42-case golden set from `ekrs-handbook.md` §9.1 (regression gate) |
+| `make golden-test` | Run the 50-case golden set from `ekrs-handbook.md` §9.1 (regression gate; extended 42→50 in Phase 8 T8-4) |
+| `make test-e2e` | Playwright E2E suite against dev_ui_v2 (Phase 12-A) |
 | `make mock-notify` | Trigger a fake parser notification (against running stack) |
 | `make run-local` | Run uvicorn without Docker (needs qdrant+redis running locally) |
+| `make smoke-ingestion` | End-to-end happy-path smoke (Phase 8 T8-3b) |
+| `make build-rag-baseline` | Pin CPU rag image SHA into `deployment/rag-image.baseline.json` |
+| `make gpu-up` | Start GPU rag service on :8001 (Phase 13b); drift-checks against baseline |
+| `make gpu-down` | Stop GPU + restart CPU rag (precise teardown, Phase 13c-C13 fix) |
+| `make gpu-baseline` | Pin GPU rag image + torch + host bge-m3 SHA (Phase 13c-C13) |
+| `make gpu-acceptance` | T5.1 28-doc smoke bench inside rag-gpu container |
+| `make ingest` | GPU-first bulk corpus load (Phase 13c-C13); `ARGS="--limit N --version V"` |
 | `make clean` | Remove `__pycache__`, `*.pyc`, `.egg-info`, `.pytest_cache` |
 
 Heavy tests (real bge-m3 model load) are excluded by default and run only
@@ -88,41 +99,34 @@ make golden-test      # the 42-case regression set
 
 ## Phase status
 
-| Tag | Commit | Scope |
-|-----|--------|-------|
-| `phase5-observability` | — | Prometheus metrics · audit log · @audited / @metered decorators |
-| `phase5.5-d-metrics-exporter` | — | `/metrics` sidecar on :9090 · multiproc mode · docker-compose prometheus |
-| `phase5.5-e-retriever-depends` | — | Module globals → FastAPI `Depends` migration |
-| `phase5.5-f-audit-rotation` | — | `audit.log` 100 MB × 5 gzip backups · `/healthz` audit suppression · index rebuild on rollover |
-| `phase6a-spec-closure` | — | 9 vertical slices (X-Admin-Key, DocumentRepo, /trace, /calculate, soft fallback, golden 13→42, audit 2 fields, ENGINE_URL, 85% CI gate) |
-| `phase6b-retrieval-layer` | f692c42 | Vendor bge-m3 ONNX · EmbeddingService facade · QdrantManager rewrite (3 prod bug fixes B1/B2/B3) |
-| `phase6c-audit-emit` | c61e982 | `qdrant_write_failed` audit emit + non-fatal Qdrant init in lifespan |
-| `phase6c-minor` | e320717 | `delete_old_versions` filter fix · narrowed `except` · consolidated pip install |
+Summary only — for the authoritative phase-by-phase history (with commit hashes,
+test counts, and buglog entries), see **[`CHANGELOG.md`](CHANGELOG.md)** at the repo root.
+
+| Tag | Scope |
+|-----|-------|
+| `phase5-observability` | Prometheus metrics · audit log · @audited / @metered decorators |
+| `phase5.5-d-metrics-exporter` | `/metrics` sidecar on :9090 · multiproc mode · docker-compose prometheus |
+| `phase5.5-e-retriever-depends` | Module globals → FastAPI `Depends` migration |
+| `phase5.5-f-audit-rotation` | `audit.log` 100 MB × 5 gzip backups · `/healthz` audit suppression · index rebuild on rollover |
+| `phase6a-spec-closure` | 9 vertical slices (X-Admin-Key, DocumentRepo, /trace, /calculate, soft fallback, golden 13→42, audit 2 fields, ENGINE_URL, 85% CI gate) |
+| `phase6b-retrieval-layer` | Vendor bge-m3 ONNX · EmbeddingService facade · QdrantManager rewrite (3 prod bug fixes) |
+| `phase6c-audit-emit` | `qdrant_write_failed` audit emit + non-fatal Qdrant init in lifespan |
+| `phase6c-minor` | `delete_old_versions` filter fix · narrowed `except` · consolidated pip install |
+| `phase7` | Operational hardening: `qdrant_write_failed` integration test · 8 audit-event emits · CompensationHandler · Streamlit dev_ui T5 · LRU+TTL embedding cache + admin flush |
+| `phase8` | Production hardening: SlowAPI rate-limit · secret rotation SOP · vendored bge-m3 · smoke canary · chunker 10k perf baseline · golden 42→50 |
+| `phase9` | Stress tooling: `live_stress_60.py` 3 modes · 60/60 + 200/200 verified · NOTIFY_HTTP_TIMEOUT_S=60 |
+| `phase10` | FTS5 + RRF + short-circuit + MCP adapter (`fts_searched`/`fts_synced` audit, dual-closure pattern) |
+| `phase10.1` | T10b-1 chunker `_route_accumulated_group` refactor (do-not-move anchor) |
+| `phase11` | dev_ui_v2 React SPA scaffold + typed client + MSW + Docker + nginx + deprecate dev_ui/ |
+| `phase11.1` | T11-1 scaffold anchor (do-not-move) |
+| `phase12` | doc-to-md integration + E2E-in-CI + FTS DB path + ground-truth + column_header fix + Task C classifier + Task D 745-bundle + row-flush + v10 5-round convergence |
+| `phase12.1` | Task C classifier anchor (do-not-move) |
+| `phase13a` | GPU-encodable EncodingPool (pebble) + admission control + notification inline-coarse + audit event count 22→24 |
+| `phase13b` | torch FP16 bge-m3 GPU encoder + EncodingRouter + 30s probe + channel_switched audit + E2E acceptance |
+| `phase13c` | audit pipeline hardening + Literal FAILED fix + dynamic threshold + ops guide |
+| `phase13c-c13` | Post-closure corpus re-ingest (3809 bundles, 97.3% success) + GPU-first `make ingest` + GPU baseline pinning (no new tag; absorbed under phase13c) |
 
 Spec gaps between phases are tracked in `docs/superpowers/plans/` and `.superpowers/sdd/progress.md`.
-
----
-
-## Post-deploy tech debt (NOT Phase 8 scope)
-
-Items below are explicitly **out of scope for Phase 8** and remain on the
-backlog until the service has shipped to a real production environment.
-Each requires a new plan doc + decision cycle before re-scoping. The
-authoritative registry lives in `ekrs-handbook.md` §6.2.
-
-| Item | Why post-deploy only |
-|------|----------------------|
-| Qdrant index optimization (HNSW tuning, scalar/int8 quantization) | Needs real load profile — speculative before traffic exists |
-| Multi-region deployment / cross-region replication | Business demand not yet defined |
-| Large-scale embedding batch processing / async concurrency limits | Depends on the load profile above |
-| Service-to-service authn (mTLS / JWT) | Requires multi-service topology to justify |
-| `audit.log` remote archival | Needs sink choice (S3 / syslog / etc.); local rotation 100 MB × 5 covers short-term |
-| bge-m3 ONNX model vendor distribution (~2.1 GB) | Strategy decision (git lfs vs Docker layer vs CDN) needs production-image constraints |
-
-**Phase 8 picks the deployment-readiness items** (SlowAPI rate limit,
-secret rotation SOP, successful-ingestion smoke, golden set extension,
-chunker 10k perf test) — see `docs/superpowers/plans/` for the Phase 8
-scope doc when written.
 
 ---
 
@@ -135,15 +139,29 @@ Defined in `ekrs-handbook.md` §Iron Rules. Eight invariants govern ingestion, r
 ## Documentation map
 
 - `README.md` — this file; project facade
+- `CHANGELOG.md` — canonical phase-by-phase history + rollback strategy (top-level)
 - `ekrs-handbook.md` — authoritative spec (Iron Rules, schema, audit, deployment flow §7.4)
 - `CONTRIBUTING.md` — how to extend Hint patterns, Qdrant fields, audit events; PR check matrix
 - `docs/ARCHITECTURE.md` — module layout, data flow, embedded diagrams
 - `docs/USAGE.md` — external API reference with curl examples + troubleshooting runbooks
-- `docs/DEPLOYMENT.md` — Kubernetes / bare-metal production checklist, Ingress, dim migration
-- `docs/CHANGELOG.md` — phase-by-phase summary + rollback strategy
+- `docs/DEPLOYMENT.md` — Kubernetes / bare-metal production checklist, Ingress, dim migration, GPU baseline
+- `docs/SECRET-ROTATION.md` — PARSER_TOKEN / ADMIN_KEY rotation SOP (Phase 8 T8-2, 90-day cadence)
+- `docs/CHANGELOG.md` — DEPRECATED facade (frozen at phase6c-minor 2026-07-21); see top-level `CHANGELOG.md`
+- `docs/coordinations/` — cross-team hand-off documents (e.g. `2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md`)
 - `docs/superpowers/specs/` — per-phase design specs
 - `docs/superpowers/plans/` — per-phase implementation plans
 - `golden.md` — DEPRECATED, content merged into `ekrs-handbook.md` §9.1
+
+---
+
+## Post-deploy tech debt
+
+Items deferred past current ship state. Authoritative registry:
+[`CHANGELOG.md`](CHANGELOG.md) §"Pending post-deploy" sections (Phase 13a, 13b, 13c).
+No full registry is duplicated here — see the changelog for current status of:
+Qdrant HNSW tuning, multi-region replication, embedding batch concurrency at GPU scale,
+mTLS / JWT service-to-service authn, `audit.log` remote archival, cross-process audit
+wiring, GPU real-infra equivalence runs, and GT JSON fill.
 
 ---
 
