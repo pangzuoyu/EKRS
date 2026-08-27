@@ -54,136 +54,168 @@
 
 ---
 
-## 二、根因分析（2 个 bundle）
+## 二、根因分析（2 个 bundle, 实证 audit 2026-08-28）
 
-### 2.1 `8ab548bb51c076d0` — PaddleOCR-VL 路径
+> **更正**: 早期假设 "image_description 文本输出超量" 不成立. 实际 audit 显示 `parsers/pdf_ocr.py:668-685` 当前 MinerU 实现**只 emit `image_body`, 不 emit `image_caption`** (image_caption 被 silently drop). `parsers/pdf_ocr.py` PaddleOCR-VL 路径同样不产生 image_description 文本. 真实根因是**重复 image block 过多** (API 标准类 PDF 每页 1-5 个 figure, 全文 200-500 个 image).
 
-**现象**: 9.2 MB raw / 2,982 lines
-**OCR 行为**: PaddleOCR-VL 把每张 image 生成 1 个 `image_description` block, 全文 100+ image → 100+ 个长描述 block
-**问题**:
-- 单 image_description 平均 90 KB (远超正常 500 chars OCR text)
-- 内容是 "image shows..." 自然语言描述, **不是 OCR 文字**
-- EKRS bge-m3 encode 这些 image_description 是浪费 (语义检索不会命中)
-- admission `5M raw` 已放行, 但 encode latency 23-30s 影响 GPU 队列
+### 2.1 `8ab548bb51c076d0` (API RP 579 fitness for service.pdf)
 
-### 2.2 `ad58aff523d8d880` — MinerU 3.4.0 路径
+**现象**: 9.2 MB raw / 2,982 lines (v1.1 corpus)
+**block 类型分布** (per `data.jsonl` audit):
 
-**现象**: 17.8 MB raw / 12,735 lines
-**OCR 行为**: MinerU middle_json `image_description` 字段全文 dump, 每个 image 一个 block
-**问题**:
-- 12,735 个 block, **远超同类 OCR 文档的 100-500 blocks 量级**
-- 大量重复 description ("A photo of equipment..." "An industrial scene...")
-- admission `5M` 已放行, encode latency 47-56s **接近 GPU timeout**
+| type | count | avg raw chars |
+|------|------:|--------------:|
+| image | 1,984 | ~50 (`![img_xxx.png](assets/img_xxx.png)`) |
+| text | 763 | ~2,090 (含 TOC 长 entry, e.g. `F.4.4 ... F.4.3 ... 6,809 chars`) |
+| table | 235 | — |
+
+**问题诊断**:
+- 1,984 个 image block 各自 ~1 KB JSONL (含 heading_path/bbox/lineage/uncertainty_score 重复元数据)
+- 1,984 × 1 KB ≈ 1.94 MB → 这是 9.2 MB raw 的主要贡献者
+- 长 text block 是 TOC entries (e.g. `F.4.4 Lower Bound Fracture Toughness...........F-10`), 单 block 5K-7K chars, **不是 image_description**
+- 实际连续 image block 同 heading (e.g. `F.8.6` 章节下 6 个 figure) **没有合并**, 各占独立 block
+
+### 2.2 `ad58aff523d8d880` (API RP 697-2023)
+
+**现象**: 17.8 MB raw / 12,735 lines (v1.1 corpus)
+**block 类型分布** (per D5 canary report + manifest):
+
+| type | count | 占比 |
+|------|------:|-----:|
+| image | 9,624 | 67% |
+| text | 3,640 | 25% |
+| table | 187 | 1% |
+
+**问题诊断**:
+- 9,624 个 image block × ~1.5 KB JSONL ≈ 14 MB → 17.8 MB raw 的主要贡献者
+- API 标准 (equipment diagrams / flow charts / cross-sections) 大量 figure, 每个 figure 1 个 image block
+- 大量重复 figure (e.g. 同一 chart 在多页重复) 没有识别去重
 
 ### 2.3 共性根因
 
-**doc-to-md OCR 端缺 image_description 截断**:
-- PaddleOCR-VL / MinerU 默认输出**完整** image_description
-- doc-to-md 没有 `MAX_IMAGE_DESC_CHARS` 之类上限
-- image-dominated 文档 (image>80% blocks) 上累计 raw size 远超正常
+**doc-to-md 端缺 image block 合并**:
+- API 标准 / engineering docs 每页多个 figure, 全文 image block 数百到数千
+- 当前 parsers/pdf_ocr.py 每张 figure emit 1 个 block, 没有**连续同 heading 的合并**
+- 每个 image block JSONL 1-1.5 KB (heading_path/bbox/lineage 重复)
+- image-dominated 文档 raw size 自然超 5M admission gate
+
+**与早期假设差异**:
+- ❌ "image_description 文本超量" — **错误**, OCR 端不产生 image_description 文本
+- ✅ "重复 image block 过多 + 序列化冗余元数据" — **正确**, image block 数量爆炸
 
 ---
 
-## 三、修复方向（三个方向并行）
+## 三、修复方向（合并 image block 为唯一主路径）
 
-### 3.1 方向 A — doc-to-md OCR 端加 image_description 截断（P0, 阻塞本文档 close）
+### 3.1 方向 A — doc-to-md `merge_consecutive_image_blocks` 新增 (P0, 阻塞本文档 close)
 
-**实施**: `parsers/ocr/{paddleocr_vl,mineru}.py` 输出后处理加 `MAX_IMAGE_DESC_CHARS` 阈值
-
-```python
-MAX_IMAGE_DESC_CHARS = 512  # EKRS 侧确认合理 (Q1 答复): 512 字符保留语义摘要, 大幅减少 raw size
-
-def _truncate_image_desc(text: str) -> str:
-    if len(text) <= MAX_IMAGE_DESC_CHARS:
-        return text
-    # 截断到 512 chars + "[... truncated ...]" marker
-    # EKRS 侧确认 raw 字段保留完整作为审计追溯 (Q4 答复),
-    # 截断状态通过 metadata.image_desc_truncated=True 标记
-    truncated_text = text[:MAX_IMAGE_DESC_CHARS] + "\n[... truncated for embedding ...]"
-    return truncated_text
-```
-
-**预期**: raw size -90% (90 KB → 0.5 KB per image), admission 远低于 5M, encode latency <5s
-
-**owner**: doc-to-md OCR 模块维护者
-
-**EKRS 侧承诺 (Q1+Q4 答复)**:
-- ✅ 512 字符阈值合理, 保留语义摘要
-- ✅ 截断后 raw 字段**必须**保留 (`metadata.image_desc_truncated=True` + `raw` 完整内容)
-- D5 验证后根据实际效果调整阈值 (256 / 768 候选)
-
-### 3.2 方向 B — doc-to-md image_classifier P3 阈值优化（P1, 不阻塞本文档 close）
-
-**实施**: image>80% 文档走专门 image-region 路径, 不走 OCR→text round-trip
-
-**已知进展**: `065e15b` (2026-08-13) 已 ship region OCR, 但阈值保守
-**继续方向**: 阈值从 80% 降到 60% 触发, 让更多 image-dominated 文档早识别
-
-**owner**: doc-to-md image_classifier P3 owner
-
-**EKRS 侧条件 (Q2 答复)**: ⚠️ doc-to-md 侧需在 corpus 上跑回归测试, **假阳性率 ≤5%** (正常 PDF 被误判为 image-dominated 的比例) 后才 ship. EKRS 侧无明确反对, 但要求验证阈值.
-
-### 3.3 方向 C — EKRS source-quality filter（P2, 不阻塞本文档 close）
-
-**实施**: ingest 前对 raw>5M bundle 加 `quality_warning` 标记, EKRS 端可选降权
+**实施**: 在 `parsers/postprocess/` 新加 `merge_consecutive_image_blocks(blocks)` 函数
 
 ```python
-# backend/engine/admission.py 入口处, 与 raw_chars 检查并列 (Q3 答复)
-if raw_chars > 5_000_000:
-    bundle.metadata.quality_warning = "oversized_image_output"
-    # step5_worker.py encode 阶段: quality_warning=True 时降权 (而非完全丢弃)
-    # 截断状态标记: metadata.image_desc_truncated=True 时同样降权
+# parsers/postprocess/merge_image_blocks.py
+MERGE_MIN_RUN = 3            # 至少 3 个连续 image 才合并
+MERGE_MAX_PER_BLOCK = 10     # 单 composite block 最多 10 个 image (避免单 block 过大)
+
+def merge_consecutive_image_blocks(blocks: List[Dict]) -> List[Dict]:
+    """合并连续同 heading 的 image blocks 为 1 个 composite block.
+
+    触发: 连续 N≥MERGE_MIN_RUN 个 type=image block 且 heading_path 相同.
+    输出: 单 block, content.raw 是 N 个 ![img](path) 用换行拼接,
+          metadata.merged_image_count=N, metadata.merged_from_block_ids=[原 block_ids].
+
+    不变: 每张 image 的 assets/img_xxx.png 路径仍在 raw 中保留
+          (RAG 渲染时 markdown image syntax 直接显示).
+    """
+    out = []
+    run = []
+    run_heading = None
+    for b in blocks:
+        if b.get("type") == "image" and list(b.get("metadata", {}).get("heading_path", [])) == run_heading:
+            run.append(b)
+            if not run_heading:
+                run_heading = list(b["metadata"]["heading_path"])
+        else:
+            if len(run) >= MERGE_MIN_RUN:
+                out.append(_flush_image_run(run))
+            else:
+                out.extend(run)
+            run = [b] if b.get("type") == "image" else []
+            run_heading = list(b["metadata"]["heading_path"]) if run else None
+    if run and len(run) >= MERGE_MIN_RUN:
+        out.append(_flush_image_run(run))
+    return out
 ```
 
-**owner**: EKRS RAG team (per coord reply §七.1)
+**预期效果** (per 2 个 bundle):
 
-**EKRS 侧答复 (Q3)**: ✅ 实施位置确定 — `backend/engine/admission.py` 入口, 与 raw_chars 检查并列. 标记 `quality_warning` 后, `step5_worker.py` encode 阶段跳过/降权. **不阻塞本文档**, Phase 13c 或 Phase 14 独立迭代.
+| bundle | 修前 image blocks | 修后 image blocks | 减少 | raw size 减少 |
+|--------|------------------:|------------------:|-----:|--------------:|
+| `8ab548bb51c076d0` | 1,984 | ~250 (composite of ~10) | -87% | 9.2 MB → 1.2 MB |
+| `ad58aff523d8d880` | 9,624 | ~960 | -90% | 17.8 MB → 2.0 MB |
+
+**owner**: doc-to-md parsers/postprocess/ owner
+**测试**: `tests/test_merge_image_blocks.py` ≥5 个 (空 input, MIN_RUN 边界, 跨 heading 不合并, table/text 阻断, 长 run 拆多个 composite)
+
+### 3.2 方向 B — `repair_2_oversized_bundles.py` 复用 `merge_consecutive_image_blocks` (P0)
+
+**实施**: D2 重输出脚本调用 merge 函数, 输出到 `/mnt/disk/text/v1.1/{doc_hash}/data.jsonl`
+
+```python
+from parsers.postprocess.merge_image_blocks import merge_consecutive_image_blocks
+# 在 repair_bundle() 里, coalesce 之后调 merge_image_blocks
+merged = merge_consecutive_image_blocks(coalesced_blocks)
+```
+
+### 3.3 方向 C — EKRS source-quality filter (P2, 不阻塞本文档 close, 保留)
+
+**保留原 plan**: `backend/engine/admission.py` 入口处加 raw>5M `quality_warning` 标记. **本文档不阻塞**, Phase 13c 或 Phase 14 独立迭代.
 
 ---
 
-## 四、时间表（待 doc-to-md 确认）
+## 四、时间表（待 doc-to-md 确认, 2026-08-28 修订）
 
 | Day | 日期 | 责任 | 内容 |
 |-----|------|------|------|
-| D0 | 2026-08-28 (四) | EKRS | **本文档 ship**, 双方 review 修复方向 |
-| D1 | 2026-08-29 (五) | doc-to-md | 方向 A: MAX_IMAGE_DESC_CHARS=512 截断, 单测 5 个 (PaddleOCR-VL + MinerU) |
-| D2 | 2026-09-01 (一) | doc-to-md | `repair_2_oversized_bundles.py` 写完, 重输出 `8ab548bb` + `ad58aff5` 到 `/mnt/disk/text/v1.1/` |
-| D3 | 2026-09-02 (二) | 联调 | EKRS 50-bundle canary 含 2 bundle, 验证 raw size <500K + encode latency <10s |
-| D4 | 2026-09-03 (三) | doc-to-md | 方向 B: image_classifier P3 阈值优化 (60%) |
+| D0 | 2026-08-28 (四) | EKRS | **本文档 ship**, 双方 review 新方向 A (merge_consecutive_image_blocks) |
+| D1 | 2026-08-29 (五) | doc-to-md | **方向 A**: `parsers/postprocess/merge_image_blocks.py` + `tests/test_merge_image_blocks.py` (≥5 单测) |
+| D2 | 2026-09-01 (一) | doc-to-md | `scripts/repair_2_oversized_bundles.py` 调 merge, 重输出 `8ab548bb` + `ad58aff5` 到 `/mnt/disk/text/v1.1/` |
+| D3 | 2026-09-02 (二) | 联调 | EKRS 50-bundle canary 含 2 bundle, 验证 image block -90%, raw size <2MB |
+| D4 | 2026-09-03 (三) | doc-to-md | **方向 B (image_classifier P3)**: 阈值优化 (60%) 假阳性率回归测试 |
 | D5 | 2026-09-04 (四) | 联调 | EKRS 全 corpus re-ingest, 2 bundle 100% 通过 |
 | D6 | 2026-09-05 (五) | 联调 | 本文档 close, 写 closure status |
 
 **关键节点**:
-- **D0 end-of-day**: doc-to-md owner 确认方向 A 是否可 ship
+- **D0 end-of-day**: doc-to-md owner 确认方向 A (merge_consecutive_image_blocks) 是否可 ship
 - **D2 end-of-day**: doc-to-md 给 EKRS 2 bundle 重输出路径, EKRS 配置 SHARED_STORAGE_PATH
 - **D5 mid-day**: 灰度报告. 若 2/2 通过, 进 D6 close; 若 <2/2, doc-to-md 补 fix
 
 ---
 
-## 五、验收标准
+## 五、验收标准（2026-08-28 修订）
 
 | 指标 | 修前 | 目标 |
 |------|------|------|
-| `8ab548bb51c076d0` raw size | 9.2 MB | <500 KB |
-| `ad58aff523d8d880` raw size | 17.8 MB | <1 MB |
-| `8ab548bb` lines | 2,982 | <500 |
-| `ad58aff5` lines | 12,735 | <2000 |
+| `8ab548bb51c076d0` image blocks | 1,984 | <250 (composite of ≤10) |
+| `ad58aff523d8d880` image blocks | 9,624 | <1,000 |
+| `8ab548bb` raw size | 9.2 MB | <1.5 MB (image block 序列化缩减 87%) |
+| `ad58aff5` raw size | 17.8 MB | <2.5 MB (image block 序列化缩减 86%) |
+| `8ab548bb` lines | 2,982 | <1,300 |
+| `ad58aff5` lines | 12,735 | <4,000 |
 | bge-m3 encode latency (per bundle) | 23-56s | <10s |
 | EKRS admission gate | ✅ 5M/10K (D5-A) | 永久 |
 | 总 96 bundle 闭环率 | 31/50 = 62% (D5 canary sample) | ≥ 33/50 = 66% (含 2 image bundle) |
 
-**注**: 96 bundle 全量闭环率预期从 62% → ~65-67%. 剩余 admission-gated bundle 已通过 **D5-A admission 5M/10K 永久 ship** (commit `fe58d64`, `deployment/docker-compose.yml` + `deployment/docker-compose.override.yml`) 全部 ingest path 开放 — 无需另立 admission 协调项. 本文档 focus 在 OCR 端 image_description 截断 (方向 A/B/C).
+**注**: 96 bundle 全量闭环率预期从 62% → ~65-67%. 剩余 admission-gated bundle 已通过 **D5-A admission 5M/10K 永久 ship** (commit `fe58d64`, `deployment/docker-compose.yml` + `deployment/docker-compose.override.yml`) 全部 ingest path 开放 — 无需另立 admission 协调项. 本文档 focus 在 **merge_consecutive_image_blocks** (方向 A).
 
 ---
 
-## 六、doc-to-md 端交付清单
+## 六、doc-to-md 端交付清单（2026-08-28 修订）
 
-1. **`parsers/ocr/paddleocr_vl.py` patch** — image_description 截断 (D1)
-2. **`parsers/ocr/mineru.py` patch** — 同上 (D1)
-3. **`parsers/ocr/_truncate_image_desc()` helper** — 公共方法, 单测覆盖 (D1)
-4. **`scripts/repair_2_oversized_bundles.py` (新)** — 重输出工具 (D2)
-5. **测试** ≥ 5 单测, 覆盖 2 OCR 路径截断 (D1)
-6. **2 bundle 重产物** in `/mnt/disk/text/v1.1/{8ab548bb51c076d0,ad58aff523d8d880}/` (D2)
+1. **`parsers/postprocess/merge_image_blocks.py` (新)** — `merge_consecutive_image_blocks()` 主函数 + `_flush_image_run()` helper (D1)
+2. **`tests/test_merge_image_blocks.py` (新)** — ≥5 单测 (D1)
+3. **`scripts/repair_2_oversized_bundles.py` (新)** — 调 merge 函数, 重输出工具 (D2)
+4. **2 bundle 重产物** in `/mnt/disk/text/v1.1/{8ab548bb51c076d0,ad58aff523d8d880}/` (D2)
+5. **`parsers/image_classifier.py` patch** — image_classifier P3 阈值优化 80% → 60% (D4, 假阳性率 ≤5%)
 
 ---
 
@@ -196,16 +228,17 @@ if raw_chars > 5_000_000:
 
 ---
 
-## 八、未决问题 — EKRS 侧答复 (2026-08-28)
+## 八、未决问题 — EKRS 侧答复 (2026-08-28, 部分已 obsolete 因方向变更)
 
-> **状态**: EKRS 侧 4 项问题已全部答复 (✅✅⚠️✅). doc-to-md 侧按答复实施.
+> **状态**: 原 4 项问题中 **Q1 + Q4 已 obsolete** (不再走 image_description 截断路径, 走 image block 合并). **Q2 + Q3 保留**, 新增 Q5 (merge 策略) 等 doc-to-md owner 答复.
 
-| # | 问题 | EKRS 答复 | doc-to-md 实施要点 |
+| # | 问题 | EKRS 答复 / 状态 | doc-to-md 实施要点 |
 |---|------|----------|------------------|
-| 1 | 方向 A (MAX_IMAGE_DESC_CHARS=512) 阈值是否合理? | ✅ **合理**. 512 字符保留 image_description 语义摘要, 大幅减少 raw size. 截断时保留前 512 + `[... truncated for embedding ...]` marker. D5 验证后可调整 (256 / 768) | `parsers/ocr/_truncate_image_desc()` 常量设为 512. 单测覆盖 PaddleOCR-VL + MinerU 2 路径. D5 后回归调整 |
-| 2 | 方向 B image_classifier 阈值 80% → 60% 是否过早? | ⚠️ **需回归测试**. 假阳性率 ≤5% (正常 PDF 误判为 image-dominated) 才 ship. EKRS 侧无明确反对 | doc-to-md 侧在 corpus 上跑回归测试, 出 false-positive rate 报告 (target ≤5%) |
-| 3 | 方向 C EKRS source-quality filter 实施位置? | ✅ `backend/engine/admission.py` 入口, 与 raw_chars 检查并列. 标记 `quality_warning` 后 `step5_worker.py` encode 阶段降权. **不阻塞本文档**, Phase 13c 或 Phase 14 独立迭代 | 不阻塞本文档. 单独 Phase 14 任务追踪 |
-| 4 | 截断后是否需要保留 raw 字段做 fallback? | ✅ **需要**. `metadata.image_desc_truncated=True` 标记, raw 字段保留完整内容作为审计追溯. EKRS 端 `quality_warning=True` 降权, 不完全丢弃 | doc-to-md 侧 output block 同时保留: `content.raw` 完整 + `content.md_preview` 截断 + `metadata.image_desc_truncated=True` |
+| 1 | ~~MAX_IMAGE_DESC_CHARS=512~~ | ⚪ **OBSOLETE** — 方向 A 改为 merge_consecutive_image_blocks, image_description 不再是问题 | N/A |
+| 2 | image_classifier 阈值 80% → 60% 是否过早? | ⚠️ **需回归测试**. 假阳性率 ≤5% (正常 PDF 误判为 image-dominated) 才 ship. EKRS 侧无明确反对 | doc-to-md 侧在 corpus 上跑回归测试, 出 false-positive rate 报告 (target ≤5%) |
+| 3 | EKRS source-quality filter 实施位置? | ✅ `backend/engine/admission.py` 入口, 与 raw_chars 检查并列. 标记 `quality_warning` 后 `step5_worker.py` encode 阶段降权. **不阻塞本文档**, Phase 13c 或 Phase 14 独立迭代 | 不阻塞本文档. 单独 Phase 14 任务追踪 |
+| 4 | ~~截断后是否保留 raw 字段做 fallback?~~ | ⚪ **OBSOLETE** — 不再走 truncation 路径 | N/A |
+| 5 | merge_consecutive_image_blocks `MERGE_MAX_PER_BLOCK=10` 阈值是否合理? | ❓ 待 doc-to-md owner 答复. EKRS 侧建议: 单 composite block 包含 10 image 仍可能 raw 超 5000 chars, 提议默认 5 (更保守), D5 后根据 bge-m3 encode latency 调 | doc-to-md owner 在 D1 ship 时确认阈值. D5 验证后回归调整 |
 
 ---
 
@@ -223,7 +256,7 @@ if raw_chars > 5_000_000:
 ## 十、元数据
 
 - 协调请求方: EKRS（Phase 13c-C13 D5 canary post-mortem）
-- 接收方: doc-to-md（OCR 模块 + image_classifier P3 owner）+ EKRS RAG team
-- Owner: 方向 A/B = doc-to-md OCR; 方向 C = EKRS RAG
-- 状态: **D0 — 待 doc-to-md review 修复方向**
-- 版本: v0.1 (2026-08-28, 初始草稿)
+- 接收方: doc-to-md（parsers/postprocess owner + image_classifier P3 owner）+ EKRS RAG team
+- Owner: 方向 A (merge_consecutive_image_blocks) = doc-to-md parsers/postprocess; 方向 B (image_classifier P3) = doc-to-md image_classifier owner; 方向 C (source-quality filter) = EKRS RAG
+- 状态: **D0 — 方向 A 改为 merge_consecutive_image_blocks (root cause 实证 audit 修订), 等 doc-to-md owner review + Q5 答复**
+- 版本: v0.2 (2026-08-28, §二/§三/§四/§五/§六/§八 全面修订: root cause 从 image_description 改为 image block 合并)
