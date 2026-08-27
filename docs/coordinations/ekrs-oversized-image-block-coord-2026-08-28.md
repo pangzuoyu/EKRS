@@ -3,7 +3,7 @@
 > **Audience**: doc-to-md 团队（OCR 模块 + image_classifier P3 owner）+ EKRS（admission + source-quality filter owner）
 > **Author**: EKRS（Phase 13c-C13 D5 canary post-mortem）
 > **Date**: 2026-08-28
-> **Upstream**: [`docs/coordinations/2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md`](2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md) §9.8.4 + [`docs/solutions/integration-issues/ekrs-monolithic-tables-coord-reply-2026-08-27.md`](../solutions/integration-issues/ekrs-monolithic-tables-coord-reply-2026-08-27.md) §五.Q5
+> **Upstream**: [`docs/coordinations/2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md`](2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md) §9.9 + [`docs/solutions/integration-issues/ekrs-monolithic-tables-coord-reply-2026-08-27.md`](../solutions/integration-issues/ekrs-monolithic-tables-coord-reply-2026-08-27.md) §五.Q5
 > **Splits from**: monolithic-tables coord §2.4 (oversized_image_block → 单独立项, 2026-08-27 EKRS 同意)
 > **Failure data**: `deployment/phase13c-d5-canary-report.json` entries `8ab548bb51c076d0` + `ad58aff523d8d880`
 
@@ -11,7 +11,7 @@
 
 ## TL;DR
 
-`oversized_image_block` 2 个 bundle 的失败根因**不在** monolithic-tables coord 文档的 §3 输出契约内，而是 doc-to-md OCR 端在 image-dominated 文档上输出**远超预期的 image_description 文本**（9.2 MB / 17.8 MB），导致 EKRS admission gate `raw_chars > 5M` 永久调高后虽然放行（D5-A），但 bge-m3 encode latency 飙到 56.5s/document + chunk 数 7117 = bge-m3 GPU 队列堵塞风险。
+`oversized_image_block` 2 个 bundle 的失败根因**不在** monolithic-tables coord 文档的 §3 输出契约内，而是 doc-to-md OCR 端在 image-dominated 文档上输出**远超预期的 image_description 文本**（9.2 MB / 17.8 MB）。**D5-A 已 ship（2026-08-28 admission 永久 5M/10K, compose 改动在 `fe58d64`）**, EKRS admission 已放行 2 bundle；D5-GPU bypass canary 验证 2 bundle 100% PASS @ 7-10s/单 bundle, 但 chunk 数 1518/7117 仍让 encode latency 高于同类 (8-44s vs 7s avg for ≤500-chunk)。根因在 OCR 端输出超量, 不是 admission 或 channel.
 
 **核心结论**:
 
@@ -21,8 +21,8 @@
 | lines | 2,982 | 12,735 |
 | 类别判断 | image-dominated (image>80% blocks) | 同上 |
 | OCR 路径 | PaddleOCR-VL | MinerU 3.4.0 |
-| 失败 gate | D5 前 raw>1M, D5-A (5M) 后✅ admission | D5 前 raw>1M, D5-A 后✅ admission |
-| **遗留问题** | bge-m3 encode latency 23-30s, image_description 大量噪声 | 同上, 更严重 |
+| 失败 gate | D5 前 raw>1M, D5-A (5M) ship 后✅ admission + GPU 100% PASS | D5 前 raw>1M, D5-A 后✅ admission + GPU 100% PASS |
+| **遗留问题** | bge-m3 encode latency 23-30s, image_description 大量噪声 | 同上, 更严重 (47-56s) |
 
 **修复方向**（与本文档契约**正交**, 单独立项追踪）:
 
@@ -110,7 +110,7 @@ def _truncate_image_desc(text: str) -> str:
 **已知进展**: `065e15b` (2026-08-13) 已 ship region OCR, 但阈值保守
 **继续方向**: 阈值从 80% 降到 60% 触发, 让更多 image-dominated 文档早识别
 
-**owner**: doc-to-md image_classifier P3 owner (per EKRS §9.8.5.2)
+**owner**: doc-to-md image_classifier P3 owner
 
 ### 3.3 方向 C — EKRS source-quality filter（P2, 不阻塞本文档 close）
 
@@ -157,7 +157,7 @@ if raw_chars > 5_000_000:
 | EKRS admission gate | ✅ 5M/10K (D5-A) | 永久 |
 | 总 96 bundle 闭环率 | 31/50 = 62% (D5 canary sample) | ≥ 33/50 = 66% (含 2 image bundle) |
 
-**注**: 96 bundle 全量闭环率预期从 62% → ~65-67%, 剩余 admission-gated bundle 由 [`ekrs-admission-gated-bundles-coord-2026-08-28.md`](ekrs-admission-gated-bundles-coord-2026-08-28.md) 跟踪 (另立).
+**注**: 96 bundle 全量闭环率预期从 62% → ~65-67%. 剩余 admission-gated bundle 已通过 **D5-A admission 5M/10K 永久 ship** (commit `fe58d64`, `deployment/docker-compose.yml` + `deployment/docker-compose.override.yml`) 全部 ingest path 开放 — 无需另立 admission 协调项. 本文档 focus 在 OCR 端 image_description 截断 (方向 A/B/C).
 
 ---
 
@@ -194,7 +194,7 @@ if raw_chars > 5_000_000:
 
 ## 九、资源索引
 
-- 上游协调: [`2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md`](2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md) §9.8.4 + §9.8.5
+- 上游协调: [`2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md`](2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md) §9.9 (D5-A SHIPPED)
 - 协调答复: [`../solutions/integration-issues/ekrs-monolithic-tables-coord-reply-2026-08-27.md`](../solutions/integration-issues/ekrs-monolithic-tables-coord-reply-2026-08-27.md) §五.Q5
 - D5 canary 报告: `deployment/phase13c-d5-canary-report.json` (entries `8ab548bb51c076d0`, `ad58aff523d8d880`)
 - D5-GPU bypass 报告: `deployment/phase13c-d5-gpu-bypass-15-report.json` (含 2 bundle @ 5M/10K)
