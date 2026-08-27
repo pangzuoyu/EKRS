@@ -1,4 +1,4 @@
-.PHONY: dev test lint mock-notify install clean heavy-test golden-test test-e2e test-e2e-ci t5-acceptance gpu-up gpu-down gpu-acceptance ingest
+.PHONY: dev test lint mock-notify install clean heavy-test golden-test test-e2e test-e2e-ci t5-acceptance gpu-up gpu-down gpu-acceptance gpu-baseline ingest
 
 PYTHON ?= python3
 PIP ?= pip
@@ -108,6 +108,21 @@ gpu-up:
 			echo "rag-gpu healthy"; break; \
 		fi; sleep 2; \
 	done
+	@echo "=== GPU baseline drift check ==="
+	@if [ -f deployment/rag-gpu-image.baseline.json ]; then \
+		EXPECTED=$$(jq -r '.image_sha256' deployment/rag-gpu-image.baseline.json); \
+		ACTUAL=$$(docker inspect deployment-rag-gpu-1 --format '{{.Image}}' 2>/dev/null | sed 's/sha256://'); \
+		if [ -n "$$EXPECTED" ] && [ -n "$$ACTUAL" ] && [ "$$EXPECTED" != "$$ACTUAL" ]; then \
+			echo "WARNING: GPU image SHA drift detected!"; \
+			echo "  baseline: $$EXPECTED"; \
+			echo "  running:  $$ACTUAL"; \
+			echo "  → run 'make gpu-baseline' to refresh, or investigate rag/Dockerfile.gpu / bge-m3 host dir changes"; \
+		else \
+			echo "GPU image SHA matches baseline ($$(echo "$$EXPECTED" | cut -c1-12))"; \
+		fi; \
+	else \
+		echo "No baseline found. Run 'make gpu-baseline' to pin current image."; \
+	fi
 
 gpu-down:
 	# Phase 13c-C13 fix: `docker compose --profile gpu down` brings down
@@ -170,3 +185,13 @@ gpu-acceptance:
 		             --qdrant-url http://qdrant:6333 \
 		             --token $${PARSER_TOKEN:-change-me-to-a-secure-random-string-32chars} \
 		             --admin-key $${ADMIN_KEY:-dev-admin-key-32chars-aaaaaaaaaa}'
+
+# Phase 13c-C13 GPU 固化 — pin running GPU image + torch version +
+# host bind-mount model dir SHA into deployment/rag-gpu-image.baseline.json.
+# Mirrors build-rag-baseline (CPU, Phase 8 T8-3a). Run after any change to:
+#   - rag/Dockerfile.gpu
+#   - /home/pangzy/code_project/bge-m3/ (host bind-mount — PoC mode)
+#   - torch version expectation (currently 2.11.* per Dockerfile.gpu:44)
+# After refresh, `make gpu-up` drift check will match again.
+gpu-baseline:
+	@bash scripts/build_rag_gpu_baseline.sh

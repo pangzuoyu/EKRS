@@ -1,0 +1,18 @@
+{
+  "_comment": "Phase 13c-C13 GPU baseline: locked-down reference image for the rag-gpu service. Regenerate with scripts/build_rag_gpu_baseline.sh after ANY change to rag/Dockerfile.gpu, /home/pangzy/code_project/bge-m3/ (host bind-mount), or torch version. make gpu-up compares the running image SHA to this manifest and warns on drift.",
+  "tag": "gpu-b29f216386f7-bbb9df3b02d7",
+  "image_sha256": "a0f020c8385a44222642ed5c12f08afe3af55cc2bcf5916baf955cc41848571c",
+  "image_size_bytes": 5680414735,
+  "host_bge_m3_sha256_prefix": "b29f216386f7",
+  "host_sha_manifest_path": "/home/pangzy/code_project/bge-m3/bge-m3.sha256",
+  "dockerfile_sha256_prefix": "bbb9df3b02d7",
+  "torch_version_actual": "2.11.0+cu130",
+  "torch_version_expected_prefix": "2.11",
+  "build_args": {
+    "PYTHON_BASE_IMAGE": "docker.m.daocloud.io/library/python:3.11-slim",
+    "PIP_INDEX_URL": "https://mirrors.aliyun.com/pypi/simple/",
+    "TORCH_INDEX_URL": "https://download.pytorch.org/whl/cu130"
+  },
+  "captured_at_utc": "2026-08-27T02:44:18Z",
+  "verify_command": "docker exec deployment-rag-gpu-1 python -c 'import torch; print(torch.__version__)'"
+}
