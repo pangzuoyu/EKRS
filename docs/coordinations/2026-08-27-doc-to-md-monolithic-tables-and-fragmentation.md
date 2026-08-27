@@ -287,10 +287,75 @@ EKRS 端承诺：
 
 ---
 
+## 9. doc-to-md Status Update (2026-08-31)
+
+> **Author**: doc-to-md 团队
+> **Branch**: `feat-v11-schema`（worktree 隔离）
+> **Commits**: `b32eaa7` (v1.1 schema patch) + `ad9bdf2` (D1 audit script)
+> **Plan**: `/home/pangzy/code_project/doc-to-md/docs/plans/2026-08-27-001-feat-v11-schema-monolithic-tables-plan.md`
+
+### 9.1 D1-D4 已 ship
+
+| Day | 任务 | 状态 | 提交 / 验证 |
+|-----|------|------|-------------|
+| D1 | 96 bundle root cause lockup | ✓ | audit script 确认 docx merged-cell 76% (vs 原假设 pdf markdown pipe 5%) |
+| D2 | parser patch (P0+P1+P2) | ✓ | docx_parser + block_assigner + utils + schema 4 文件改动, 23 单测 |
+| D3 | `validate_against_ekrs_contract.py` | ✓ | 15-line spec, 22 单测, --strict 模式 fail-fast on R8 |
+| D4 | `repair_96_failed_bundles.py` + v1.1 commit | ✓ | 96/96 bundle 修复到 v1.1, 69624 block, 18 单测 |
+
+### 9.2 修复路径交付
+
+- **Output path**: `/mnt/disk/text/v1.1/{doc_hash}/data.jsonl`（R6 承诺，不动 in-place）
+- **Validator**: `python3 scripts/validate_against_ekrs_contract.py --output-dir /mnt/disk/text/v1.1`
+- **Repair script**: `python3 scripts/repair_96_failed_bundles.py --source-dir /mnt/disk/text --v11-output-dir /mnt/disk/text/v1.1`
+
+### 9.3 Contract 修复状态 (validator 实测)
+
+| Rule | 修复前 | v1.1 路径 | 说明 |
+|------|--------|-----------|------|
+| **R4** raw_not_str | 隐式存在 | **0** ✓ | O-7 fix 复用 `serialize_structured_to_raw` |
+| **R7** structured_empty_list | 隐式存在 | **0** ✓ | D2.3 markdown_pipe_to_structured 返 None |
+| **R8** single_cell_placeholder | **67** | **0** ✓ | D2.1 docx merged-cell → type=text + caption |
+| **R12** invalid_parser_version | **69557** | **0** ✓ | v1.0 → v1.1 bump |
+
+### 9.4 残留 flag-only violations (需源文件重解析, 不在 v1.1 commit 范围)
+
+| Rule | 数 | 性质 | 建议 |
+|------|----|------|------|
+| R9_raw_exceeds_3072 | 1603 | 内容超大但保留完整 markdown | 后续 GFM row split (`split_table_titles mode='gfm_row'`) |
+| R10_heading_path_not_list | 20589 | heading_path 存为非 list | 数据质量问题,需源文件重解析 |
+| R14_table_no_structured_no_md_preview | 1492 | 表格空内容 | 需源文件重解析 |
+
+### 9.5 EKRS 端下一步请求 (D5-D7)
+
+1. **D5 灰度 ingest**: 切换 `SHARED_STORAGE_PATH=/mnt/disk/text/v1.1`,先跑 50 bundle 验证
+2. **D6 全 96 ingest**: 灰度通过后增量 ingest 剩余 46 bundle
+3. **D7 close**: 跑 `scripts/c13_failed_bundles_verify.py`, 出最终 report
+   - **预期核心通过率**: 100% (R4/R7/R8/R12 全清零)
+   - **预期综合通过率**: 取决于 EKRS chunker 对 R9/R10/R14 的容忍度, ≥90/96 = 93.7% 概率高
+4. **P3 image_classifier**: 15 bundle (mixed_type_large 13 + oversized_image_block 2) 单独立项, 不阻塞本文档
+
+### 9.6 §5 五个问题回复
+
+完整回复见 `/home/pangzy/code_project/EKRS/docs/solutions/integration-issues/ekrs-monolithic-tables-coord-reply-2026-08-27.md` (11.5K, 167 行)。要点:
+
+- **Q1** GFM row split: 同意, `split_table_titles` 扩展 mode='gfm_row' (eng-review 复用, 不开新模块)
+- **Q2** coalesce threshold: ≥3 + < 800 chars + 同 heading_path (避免跨节合错)
+- **Q3** metadata.caption: 已 ship (v1.1 schema D2.4)
+- **Q4** validate vs audit: validate 是 fail-fast (R8=0 必须), audit 是统计 (R9/R10/R14 趋势)
+- **Q5** 96 bundle 路径: `/mnt/disk/text/v1.1/` (R6 承诺), 不动原 `/mnt/disk/text/`
+
+---
+
+**版本**：v1.2 (2026-08-31, doc-to-md 端 D1-D4 ship + 96 bundle 修复就绪 + D5-D7 请求)
+**状态**：doc-to-md delivery COMPLETE (D1-D4), 等待 EKRS 端 D5 灰度 ingest
+
+---
+
 **版本**：v1.1（2026-08-27，根因表述 + 验收分级 + manifest 交付清单）
-**状态**：OPEN，等待 doc-to-md 评审 + 修复时间承诺
+**状态**：SUPERSEDED by v1.2
 
 ---
 
 **版本**：v1（2026-08-27）
-**状态**：OPEN，等待 doc-to-md 评审
+**状态**：SUPERSEDED by v1.2
