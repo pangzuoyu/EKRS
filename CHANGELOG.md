@@ -512,6 +512,204 @@ absence of a path-prefix matcher, not a broken one.
 
 ---
 
+## [phase13c-c13] - 2026-08-27
+
+**Version**: no bump (post-closure incremental; follows the same
+discipline as Phase 10 T10b-3 + Phase 10 T10d Td.1/Td.2 + the
+[phase13c-patch] subsection above). Plan:
+`docs/superpowers/plans/2026-08-26-phase13c-c13-corpus-reingest-gpu.md`.
+
+**Pre-C13 baseline**: `7c1865a` (Phase 13c closure). GPU path was
+bench-verified (T5.1) but never corpus-loaded. dev_ui_v2 wired
+`X-Parser-Token` (phase13c-patch) but Phase 12 745-bundle corpus had
+been wiped when the rag container was recreated during the audit
+bridge fix. C13 closes that loop end-to-end.
+
+**C13 scope** (5 commits spanning closure boundary):
+
+### Added
+
+- **Phase 13c-C13 corpus re-ingest via GPU** (commit `357579f`,
+  pre-closure; merged into phase13c closure window 2026-08-26):
+  - Re-ingested 3809 bundles through the GPU path at
+    `/mnt/disk/text/` (replaces the wiped
+    `/home/pangzy/code_project/doc-to-md/output/text/` corpus).
+  - **3502/3598 = 97.3% success** (96 failed with `no_chunks` —
+    classified in `docs/coordinations/2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md`,
+    root cause = doc-to-md `content.structured` placeholder output,
+    NOT EKRS chunker bug).
+  - **Qdrant now at v=2, 319,896 chunks**. P0 multi-chunk-doc
+    recall-collision fix verified across 547 multi-chunk docs (0
+    collisions).
+  - **Performance**: pilot 949 s → 41 s on 949-bgs GPU encode
+    (**23× speedup** vs CPU path). Stable on 4 threads; `8/4` ratio
+    0.997 = no scaling past 4 threads on 48-chunk corpus (host
+    `/home/pangzy/code_project/EKRS/deployment/phase12-task-d-bge-threads-bench.md`).
+  - **3 latent GPU bugs caught during pilot**:
+    1. `Makefile` / scripts missing `set -o pipefail` →
+       `set -e` masks silent-empty-layer (Docker caches ~4 kB
+       pip-fail layer; `torch` not installed).
+    2. `rag/Dockerfile.gpu` lacked `python -c "import torch"`
+       verify guard → empty-layer bug surfaces as
+       "CUDA not available" at runtime, silently routes to CPU
+       despite `BGE_M3_GPU_ENABLED=true`.
+    3. Stale `deployment-rag-gpu:latest` from a previous bench
+       lacked the corpus bind-mount → manual `docker compose
+       --profile gpu build` required to refresh.
+- **GPU-first ingest wrapper** (commit `0a36e70`): new `make ingest`
+  target wraps `gpu-up` + `task_d_mvp_reingest.py --skip-cp
+  $$ARGS` + `gpu-down` into one command. Operator no longer
+  toggles GPU lifecycle manually.
+  - Sets `RAG_URL=http://localhost:8001` (host publish of
+    `rag-gpu`) and `DOCKER_TARGET=deployment-rag-gpu-1`.
+  - `gpu-down` always runs (success OR failure) — `EXIT=$?; ...;
+    exit $EXIT` propagates script exit code so wedged ingests
+    still clean up.
+  - `ARGS=` required (target exits 2 with usage when missing —
+    no silent no-op).
+  - `make dev` / `make gpu-up` / `make gpu-acceptance` /
+    `task_d_mvp_reingest.py` defaults all unchanged (back-compat
+    for manual CPU-mode workflows and T5.1 bench).
+  - Example:
+    `make ingest ARGS="--limit 96 --version 3 --reset-checkpoint"`
+    (for the doc-to-md hand-off re-ingest path; see coord doc).
+- **GPU container baseline pinning** (commit `78df0ec`): GPU
+  service is now content-addressable like the CPU service (Phase
+  8 T8-3a) was. Symmetric mirror of `rag-image.baseline.json`:
+  - `scripts/build_rag_gpu_baseline.sh` (144 lines) writes
+    `deployment/rag-gpu-image.baseline.json` capturing:
+    - `image_sha256` (full image ID; currently
+      `a0f020c8385a...` for 5.3 GB GPU image).
+    - `host_bge_m3_sha256_prefix` (`b29f216386f7`) — aggregate
+      SHA of the bind-mounted `/home/pangzy/code_project/bge-m3/`
+      weights dir (PoC bind-mount mode; CPU baseline verifies
+      in-image SHA, GPU substitutes host SHA since model isn't
+      vendored in image).
+    - `dockerfile_sha256_prefix` (`bbb9df3b02d7`) — SHA of
+      `rag/Dockerfile.gpu`.
+    - `torch_version_actual` (`2.11.0+cu130`) — verified via
+      `docker exec deployment-rag-gpu-1 python -c "import torch"`
+      (substitutes for CPU's in-image SHA cross-check; GPU
+      Dockerfile pins `torch==2.11.*` at line 44).
+    - `build_args` (PYTHON_BASE_IMAGE / PIP_INDEX_URL /
+      TORCH_INDEX_URL) — captured at script run.
+  - `make gpu-baseline` target wraps the script.
+  - `make gpu-up` now ends with a **drift check**: compares
+    `docker inspect deployment-rag-gpu-1 --format '{{.Image}}'`
+    to baseline `image_sha256`. Match → log short prefix.
+    Drift → WARNING listing both SHAs + remediation hint. Uses
+    `.Image` (not `.Id` — that's the container ID and changes
+    every restart). WARNING-only (does not fail `gpu-up`),
+    since legit build-arg changes (mirror swap, base image bump)
+    produce a new SHA without a "real" drift.
+  - First-class bootstrap of `/home/pangzy/code_project/bge-m3/bge-m3.sha256`
+    (10 entries: `pytorch_model.bin`, `*.json`, `*.pt`; skips
+    `onnx/`, `1_Pooling/`, `imgs/`, `.cache/` which GPU path
+    doesn't use). Host-side only, NOT git-tracked.
+
+### Changed
+
+- `Makefile` `gpu-up` (commit `3b2c848`): replaced
+  `docker compose --profile gpu down` with precise
+  `stop rag-gpu + rm -f rag-gpu + up -d rag`. `down` ignores
+  profiles and tears down the entire project (rag, qdrant,
+  redis). gpu-up left CPU rag stopped (Qdrant write-conflict
+  prevention) so cascade took down the whole stack. New
+  precision keeps qdrant + redis running. `make gpu-down` now
+  also restores CPU rag for normal ops.
+- `Makefile` `gpu-acceptance` (no change) still uses
+  `RAG_URL=http://localhost:8000` (in-container loopback) and
+  runs `phase13b_poc_bench.py` — distinct concern from full
+  corpus ingest.
+
+### Fixed
+
+- **`make gpu-down` cascade** (commit `3b2c848`): see above.
+- **Admin endpoints 503 in CPU rag** (commit `3b2c848`):
+  - Three coupled bugs:
+    1. `${ADMIN_KEY:-default}` in compose override does NOT
+       fall back when `.env` sets `ADMIN_KEY=` empty (compose
+       v2 default-substitution treats `VAR=` as "set").
+    2. CPU `rag:` service block had no `ADMIN_KEY` env at all
+       (only `rag-gpu:` did).
+    3. `deployment/.env` (the file compose actually reads,
+       NOT the project-root `.env`) had `ADMIN_KEY=` empty.
+  - Fix: set `ADMIN_KEY` in both `.env` files
+    (project-root + `deployment/.env`); add explicit env to
+    CPU `rag:` override block; use `${ADMIN_KEY-default}`
+    (no colon) for the GPU service. Dual-file pattern
+    documented in `.env.example` (`make run-local` reads
+    project-root; `docker compose` reads `deployment/.env`).
+- **GPU container silent-empty-layer risk** (commit `357579f`):
+  `Makefile` GPU build commands now `set -o pipefail`;
+  `rag/Dockerfile.gpu:51-54` adds explicit
+  `python -c "import torch"` verify guard after the
+  `pip install | tail -5` step.
+
+### Docs
+
+- **`docs/coordinations/2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md`**
+  (commit `e6a04c1`): coordination document for the 96 failed
+  bundles. Full classification (`/tmp/failed_bundles_classified.json`)
+  + per-category root-cause analysis + doc-to-md output contract
+  v1.1 (per-block / table / merge / mixed) + verification plan +
+  open questions. Exported **failed-bundle manifest** at
+  `deployment/phase13c-c13-failed-bundles-manifest.json`
+  (95 KB, 96 entries with `doc_hash + file_name + file_type +
+  total_blocks + doc_type + category + reason`). The coord doc
+  + manifest are the hand-off package for doc-to-md to fix and
+  re-parse. After fix: `make ingest ARGS="--limit 96 --version 3
+  --reset-checkpoint"` to re-ingest, gated on the per-category
+  acceptance criteria in coord doc §4.2.
+- **`docs/DEPLOYMENT.md`** (commit pending): adds §"GPU
+  baseline" + §"GPU-first ingest" sections referencing
+  `make gpu-baseline` / `make ingest` / drift check.
+- **`docs/USAGE.md`** (commit pending): adds §"Bulk corpus
+  ingest" with `make ingest` workflow.
+- **`CLAUDE.md`**: Current State adds Phase 13c-C13 line; Tags
+  section unchanged (no new git tag — post-closure incremental
+  per the phase10 T10b-3 + phase13c-patch discipline).
+
+### Migration notes
+
+- No new dependency. No DB / Qdrant / FTS schema change.
+- No breaking change to existing `make dev` / `make gpu-up` /
+  `make gpu-acceptance` workflows (only additions + the
+  `gpu-down` precision fix).
+- Operator action: after upgrading to this commit, run
+  `make gpu-baseline` once to seed
+  `deployment/rag-gpu-image.baseline.json`. Subsequent
+  `make gpu-up` runs will surface drift automatically.
+- For the failed-bundle re-ingest: wait for doc-to-md to ship
+  v1.1 schema per coord doc §3, then
+  `make ingest ARGS="--limit 96 --version 3 --reset-checkpoint"`.
+  No need to manually `make gpu-up` / `make gpu-down`.
+- **Production**: GPU baseline JSON is dev-only convention.
+  Production deployments use immutable image tags (e.g.
+  `ghcr.io/pangzuoyu/ekrs-rag-gpu:v0.6.0-c13`) rather than
+  SHA drift checks. The baseline file documents **what
+  should be in the image**; production CI gates on whether
+  the published tag matches the tagged image's recorded SHA.
+
+**Buglog** (3 new entries, total 152):
+
+- `phase13c-gpu-down-cascade` (commit `3b2c848`): compose
+  `down` ignores profile filter; gpu-up left CPU stopped
+  so the cascade tore down the whole stack.
+- `phase13c-3809-corpus-failures` (commit `357579f` + coord
+  doc): 96 bundles hit `no_chunks`; classified into 6
+  structural patterns (61 single_table_monolith root cause =
+  doc-to-md `content.structured` placeholder output). All
+  failures are doc-to-md contract violations, NOT EKRS
+  chunker bugs.
+- `phase13c-gpu-image-not-pinned` (commit `78df0ec`): GPU
+  image was the only major component without a
+  content-addressable baseline. CPU had Phase 8 T8-3a
+  `rag-image.baseline.json` since 2026-07; GPU silently
+  drifted.
+
+---
+
 ## [phase12] - 2026-08-15
 
 **Tag**: `phase12` (annotated, force-moved to this closure commit per

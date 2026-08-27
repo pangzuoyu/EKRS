@@ -311,6 +311,122 @@ scheduling). The production image is the right place for it.
 
 ---
 
+## GPU container baseline (Phase 13c-C13)
+
+The `rag-gpu` service (bge-m3 torch FP16 encoder on RTX-class GPUs)
+ships as a sibling image built from `rag/Dockerfile.gpu`. Unlike the
+CPU image, **the model is NOT vendored** — `rag-gpu` is in PoC
+bind-mount mode and reads FP32 weights from the host
+`/home/pangzy/code_project/bge-m3/` directory (mirrored at
+`/opt/ekrs/models/bge-m3-torch` inside the container). This keeps
+the GPU image at ~5 GB (vs ~16 GB if vendored) at the cost of
+requiring the host directory to be present.
+
+To prevent silent drift between the running GPU image and the
+intended reference, `deployment/rag-gpu-image.baseline.json`
+captures a content-addressable fingerprint:
+
+```json
+{
+  "tag": "gpu-<host-bge-m3-sha-prefix>-<dockerfile-sha-prefix>",
+  "image_sha256": "a0f020c8385a...",
+  "host_bge_m3_sha256_prefix": "b29f216386f7",
+  "dockerfile_sha256_prefix": "bbb9df3b02d7",
+  "torch_version_actual": "2.11.0+cu130",
+  "torch_version_expected_prefix": "2.11",
+  "build_args": {
+    "PYTHON_BASE_IMAGE": "...",
+    "PIP_INDEX_URL": "...",
+    "TORCH_INDEX_URL": "https://download.pytorch.org/whl/cu130"
+  }
+}
+```
+
+Capture or refresh the baseline after **any** of:
+
+- `rag/Dockerfile.gpu` changes (new pip install, ARG change, etc.)
+- `/home/pangzy/code_project/bge-m3/` host dir changes (model
+  re-export, config edit, weight swap)
+- `torch` version expectation changes (currently `2.11.*` per
+  `rag/Dockerfile.gpu:44`)
+
+```bash
+make gpu-baseline       # rebuilds + captures
+```
+
+`make gpu-up` ends with a drift check that compares the running
+container's image SHA to the baseline:
+
+```
+=== GPU baseline drift check ===
+GPU image SHA matches baseline (a0f020c8385a)    # match
+# OR
+WARNING: GPU image SHA drift detected!
+  baseline: <expected>
+  running:  <actual>
+  → run 'make gpu-baseline' to refresh, or investigate rag/Dockerfile.gpu / bge-m3 host dir changes
+```
+
+The check uses `docker inspect .Image` (not `.Id` — container ID
+changes on every restart). Warning-only (does not fail `gpu-up`)
+since legitimate build-arg changes (mirror swap, base image bump)
+produce a new SHA without "real" drift.
+
+> **Production note**: This baseline JSON is a dev-time convention.
+> Production deployments gate on immutable image tags (e.g.
+> `ghcr.io/pangzuoyu/ekrs-rag-gpu:v0.6.0-c13`) rather than
+> SHA drift checks. The baseline file documents **what should
+> be in the image**; CI gates on whether the published tag
+> matches the recorded SHA in the tag's metadata.
+
+## GPU-first ingest (canonical corpus-load path)
+
+For re-ingesting a corpus through the GPU encoder (verified 23×
+faster than CPU on 949-bgs pilot, p99 8 s), use the `make ingest`
+wrapper. It owns the full GPU lifecycle so operators don't toggle
+the service manually:
+
+```bash
+# Full corpus re-ingest
+make ingest ARGS="--limit 3809 --version 2 --reset-checkpoint"
+
+# Re-ingest the 96 failed bundles after they ship v1.1 schema
+make ingest ARGS="--limit 96 --version 3 --reset-checkpoint"
+```
+
+What `make ingest` does, in order:
+
+1. **`make gpu-up`** — stops CPU `rag` (Qdrant write-conflict
+   prevention), starts `rag-gpu` on host port 8001, waits for
+   healthz OK + drift-check warning if baseline doesn't match.
+2. **Runs `task_d_mvp_reingest.py`** with:
+   - `RAG_URL=http://localhost:8001` (host-side publish of
+     `rag-gpu`; CPU default is `:8000`).
+   - `DOCKER_TARGET=deployment-rag-gpu-1` (compose adds `-1`
+     suffix).
+   - `--skip-cp` (the `:ro` bind-mount
+     `/mnt/disk/text:/parsed_lib` already exposes bundles to
+     `rag-gpu`; without `--skip-cp` the script's `docker cp`
+     fails on the read-only mount).
+   - User-supplied `ARGS` forwarded verbatim.
+3. **`make gpu-down`** — stops `rag-gpu`, restarts CPU `rag`.
+   Runs on **success OR failure** (script exit code propagated
+   via `EXIT=$?; ...; exit $EXIT`); operator can re-run with
+   `--resume` after a wedge.
+
+`ARGS=` is required (target exits 2 with usage when missing —
+no silent no-op). Existing targets are unaffected:
+
+| Target | Behavior | Notes |
+|---|---|---|
+| `make dev` / `make dev-down` | CPU rag (hot-reload iteration faster; GPU 30 s warmup) | unchanged |
+| `make gpu-up` / `make gpu-down` | Manual GPU lifecycle | unchanged; `gpu-down` now precision-fixes the cascade bug from Phase 13c-C13 |
+| `make gpu-acceptance` | T5.1 28-doc smoke bench | unchanged; runs bench INSIDE rag-gpu container via `docker exec` |
+| `make ingest` (new) | One-shot GPU-first corpus load | this section |
+| `make gpu-baseline` (new) | Refresh `rag-gpu-image.baseline.json` | §GPU container baseline above |
+
+---
+
 ## Bare-metal / non-Docker deployment
 
 Skip docker-compose; run each service directly.

@@ -170,6 +170,43 @@ curl -s -X POST http://localhost:8000/v1/ingestion/replay \
 
 Emits `ingestion_replay_started` / `_completed` / `_sha256_mismatch` audit events.
 
+### Bulk corpus ingest (Phase 13c-C13)
+
+For loading many bundles at once (Phase 12 745-bundle corpus load,
+Phase 13c-C13 3809-bundle re-ingest, failed-bundle backfill after
+doc-to-md fixes), use the `make ingest` wrapper. It owns the full
+GPU-first lifecycle so operators don't toggle services manually:
+
+```bash
+# Full corpus re-ingest via GPU
+make ingest ARGS="--limit 3809 --version 2 --reset-checkpoint"
+
+# Re-ingest the 96 failed bundles after doc-to-md ships v1.1 schema
+make ingest ARGS="--limit 96 --version 3 --reset-checkpoint"
+
+# Resume after a wedge (script exits non-zero; gpu-down still runs)
+make ingest ARGS="--limit 3809 --version 2 --resume"
+```
+
+What the wrapper does internally:
+
+| Step | Target | Notes |
+|---|---|---|
+| 1 | `make gpu-up` | Stops CPU `rag`, starts `rag-gpu` on host :8001, waits for healthz + drift check |
+| 2 | `task_d_mvp_reingest.py` with `RAG_URL=http://localhost:8001`, `DOCKER_TARGET=deployment-rag-gpu-1`, `--skip-cp` | `--skip-cp` is required; the `:ro` bind-mount `/mnt/disk/text:/parsed_lib` already exposes bundles to `rag-gpu` |
+| 3 | `make gpu-down` | Runs on success OR failure; restores CPU `rag` |
+
+The `task_d_mvp_reingest.py` defaults are unchanged (CPU mode,
+`RAG_URL=http://localhost:8000`, `DOCKER_TARGET=deployment-rag-1`)
+so existing CPU-mode callers continue to work without env override.
+The wrapper adds GPU as the preferred path for full-corpus loads
+without breaking the manual `make dev` workflow.
+
+> See `docs/coordinations/2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md`
+> for the 96-bundle hand-off contract (failed-bundle manifest at
+> `deployment/phase13c-c13-failed-bundles-manifest.json`) and
+> `docs/DEPLOYMENT.md` §"GPU-first ingest" for the rationale.
+
 ---
 
 ## Constraint queries
