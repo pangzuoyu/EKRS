@@ -1,0 +1,884 @@
+{
+  "generated_at": "2026-08-27",
+  "source_corpus": "/mnt/disk/text",
+  "total_failed": 96,
+  "categories": {
+    "single_table_monolith": [
+      {
+        "doc_hash": "000150f86cdbc3c1",
+        "file_name": "PTA_EL-SYS-TF2-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "10852chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "018c941f9b1ee965",
+        "file_name": "PTA_PS-FES-00-D.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "11274chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "060f92ee18b68afc",
+        "file_name": "PTA_PS-FES-PA-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "8253chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "070c4e4a88dc7d10",
+        "file_name": "PTA_FE-VE-TRAY-D.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "10332chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "07648affb0e2cf08",
+        "file_name": "Regulations on EP of ZHuhai.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "5215chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "09431ce52a6cf9d7",
+        "file_name": "PTA_PC-PRD-RD-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "13759chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "0b79a41ff03bb3e3",
+        "file_name": "PTA_PC-PRD-526-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "7403chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "0b8b09b678cb7be6",
+        "file_name": "PTA_PS-F&GD-GD&A-I.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "9879chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "0cb22f8083bf5a13",
+        "file_name": "PTA_CP-COAT-00-D.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "8756chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "0dbfa03614843a35",
+        "file_name": "PTA_FE-TK-ST-D.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "12235chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "107a77779ce53fee",
+        "file_name": "PTA_CP-COAT-EP-D.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "11893chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "11ef009aba8c241b",
+        "file_name": "PTA_RE-ENG-HS-I.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "9998chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "12954851ec9f58be",
+        "file_name": "eam and cmms Introduction.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "8299chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "1eac16de1777c21e",
+        "file_name": "PTA_FE-HE-P&F-I.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "9984chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "29ce190372162655",
+        "file_name": "PTA_PC-FI-MFM-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "8571chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "2ef5c0f1c5dc3fb9",
+        "file_name": "PTA_EL-TR-OH-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "9958chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "33641d748c3c3b9f",
+        "file_name": "PTA_SH-SV-00-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "8419chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "372587d07159fec9",
+        "file_name": "PTA_FE-HE-P&F-D.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "16168chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "410ef7c392e177da",
+        "file_name": "2010QC-14.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "8268chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "4333348653c10e20",
+        "file_name": "PTA_PC-CVPR-PR-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "6997chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "4350ac7a589cc3ad",
+        "file_name": "PTA_PC-FI-APT-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "7381chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "4356976cb17c9e24",
+        "file_name": "PTA_PS-F&GD-FDA-I.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "9474chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "44c8301e49a6c649",
+        "file_name": "PTA_EL-SYS-TF5-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "5077chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "4a04c65084c0e1d3",
+        "file_name": "PTA_EL-MC-00-I.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "11198chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "4a3226ae77018f84",
+        "file_name": "PTA_PC-FI-UM-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "10424chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "522b0755bfee97a7",
+        "file_name": "惠州柴油加氢详细设计互提资料目录.docx",
+        "file_type": "docx",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "5541chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "54116db9b54d3294",
+        "file_name": "PTA_SH-CTL-00-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "10844chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "5a345229e0fe2c7c",
+        "file_name": "PTA_PC-PES-IO-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "14433chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "70f8d217cea1e799",
+        "file_name": "PTA_PS-F&GD-FDA-D.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "10294chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "7adc7710b51c42f6",
+        "file_name": "Safety specification for filling station of liquefied petroleum gas .doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "6801chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "7ba66e0131e860dd",
+        "file_name": "PTA_PS-F&GD-GD&A-D.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "10130chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "878a84f1e7e0053a",
+        "file_name": "DS017.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "40430chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "893abeca569f590a",
+        "file_name": "PTA_SH-DDV-00-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "9589chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "8a64b724ba6be36b",
+        "file_name": "PTA_EL-TR-00-I.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "13602chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "9806d5585cb7aba8",
+        "file_name": "PTA_EL-SYS-TF6-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "9753chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "9c697b07d02b2127",
+        "file_name": "PTA_PC-FI-FT&N-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "9701chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "a60c6f5b538ad881",
+        "file_name": "PTA_EL-SYS-TF1-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "6968chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "a84b519d82895256",
+        "file_name": "PTA_FE-DRY-AIR-I.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "10570chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "acfa5dc2f069984f",
+        "file_name": "PTA_FE-FH-00-I.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "9299chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "b0dd3841601d36da",
+        "file_name": "PTA_FE-HE-660-I.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "10955chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "b0fec68e5d6d4099",
+        "file_name": "PTA_EL-TR-00-D.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "12917chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "b1a0bba961a8f67b",
+        "file_name": "PTA_CP-COAT-INT-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "5329chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "b654c20208a761ac",
+        "file_name": "PTA_PC-FI-VSM-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "8147chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "b87a96fd768aac5c",
+        "file_name": "PTA_EL-UPS-00-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "10944chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "c8cea685706fde1b",
+        "file_name": "PTA_PC-PLC-IO-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "12336chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "cacb2097a0565012",
+        "file_name": "PMF-1068-4.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "101974chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "cc62d499e2ddc6ef",
+        "file_name": "DS019.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "196760chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "d2377dbac15730ca",
+        "file_name": "PTA_EL-UPS-00-D.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "7663chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "d3a66eb6c5626cfc",
+        "file_name": "PTA_FE-HE-660-D.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "16115chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "d94beda7aa491655",
+        "file_name": "PRC'S Law on Promoting CLean Production.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "10879chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "dbc0209b0a2ef778",
+        "file_name": "PTA_PS-FES-PC-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "18839chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "dc4ff5456916b3c1",
+        "file_name": "PTA_PC-CP-00-I.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "9040chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "e02d593d29a0145f",
+        "file_name": "legacy_test.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "5521chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "e2da526bf02c4d23",
+        "file_name": "PTA_EL-SYS-TF4-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "11224chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "e4ed8a401304ee54",
+        "file_name": "PTA_EL-BD-00-D.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "17323chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "e726c95c404ca94c",
+        "file_name": "PTA_EL-BD-00-I.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "10448chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "e799223ed5324c8a",
+        "file_name": "PTA_PC-DCS-IO-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "6959chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "f67dfa0684f788e6",
+        "file_name": "PTA_CP-COAT-EP-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "8099chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "f95e7f55960c271c",
+        "file_name": "PTA_EL-SYS-TF3-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "6292chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "f982e11a89b9b67e",
+        "file_name": "PTA_SH-OSBD-00-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "11019chars",
+        "category": "single_table_monolith"
+      },
+      {
+        "doc_hash": "fd5944487c6bbb0a",
+        "file_name": "PTA_PC-FI-CM-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "9052chars",
+        "category": "single_table_monolith"
+      }
+    ],
+    "tiny_content_fragmented": [
+      {
+        "doc_hash": "01efb45935791d2c",
+        "file_name": "Hazardous  Chemical Cataglogue.doc",
+        "file_type": "doc",
+        "total_blocks": 11882,
+        "doc_type": "?",
+        "reason": "11882blocks avg=7",
+        "category": "tiny_content_fragmented"
+      },
+      {
+        "doc_hash": "19156a9af21c3d8b",
+        "file_name": "python cookbook(第3版)高清中文完整版(###).pdf",
+        "file_type": "pdf",
+        "total_blocks": 9524,
+        "doc_type": "?",
+        "reason": "9524blocks avg=48",
+        "category": "tiny_content_fragmented"
+      },
+      {
+        "doc_hash": "3222bc05da12abe5",
+        "file_name": "VEN-LOGIC-06   UTILITY & INSTRUMENT AIR COMPRESSOR (CONVEYING GAS CHILLER) LOGIC.doc",
+        "file_type": "doc",
+        "total_blocks": 5028,
+        "doc_type": "?",
+        "reason": "5028blocks avg=22",
+        "category": "tiny_content_fragmented"
+      },
+      {
+        "doc_hash": "359dda75db2ff5a5",
+        "file_name": "SECTION 600 LOGIC.doc",
+        "file_type": "doc",
+        "total_blocks": 5522,
+        "doc_type": "?",
+        "reason": "5522blocks avg=36",
+        "category": "tiny_content_fragmented"
+      },
+      {
+        "doc_hash": "42795e40266e80c4",
+        "file_name": "PART UW.doc",
+        "file_type": "doc",
+        "total_blocks": 3167,
+        "doc_type": "?",
+        "reason": "3167blocks avg=39",
+        "category": "tiny_content_fragmented"
+      },
+      {
+        "doc_hash": "7cff3c7580e5b64c",
+        "file_name": "SECTION 700 LOGIC.doc",
+        "file_type": "doc",
+        "total_blocks": 3821,
+        "doc_type": "?",
+        "reason": "3821blocks avg=48",
+        "category": "tiny_content_fragmented"
+      },
+      {
+        "doc_hash": "c85574c67a29cb8e",
+        "file_name": "Keras中文手册.pdf",
+        "file_type": "pdf",
+        "total_blocks": 5059,
+        "doc_type": "?",
+        "reason": "5059blocks avg=26",
+        "category": "tiny_content_fragmented"
+      },
+      {
+        "doc_hash": "d9ddbdfd23491d88",
+        "file_name": "VEN-LOGIC-03 AB-920 STEAM BOILER LOGIC.doc",
+        "file_type": "doc",
+        "total_blocks": 3748,
+        "doc_type": "?",
+        "reason": "3748blocks avg=29",
+        "category": "tiny_content_fragmented"
+      },
+      {
+        "doc_hash": "e210314034f1a29c",
+        "file_name": "VEN-LOGIC-09 SLUDGE DEWATERING AND INCINERATION SYSTEM LOGIC.doc",
+        "file_type": "doc",
+        "total_blocks": 4617,
+        "doc_type": "?",
+        "reason": "4617blocks avg=26",
+        "category": "tiny_content_fragmented"
+      },
+      {
+        "doc_hash": "e350be8265b872d8",
+        "file_name": "API RP 7G-1998 (2015)英文原版标准.pdf",
+        "file_type": "pdf",
+        "total_blocks": 4564,
+        "doc_type": "?",
+        "reason": "4564blocks avg=24",
+        "category": "tiny_content_fragmented"
+      },
+      {
+        "doc_hash": "f52b27a563969d54",
+        "file_name": "API RP 687-2001 (2015)英文原版标准.pdf",
+        "file_type": "pdf",
+        "total_blocks": 5366,
+        "doc_type": "?",
+        "reason": "5366blocks avg=49",
+        "category": "tiny_content_fragmented"
+      }
+    ],
+    "mixed_type_large": [
+      {
+        "doc_hash": "04740bb9fe2d20a3",
+        "file_name": "石油化工土建等工程图解英汉词汇说明.pdf",
+        "file_type": "pdf",
+        "total_blocks": 2071,
+        "doc_type": "?",
+        "reason": "2071blocks types={'text': 1005, 'image': 1021, 'table': 45}",
+        "category": "mixed_type_large"
+      },
+      {
+        "doc_hash": "259d8d0a8d49e686",
+        "file_name": "API RP 684-2005 (2010)英文原版标准.pdf",
+        "file_type": "pdf",
+        "total_blocks": 6311,
+        "doc_type": "?",
+        "reason": "6311blocks types={'header': 384, 'text': 5789, 'table': 97, 'image': 41}",
+        "category": "mixed_type_large"
+      },
+      {
+        "doc_hash": "48affd58c599001e",
+        "file_name": "2017 API Catalog.pdf",
+        "file_type": "pdf",
+        "total_blocks": 247,
+        "doc_type": "?",
+        "reason": "247blocks types={'image': 18, 'text': 229}",
+        "category": "mixed_type_large"
+      },
+      {
+        "doc_hash": "5aaecff70fd0791a",
+        "file_name": "Learning MicroStation VBA-SC.pdf",
+        "file_type": "pdf",
+        "total_blocks": 1509,
+        "doc_type": "?",
+        "reason": "1509blocks types={'text': 915, 'image': 562, 'table': 32}",
+        "category": "mixed_type_large"
+      },
+      {
+        "doc_hash": "68f9b41df184956b",
+        "file_name": "API PUBL 581 RISK BASED INSPECTION BASE RESOURCE DOCUMENT.pdf",
+        "file_type": "pdf",
+        "total_blocks": 958,
+        "doc_type": "?",
+        "reason": "958blocks types={'text': 303, 'image': 333, 'table': 322}",
+        "category": "mixed_type_large"
+      },
+      {
+        "doc_hash": "6ad14bb6f5b3b0c0",
+        "file_name": "ASME b 31.1 power piping.pdf",
+        "file_type": "pdf",
+        "total_blocks": 921,
+        "doc_type": "?",
+        "reason": "921blocks types={'image': 369, 'text': 366, 'table': 186}",
+        "category": "mixed_type_large"
+      },
+      {
+        "doc_hash": "81972ef869586cb3",
+        "file_name": "H024p03_Mathematics.pdf",
+        "file_type": "pdf",
+        "total_blocks": 5447,
+        "doc_type": "?",
+        "reason": "5447blocks types={'image': 49, 'text': 5157, 'header': 223, 'table': 18}",
+        "category": "mixed_type_large"
+      },
+      {
+        "doc_hash": "b2dd3afb958f2963",
+        "file_name": "ASCE 7 02 minmum design loads for buildings and other structures.pdf",
+        "file_type": "pdf",
+        "total_blocks": 896,
+        "doc_type": "?",
+        "reason": "896blocks types={'text': 388, 'image': 394, 'table': 114}",
+        "category": "mixed_type_large"
+      },
+      {
+        "doc_hash": "b8a49eb153fcffef",
+        "file_name": "H024p02_Physical and Chemical Data.pdf",
+        "file_type": "pdf",
+        "total_blocks": 8524,
+        "doc_type": "?",
+        "reason": "8524blocks types={'image': 21, 'text': 7700, 'header': 452, 'table': 351}",
+        "category": "mixed_type_large"
+      },
+      {
+        "doc_hash": "d783d481114a7c72",
+        "file_name": "ASME B 31.3 process piping.pdf",
+        "file_type": "pdf",
+        "total_blocks": 508,
+        "doc_type": "?",
+        "reason": "508blocks types={'text': 338, 'image': 44, 'table': 126}",
+        "category": "mixed_type_large"
+      },
+      {
+        "doc_hash": "d7f974d026408312",
+        "file_name": "API RP 687-2023英文原版标准.pdf",
+        "file_type": "pdf",
+        "total_blocks": 5443,
+        "doc_type": "?",
+        "reason": "5443blocks types={'header': 804, 'text': 3118, 'image': 1323, 'table': 198}",
+        "category": "mixed_type_large"
+      },
+      {
+        "doc_hash": "db3664c7e834cf40",
+        "file_name": "化工工艺设计手册(2003年第三版)上册.pdf",
+        "file_type": "pdf",
+        "total_blocks": 3718,
+        "doc_type": "?",
+        "reason": "3718blocks types={'text': 1196, 'image': 1269, 'table': 1253}",
+        "category": "mixed_type_large"
+      },
+      {
+        "doc_hash": "e3d71d8c54762d35",
+        "file_name": "H024p05_Heat and Mass Transfer.pdf",
+        "file_type": "pdf",
+        "total_blocks": 4868,
+        "doc_type": "?",
+        "reason": "4868blocks types={'image': 16, 'text': 4707, 'header': 110, 'table': 35}",
+        "category": "mixed_type_large"
+      }
+    ],
+    "single_block_large_text": [],
+    "single_block_small": [
+      {
+        "doc_hash": "1300b11930968b14",
+        "file_name": "PTA_MM-TEST-VHB-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "3946chars",
+        "category": "single_block_small"
+      },
+      {
+        "doc_hash": "1a26d59801966335",
+        "file_name": "GB6944.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "4058chars",
+        "category": "single_block_small"
+      },
+      {
+        "doc_hash": "3a523ae33aebc503",
+        "file_name": "Code for the design of instrument grounding for petrochemical industry.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "4795chars",
+        "category": "single_block_small"
+      },
+      {
+        "doc_hash": "97335ad92a0aabcb",
+        "file_name": "Eaton C-H Visit Report.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "3977chars",
+        "category": "single_block_small"
+      },
+      {
+        "doc_hash": "a7df3c076d784956",
+        "file_name": "PTA_MM-TEST-VHF-F.doc",
+        "file_type": "doc",
+        "total_blocks": 1,
+        "doc_type": "?",
+        "reason": "3508chars",
+        "category": "single_block_small"
+      }
+    ],
+    "few_blocks_any": [
+      {
+        "doc_hash": "0781a4511b805c3e",
+        "file_name": "焊接横表 W.QCF horizontal.doc",
+        "file_type": "doc",
+        "total_blocks": 3,
+        "doc_type": "?",
+        "reason": "3blocks types={'table': 3}",
+        "category": "few_blocks_any"
+      },
+      {
+        "doc_hash": "53a2254c06ff14ab",
+        "file_name": "Api Technical Data Book Petroleum Refining 1997 scan.pdf",
+        "file_type": "pdf",
+        "total_blocks": 1321,
+        "doc_type": "?",
+        "reason": "1321blocks types={'text': 1321}",
+        "category": "few_blocks_any"
+      },
+      {
+        "doc_hash": "aa1c1ea99eb6626a",
+        "file_name": "mss sp 89 pipe hangers and supports fabrication and installation.pdf",
+        "file_type": "pdf",
+        "total_blocks": 44,
+        "doc_type": "?",
+        "reason": "44blocks types={'image': 20, 'text': 20, 'table': 4}",
+        "category": "few_blocks_any"
+      },
+      {
+        "doc_hash": "bae167306498c270",
+        "file_name": "API650 Welded storage tanks.PDF",
+        "file_type": "PDF",
+        "total_blocks": 217,
+        "doc_type": "?",
+        "reason": "217blocks types={'text': 217}",
+        "category": "few_blocks_any"
+      }
+    ],
+    "oversized_image_block": [
+      {
+        "doc_hash": "8ab548bb51c076d0",
+        "file_name": "API RP 579 fitness for service.pdf",
+        "file_type": "pdf",
+        "total_blocks": 3186,
+        "doc_type": "?",
+        "reason": "3186blocks image=1984",
+        "category": "oversized_image_block"
+      },
+      {
+        "doc_hash": "ad58aff523d8d880",
+        "file_name": "API RP 697-2023英文原版标准.pdf",
+        "file_type": "pdf",
+        "total_blocks": 14451,
+        "doc_type": "?",
+        "reason": "14451blocks image=9624",
+        "category": "oversized_image_block"
+      }
+    ]
+  }
+}
