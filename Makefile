@@ -110,7 +110,14 @@ gpu-up:
 	done
 
 gpu-down:
-	cd deployment && docker compose --profile gpu down
+	# Phase 13c-C13 fix: `docker compose --profile gpu down` brings down
+	# ALL services (rag, qdrant, redis) because `down` ignores profiles —
+	# it removes every container in the project. gpu-up left the CPU rag
+	# stopped (Qdrant write-conflict prevention); qdrant + redis stayed
+	# running. We only want to stop+remove the GPU service, then restart
+	# the CPU rag that gpu-up paused.
+	cd deployment && docker compose stop rag-gpu
+	cd deployment && docker compose rm -f rag-gpu
 	@echo "Restart CPU rag service for normal ops..."
 	cd deployment && docker compose up -d rag
 

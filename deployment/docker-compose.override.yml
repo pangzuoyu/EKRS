@@ -7,6 +7,13 @@ services:
         PYTHON_BASE_IMAGE: docker.m.daocloud.io/library/python:3.11-slim
         # Route pip through a working mirror (Phase 8 T8-3a pattern).
         PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+    environment:
+      # Phase 13c-C13 fix: CPU `rag` had no ADMIN_KEY env (only rag-gpu
+      # did). With deployment/.env setting ADMIN_KEY empty, the running
+      # CPU service's admin endpoints 503'd. Add it here with the same
+      # empty-string-fallback semantics so dev keeps working. Production
+      # MUST set ADMIN_KEY to a real 32+ char secret in deployment/.env.
+      - ADMIN_KEY=${ADMIN_KEY-dev-admin-key-32chars-aaaaaaaaaa}
   dev_ui_v2:
     build:
       args:
@@ -64,8 +71,13 @@ services:
       - BGE_M3_MODEL_DIR=/opt/ekrs/models/bge-m3-torch
       # UQ-6: 验收期间加速 probe (T5.3 failover 检测更快)
       - BGE_M3_GPU_PROBE_INTERVAL_S=5
-      # Admin endpoints (memory-stats + invalidate) require ADMIN_KEY
-      - ADMIN_KEY=${ADMIN_KEY:-dev-admin-key-32chars-aaaaaaaaaa}
+      # Admin endpoints (memory-stats + invalidate) require ADMIN_KEY.
+      # Phase 13c-C13 fix: `${ADMIN_KEY:-default}` does NOT fall back when
+      # .env sets `ADMIN_KEY=` (empty string). Use `${ADMIN_KEY-default}`
+      # (without colon) so an empty .env value falls through to the dev
+      # default and admin endpoints stay reachable. Production deployments
+      # MUST set ADMIN_KEY to a real 32+ char secret in .env.
+      - ADMIN_KEY=${ADMIN_KEY-dev-admin-key-32chars-aaaaaaaaaa}
     volumes:
       # Bind-mount host FP32 weights (transformers auto-downcast to FP16 at load):
       - /home/pangzy/code_project/bge-m3:/opt/ekrs/models/bge-m3-torch:ro
