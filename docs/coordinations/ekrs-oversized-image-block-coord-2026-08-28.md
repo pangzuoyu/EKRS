@@ -6,6 +6,7 @@
 > **Upstream**: [`docs/coordinations/2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md`](2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md) §9.9 + [`docs/solutions/integration-issues/ekrs-monolithic-tables-coord-reply-2026-08-27.md`](../solutions/integration-issues/ekrs-monolithic-tables-coord-reply-2026-08-27.md) §五.Q5
 > **Splits from**: monolithic-tables coord §2.4 (oversized_image_block → 单独立项, 2026-08-27 EKRS 同意)
 > **Failure data**: `deployment/phase13c-d5-canary-report.json` entries `8ab548bb51c076d0` + `ad58aff523d8d880`
+> **Status**: **D0 — EKRS 侧 4 项答复完整 (2026-08-28), doc-to-md 实施开始**
 
 ---
 
@@ -90,18 +91,26 @@
 **实施**: `parsers/ocr/{paddleocr_vl,mineru}.py` 输出后处理加 `MAX_IMAGE_DESC_CHARS` 阈值
 
 ```python
-MAX_IMAGE_DESC_CHARS = 512  # 类似 OCR text 单行均值, 超过走 summary
+MAX_IMAGE_DESC_CHARS = 512  # EKRS 侧确认合理 (Q1 答复): 512 字符保留语义摘要, 大幅减少 raw size
 
 def _truncate_image_desc(text: str) -> str:
     if len(text) <= MAX_IMAGE_DESC_CHARS:
         return text
     # 截断到 512 chars + "[... truncated ...]" marker
-    return text[:MAX_IMAGE_DESC_CHARS] + "\n[... truncated for embedding ...]"
+    # EKRS 侧确认 raw 字段保留完整作为审计追溯 (Q4 答复),
+    # 截断状态通过 metadata.image_desc_truncated=True 标记
+    truncated_text = text[:MAX_IMAGE_DESC_CHARS] + "\n[... truncated for embedding ...]"
+    return truncated_text
 ```
 
 **预期**: raw size -90% (90 KB → 0.5 KB per image), admission 远低于 5M, encode latency <5s
 
 **owner**: doc-to-md OCR 模块维护者
+
+**EKRS 侧承诺 (Q1+Q4 答复)**:
+- ✅ 512 字符阈值合理, 保留语义摘要
+- ✅ 截断后 raw 字段**必须**保留 (`metadata.image_desc_truncated=True` + `raw` 完整内容)
+- D5 验证后根据实际效果调整阈值 (256 / 768 候选)
 
 ### 3.2 方向 B — doc-to-md image_classifier P3 阈值优化（P1, 不阻塞本文档 close）
 
@@ -112,17 +121,23 @@ def _truncate_image_desc(text: str) -> str:
 
 **owner**: doc-to-md image_classifier P3 owner
 
+**EKRS 侧条件 (Q2 答复)**: ⚠️ doc-to-md 侧需在 corpus 上跑回归测试, **假阳性率 ≤5%** (正常 PDF 被误判为 image-dominated 的比例) 后才 ship. EKRS 侧无明确反对, 但要求验证阈值.
+
 ### 3.3 方向 C — EKRS source-quality filter（P2, 不阻塞本文档 close）
 
 **实施**: ingest 前对 raw>5M bundle 加 `quality_warning` 标记, EKRS 端可选降权
 
 ```python
+# backend/engine/admission.py 入口处, 与 raw_chars 检查并列 (Q3 答复)
 if raw_chars > 5_000_000:
     bundle.metadata.quality_warning = "oversized_image_output"
-    # EKRS chunker 看到这个标记后, encode 阶段降权 or 截断
+    # step5_worker.py encode 阶段: quality_warning=True 时降权 (而非完全丢弃)
+    # 截断状态标记: metadata.image_desc_truncated=True 时同样降权
 ```
 
 **owner**: EKRS RAG team (per coord reply §七.1)
+
+**EKRS 侧答复 (Q3)**: ✅ 实施位置确定 — `backend/engine/admission.py` 入口, 与 raw_chars 检查并列. 标记 `quality_warning` 后, `step5_worker.py` encode 阶段跳过/降权. **不阻塞本文档**, Phase 13c 或 Phase 14 独立迭代.
 
 ---
 
@@ -181,14 +196,16 @@ if raw_chars > 5_000_000:
 
 ---
 
-## 八、未决问题
+## 八、未决问题 — EKRS 侧答复 (2026-08-28)
 
-| # | 问题 | 等待方 | 备注 |
-|---|------|--------|------|
-| 1 | 方向 A (MAX_IMAGE_DESC_CHARS=512) 阈值是否合理? | doc-to-md OCR owner | 中文 image_description 截断后语义是否完整? 提议 512 起, D5 验证后调 |
-| 2 | 方向 B image_classifier 阈值从 80% 降到 60% 是否过早触发? | doc-to-md image_classifier P3 owner | 假阳性会让正常 PDF 走 image-region 路径, 需回归测试 |
-| 3 | 方向 C EKRS source-quality filter 实施位置 | EKRS RAG team | 在 pipeline.ingest() Step5 encode 前? 还是 Step3 chunk 前? |
-| 4 | image_description 截断后, 是否需要保留 raw 字段做 fallback? | doc-to-md + EKRS 联调 | 提议 metadata.image_desc_truncated=true 标记, EKRS 端可降权 |
+> **状态**: EKRS 侧 4 项问题已全部答复 (✅✅⚠️✅). doc-to-md 侧按答复实施.
+
+| # | 问题 | EKRS 答复 | doc-to-md 实施要点 |
+|---|------|----------|------------------|
+| 1 | 方向 A (MAX_IMAGE_DESC_CHARS=512) 阈值是否合理? | ✅ **合理**. 512 字符保留 image_description 语义摘要, 大幅减少 raw size. 截断时保留前 512 + `[... truncated for embedding ...]` marker. D5 验证后可调整 (256 / 768) | `parsers/ocr/_truncate_image_desc()` 常量设为 512. 单测覆盖 PaddleOCR-VL + MinerU 2 路径. D5 后回归调整 |
+| 2 | 方向 B image_classifier 阈值 80% → 60% 是否过早? | ⚠️ **需回归测试**. 假阳性率 ≤5% (正常 PDF 误判为 image-dominated) 才 ship. EKRS 侧无明确反对 | doc-to-md 侧在 corpus 上跑回归测试, 出 false-positive rate 报告 (target ≤5%) |
+| 3 | 方向 C EKRS source-quality filter 实施位置? | ✅ `backend/engine/admission.py` 入口, 与 raw_chars 检查并列. 标记 `quality_warning` 后 `step5_worker.py` encode 阶段降权. **不阻塞本文档**, Phase 13c 或 Phase 14 独立迭代 | 不阻塞本文档. 单独 Phase 14 任务追踪 |
+| 4 | 截断后是否需要保留 raw 字段做 fallback? | ✅ **需要**. `metadata.image_desc_truncated=True` 标记, raw 字段保留完整内容作为审计追溯. EKRS 端 `quality_warning=True` 降权, 不完全丢弃 | doc-to-md 侧 output block 同时保留: `content.raw` 完整 + `content.md_preview` 截断 + `metadata.image_desc_truncated=True` |
 
 ---
 
