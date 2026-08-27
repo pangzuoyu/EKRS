@@ -1,4 +1,4 @@
-.PHONY: dev test lint mock-notify install clean heavy-test golden-test test-e2e test-e2e-ci t5-acceptance gpu-up gpu-down gpu-acceptance
+.PHONY: dev test lint mock-notify install clean heavy-test golden-test test-e2e test-e2e-ci t5-acceptance gpu-up gpu-down gpu-acceptance ingest
 
 PYTHON ?= python3
 PIP ?= pip
@@ -120,6 +120,33 @@ gpu-down:
 	cd deployment && docker compose rm -f rag-gpu
 	@echo "Restart CPU rag service for normal ops..."
 	cd deployment && docker compose up -d rag
+
+# Phase 13c-C13 follow-up: GPU-first ingest (canonical corpus-load path).
+# Wraps gpu-up + task_d_mvp_reingest.py + gpu-down. RAG_URL=http://localhost:8001
+# (host-side publish of rag-gpu). --skip-cp avoids docker-cp failures on the
+# :ro bind-mount /mnt/disk/text:/parsed_lib that already exposes bundles to
+# rag-gpu. After run (success OR failure), GPU is stopped and CPU rag is
+# restarted for normal ops. Pass any task_d_mvp_reingest.py flag via ARGS.
+#
+# Examples:
+#   make ingest ARGS="--limit 3809 --version 2 --reset-checkpoint"
+#   make ingest ARGS="--limit 96 --version 3 --reset-checkpoint"   # 失败 bundle 重 ingest
+ingest:
+	@if [ -z "$$ARGS" ]; then \
+	    echo "Usage: make ingest ARGS=\"<task_d_mvp_reingest.py flags>\""; \
+	    echo "Example: make ingest ARGS=\"--limit 745 --version 2 --reset-checkpoint\""; \
+	    exit 2; \
+	fi
+	@echo "=== make gpu-up (stop CPU rag, start rag-gpu on :8001) ==="
+	@$(MAKE) gpu-up
+	@echo "=== ingest via GPU (RAG_URL=http://localhost:8001, --skip-cp) ==="
+	@RAG_URL=http://localhost:8001 \
+	    DOCKER_TARGET=deployment-rag-gpu-1 \
+	    python3 scripts/task_d_mvp_reingest.py --skip-cp $$ARGS; \
+	    EXIT=$$?; \
+	    echo "=== make gpu-down (stop rag-gpu, restart CPU rag) ==="; \
+	    $(MAKE) gpu-down; \
+	    exit $$EXIT
 
 # T5.1 smoke bench — 28 篇 ingest, peak mem, ingest p99.
 # T5.2 (equiv) + T5.3 (failover) 单独 follow-up — 不阻塞 phase13b 合入.
