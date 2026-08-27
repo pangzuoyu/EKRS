@@ -71,6 +71,10 @@ services:
       - BGE_M3_MODEL_DIR=/opt/ekrs/models/bge-m3-torch
       # UQ-6: 验收期间加速 probe (T5.3 failover 检测更快)
       - BGE_M3_GPU_PROBE_INTERVAL_S=5
+      # Phase 13c-C13 D5-A: mirror CPU rag ADMISSION_* from docker-compose.yml.
+      # Verified by D5 GPU bypass canary (15/15 = 100% PASS at 3.63 GB peak).
+      - ADMISSION_RAW_CHAR_LIMIT=5000000
+      - ADMISSION_CHUNK_LIMIT=10000
       # Admin endpoints (memory-stats + invalidate) require ADMIN_KEY.
       # Phase 13c-C13 fix: `${ADMIN_KEY:-default}` does NOT fall back when
       # .env sets `ADMIN_KEY=` (empty string). Use `${ADMIN_KEY-default}`

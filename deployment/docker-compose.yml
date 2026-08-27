@@ -58,6 +58,12 @@ services:
       - EKRS_DEBUG=${EKRS_DEBUG:-false}
       - COLLECTION_NAME=rag_documents
       - MAX_CHUNK_TOKENS=768
+      # Phase 13c-C13 D5-A: raise admission from Phase 13a T2 default
+      # (1M raw / 3000 chunks) to 5M raw / 10K chunks. Verified by D5
+      # GPU bypass canary (15/15 = 100% PASS at 3.63 GB GPU mem peak).
+      # Mirrors the rag-gpu override block in docker-compose.override.yml.
+      - ADMISSION_RAW_CHAR_LIMIT=5000000
+      - ADMISSION_CHUNK_LIMIT=10000
       # Phase 8 T8-3a: EMBEDDING_MODEL_DIR points the RAG service at the
       # bge-m3 ONNX export vendored into the image at /opt/ekrs/models/bge-m3
       # by rag/Dockerfile. EMBEDDING_MODEL=bge-m3 is the matching model name.

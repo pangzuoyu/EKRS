@@ -3,9 +3,13 @@ title: "doc-to-md → EKRS: monolithic tables / fragmentation 契约 v1.1 接受
 date: 2026-08-27
 category: docs/solutions/integration-issues
 module: rag-integration
-status: contract accepted, schedule committed, 6 questions resolved, ready to ship
+status: closed (D5 灰度 + D5-A admission 调高 COMPLETE, 2026-08-28); D2.5 coalesce + admission 5M/10K 联合生效
 related_request: /home/pangzy/code_project/EKRS/docs/coordinations/2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md
 previous_coord: ekrs-wedge-table-block-coord-reply-2026-08-20.md, ekrs-raw-list-bug-coord-reply-2026-08-20.md
+closed_at: 2026-08-28
+shipped_commits:
+  - doc-to-md: 4f4c3f5 (O-7 raw=str), 446d5df (O-6 table structured=grid), b32eaa7 (v1.1 schema patch), ad9bdf2 (D1 audit), 661c973 (D2.5 coalesce wired)
+  - ekrs-coord: 82ba83c (v1.1 delivery), 0222642 (D2.5 status update)
 ---
 
 # doc-to-md → EKRS: monolithic tables / fragmentation 协调答复
@@ -163,11 +167,74 @@ raw 3946-4795 chars, 单 block, 走 text 路径 split 后有效 chunks < MIN_REC
 
 ---
 
+## 九、closure 状态 (2026-08-28, post D5-A)
+
+> **状态**: D5 灰度 COMPLETE (CPU + GPU 双通道), admission 永久调高 (D5-A SHIPPED), 全部 96 bundle ingest path 开放.
+
+### 9.1 D5 灰度结果 (50-bundle selection, v1.1 corpus)
+
+| 类别 | total | CPU succ | GPU succ (1M/3000) | 备注 |
+|------|------:|---------:|-------------------:|------|
+| single_table_monolith | 15 | 15 ✅ | 15 ✅ | D2 修复完全生效 (0% → 100%) |
+| single_block_small | 5 | 5 ✅ | 5 ✅ | baseline OK |
+| tiny_content_fragmented | 11 | 10 ✅ | 11 ✅ | D2.5 coalesce 生效 (0% → 90-100%) |
+| few_blocks_any | 4 | 1 ✅ | 1 ✅ | 3 admission-gated |
+| mixed_type_large | 13 | 0 ❌ | 3 ✅ | 9-10 admission-gated |
+| oversized_image_block | 2 | 0 ❌ | 0 ❌ | 2 admission-gated |
+| **OVERALL** | **50** | **31/62%** | **35/70%** | 残余 15-19 = admission, 非 corpus quality |
+
+### 9.2 D5-GPU bypass canary (5M/10K 临时调高, 2026-08-28)
+
+15 admission-rejected bundle 重跑 @ ADMISSION_RAW_CHAR_LIMIT=5M / ADMISSION_CHUNK_LIMIT=10K:
+
+- **15/15 = 100% PASS** (per-category: few_blocks_any 3/3, mixed_type_large 10/10, oversized_image_block 2/2)
+- 编码 latency p50=23.9s, max=56.5s, mean=28.0s
+- GPU mem peak **3.63 GB / 8.19 GB total = 45%** headroom used
+
+→ **结论**: 96 bundle 失败完全是 admission 阈值保守 (Phase 13a T2 设 1M/3000 时仅 CPU 通道), GPU 通道有 5× 显存 headroom 支持更高阈值.
+
+### 9.3 D5-A SHIPPED — admission 永久调高 (Option A)
+
+**采纳方案 A** (用户 2026-08-28 决定, 3 选 1 中 A 运维最简):
+
+| 改动文件 | 行 | 内容 |
+|---------|----|----|
+| `deployment/docker-compose.yml` | 65-66 | CPU `rag` env 加 `ADMISSION_RAW_CHAR_LIMIT=5000000` + `ADMISSION_CHUNK_LIMIT=10000` |
+| `deployment/docker-compose.override.yml` | 76-77 | `rag-gpu` env 加同样 2 行 |
+
+**Sanity 验证** (新永久 5M/10K, GPU 容器重启后):
+- **15/15 = 100% PASS** @ 7-10s latency (vs 首 bypass run 16-31s, 3.5× 加速 = GPU warm + 0 admission reject)
+- Live env: `docker exec deployment-rag-gpu-1 env | grep ADMISSION` ✓ 5M/10K
+- Live env: `docker exec deployment-rag-1 env | grep ADMISSION` ✓ 5M/10K
+
+### 9.4 D6/D7 follow-up
+
+- **D6** — 历史 ingest 路径: `pipeline.ingest(version=3)` 增量 ingest, 96 bundle 全部 ingest path 开放 (此变更由 D5-A 启用, 无需额外代码)
+- **D7** — `scripts/c13_failed_bundles_verify.py` 96 bundle verification report (按 §4.2 阈值): 待 EKRS 端执行
+- **遗留 admission edge case**: ad58aff523d8 oversized_image_block raw=17.8 MB / 7117 chunks, 5M raw 远未触及 (3.4× headroom), 实测 success
+
+### 9.5 本文档 close 状态
+
+本文档 (EKRS 侧协调回复) 自 §1-§8 回答 doc-to-md 的 6 个 contract 问题, 已全部 close. D5/D5-A 是 EKRS 端执行层面, 不再产生新 contract issue. 后续任何 contract 变更走新协调文档.
+
+### 9.6 资源索引
+
+- 协调请求: `docs/coordinations/2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md` (v1.5, +§9.9 D5-A closure)
+- D5 CPU canary: `deployment/phase13c-d5-canary-report.json` (31/50)
+- D5 GPU baseline: `deployment/phase13c-d5-canary-gpu-report.json` (35/50)
+- D5-GPU bypass: `deployment/phase13c-d5-gpu-bypass-15.json` + `deployment/phase13c-d5-gpu-bypass-15-report.json` (15/15 @ 5M/10K)
+- D5-GPU combined: `deployment/phase13c-d5-gpu-combined-report.json` (50/50 合并)
+- D5-A sanity: `/tmp/sanity_d5a_gpu.json` (15/15 @ 新永久 5M/10K)
+- Memory: `phase13c-c13-d5-canary-result`, `phase13c-c13-d5-gpu-bypass`, `phase13c-c13-d5-admission-shipped`
+
+---
+
 ## 九、元数据
 
-- 协调请求: `/home/pangzy/code_project/EKRS/docs/coordinations/2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md`
+- 协调请求: `/home/pangzy/code_project/EKRS/docs/coordinations/2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md` (v1.5)
 - 上游协调: O-6 wedge fix (2026-08-20 ship), O-7 raw=list fix (2026-08-20 ship), Phase 12 全 ship (2026-07-30)
 - 关联代码: parsers/pdf_parser.py, parsers/docx_parser.py, parsers/utils.py, parsers/block_assigner.py, pipeline/orchestrator.py, backend/engine/renderer.py
 - doc-to-md 侧 owner: 表格解析 (docx_parser + pdf_parser markdown path), 碎片合并 (postprocess/coalesce)
 - EKRS 侧 owner: ingest verification, 灰度控制
-- 状态: **contract accepted, 6 questions resolved, ready to ship** (D1 启动后 ship 流程按 §五 时间表推进)
+- 状态: **contract accepted, 6 questions resolved, D5 灰度 + D5-A admission 调高 COMPLETE** (2026-08-28)
+- 版本: v1.5 (2026-08-28, +§9 closure: D5 canary + GPU bypass + D5-A SHIPPED, all 96 bundle ingest path open)

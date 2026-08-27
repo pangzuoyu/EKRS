@@ -1,0 +1,28 @@
+{
+  "selection_name": "d5-gpu-bypass-15",
+  "description": "15 bundles rejected by GPU admission (1M raw / 3000 chunks). Run with raised limits on GPU to verify encoding works end-to-end.",
+  "original_canary": "phase13c-d5-canary-50",
+  "doc_hashes": {
+    "mixed_type_large": [
+      "04740bb9fe2d20a3",
+      "48affd58c599001e",
+      "5aaecff70fd0791a",
+      "68f9b41df184956b",
+      "6ad14bb6f5b3b0c0",
+      "b2dd3afb958f2963",
+      "b8a49eb153fcffef",
+      "d783d481114a7c72",
+      "d7f974d026408312",
+      "db3664c7e834cf40"
+    ],
+    "few_blocks_any": [
+      "53a2254c06ff14ab",
+      "aa1c1ea99eb6626a",
+      "bae167306498c270"
+    ],
+    "oversized_image_block": [
+      "8ab548bb51c076d0",
+      "ad58aff523d8d880"
+    ]
+  }
+}
