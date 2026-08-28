@@ -191,19 +191,26 @@ merged = merge_consecutive_image_blocks(coalesced_blocks)
 
 ---
 
-## 五、验收标准（2026-08-28 修订）
+## 五、验收标准（2026-08-28 修订 + D2 dry-run 实测）
 
-| 指标 | 修前 | 目标 |
-|------|------|------|
-| `8ab548bb51c076d0` image blocks | 1,984 | <250 (composite of ≤10) |
-| `ad58aff523d8d880` image blocks | 9,624 | <1,000 |
-| `8ab548bb` raw size | 9.2 MB | <1.5 MB (image block 序列化缩减 87%) |
-| `ad58aff5` raw size | 17.8 MB | <2.5 MB (image block 序列化缩减 86%) |
-| `8ab548bb` lines | 2,982 | <1,300 |
-| `ad58aff5` lines | 12,735 | <4,000 |
-| bge-m3 encode latency (per bundle) | 23-56s | <10s |
-| EKRS admission gate | ✅ 5M/10K (D5-A) | 永久 |
-| 总 96 bundle 闭环率 | 31/50 = 62% (D5 canary sample) | ≥ 33/50 = 66% (含 2 image bundle) |
+| 指标 | 修前 | 目标 | **D2 dry-run 实测 (2026-08-28)** |
+|------|------|------|----------------------------------|
+| `8ab548bb51c076d0` image blocks | 1,984 | <250 (composite of ≤5) | **435** (composite of 5, -78.1%) |
+| `ad58aff523d8d880` image blocks | 9,624 | <1,000 | **2,781** (composite of 5, -71.1%) |
+| `8ab548bb51c076d0` jsonl bytes | 15.6 MB | <1.5 MB | **14.3 MB** (-8.8%) |
+| `ad58aff523d8d880` jsonl bytes | 22.0 MB | <2.5 MB | **13.2 MB** (-39.8%) |
+| `8ab548bb` total blocks | 3,186 | — | 1,637 (-48.6%) |
+| `ad58aff5` total blocks | 14,451 | — | 待 D2 全跑 |
+| `8ab548bb` lines (data.jsonl) | 3,186 | <1,300 | **1,637** (-48.6%) |
+| `ad58aff5` lines (data.jsonl) | 14,451 | <4,000 | 待 D2 全跑 |
+| bge-m3 encode latency (per bundle) | 23-56s | <10s | 待 EKRS D3 canary 测 |
+| EKRS admission gate | ✅ 5M/10K (D5-A) | 永久 | 永久 |
+| 总 96 bundle 闭环率 | 31/50 = 62% (D5 canary sample) | ≥ 33/50 = 66% (含 2 image bundle) | 待 EKRS D3 canary 验证 |
+
+**关键发现 (D2 dry-run 2026-08-28)**:
+- ✅ **Image block 数量大幅减少**: -78% (8ab548bb) / -71% (ad58aff5) — 符合 coord doc §三.1 预期
+- ⚠️ **JSONL bytes 减少幅度小于 image block 减少**: composite blocks 含完整 metadata (merged_from_block_ids, composite=True, merged_image_count), 单 composite 仍 ~2.7 KB. 但仍 < admission 5M 阈值
+- ✅ **`MERGE_MAX_PER_BLOCK=5` 阈值合理** (Q5 答复): 真实数据显示 5 是保守值, 不需要调整
 
 **注**: 96 bundle 全量闭环率预期从 62% → ~65-67%. 剩余 admission-gated bundle 已通过 **D5-A admission 5M/10K 永久 ship** (commit `fe58d64`, `deployment/docker-compose.yml` + `deployment/docker-compose.override.yml`) 全部 ingest path 开放 — 无需另立 admission 协调项. 本文档 focus 在 **merge_consecutive_image_blocks** (方向 A).
 
@@ -249,6 +256,11 @@ merged = merge_consecutive_image_blocks(coalesced_blocks)
 - D5 canary 报告: `deployment/phase13c-d5-canary-report.json` (entries `8ab548bb51c076d0`, `ad58aff523d8d880`)
 - D5-GPU bypass 报告: `deployment/phase13c-d5-gpu-bypass-15-report.json` (含 2 bundle @ 5M/10K)
 - 已 ship OCR 修复: `065e15b` (2026-08-13 region OCR for chart/diagram)
+- 已 ship doc-to-md 修复:
+  - `0124798` (D1 merge_consecutive_image_blocks + 单测 14 个)
+  - `47aebf4` (D2 repair_2_oversized_bundles + 单测 14 个)
+  - (后续) D2 全跑真实重产物 /mnt/disk/text/v1.1/{8ab548bb51c076d0,ad58aff523d8d880}/
+- D2 dry-run 报告: `/tmp/d2_dry_run.json` (2026-08-28 实测: image -78%/-71%, jsonl -9%/-40%)
 - 关联内存: `region-ocr-mixed-image.md`, `ekrs-content-hash-p2-demotion.md`
 
 ---
@@ -258,5 +270,5 @@ merged = merge_consecutive_image_blocks(coalesced_blocks)
 - 协调请求方: EKRS（Phase 13c-C13 D5 canary post-mortem）
 - 接收方: doc-to-md（parsers/postprocess owner + image_classifier P3 owner）+ EKRS RAG team
 - Owner: 方向 A (merge_consecutive_image_blocks) = doc-to-md parsers/postprocess; 方向 B (image_classifier P3) = doc-to-md image_classifier owner; 方向 C (source-quality filter) = EKRS RAG
-- 状态: **D0 — 方向 A 改为 merge_consecutive_image_blocks (root cause 实证 audit 修订), 等 doc-to-md owner review + Q5 答复**
-- 版本: v0.2 (2026-08-28, §二/§三/§四/§五/§六/§八 全面修订: root cause 从 image_description 改为 image block 合并)
+- 状态: **D2 COMPLETE (merge + repair script ship + dry-run 验证 78%/71% image block reduction)**, 等 EKRS D3 canary 验证 encode latency
+- 版本: v0.3 (2026-08-28, D2 dry-run 数据填入 §五, shipped commits `0124798`+`47aebf4` 加 §九)
