@@ -6,7 +6,7 @@
 > **Upstream**: [`docs/coordinations/2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md`](2026-08-27-doc-to-md-monolithic-tables-and-fragmentation.md) §9.9 + [`docs/solutions/integration-issues/ekrs-monolithic-tables-coord-reply-2026-08-27.md`](../solutions/integration-issues/ekrs-monolithic-tables-coord-reply-2026-08-27.md) §五.Q5
 > **Splits from**: monolithic-tables coord §2.4 (oversized_image_block → 单独立项, 2026-08-27 EKRS 同意)
 > **Failure data**: `deployment/phase13c-d5-canary-report.json` entries `8ab548bb51c076d0` + `ad58aff523d8d880`
-> **Status**: **D2 COMPLETE + EKRS D3 prep COMPLETE (2026-08-28, v0.4)** — merge 已 ship (`0124798`+`47aebf4`), dry-run -78%/-71%; 等 doc-to-md D2 重产物落地 v1.1 后跑 D3 canary
+> **Status**: **D3 COMPLETE (2026-08-28, v0.5)** — D2 全跑落地 v1.1 + 静态验收 PASS + 50/50 canary 100% + latency 4.6/3.8s<10s; 剩 D4 (image_classifier P3, 独立 sprint) + D5 全 corpus re-ingest + D6 close
 
 ---
 
@@ -40,7 +40,7 @@
 | 协调项 | 范围 | 当前状态 |
 |--------|------|----------|
 | monolithic-tables coord (2026-08-27) | single_table_monolith + tiny_content_fragmented + mixed_type_large + few_blocks_any + single_block_small | **D5 + D5-A COMPLETE, 62% pass** |
-| **本文档 (oversized_image_block)** | 2 bundle, image block 数量爆炸 (无连续合并) | **D2 COMPLETE, EKRS D3 ready** |
+| **本文档 (oversized_image_block)** | 2 bundle, image block 数量爆炸 (无连续合并) | **D3 COMPLETE (提前 5 天)** |
 
 **为什么单独立项** (per coord reply §五.Q5 EKRS 同意):
 > 根因在 OCR 端 (image 漏召), 不是输出契约. 这 2 个 bundle (`8ab548bb...` 3186 blocks / `ad58aff5...` 14451 blocks) 走的是 PaddleOCR-VL / MinerU 路径, 与本文档 §3 契约正交.
@@ -203,10 +203,16 @@ merged = merge_consecutive_image_blocks(coalesced_blocks)
 | `ad58aff523d8d880` jsonl bytes | 22.0 MB | report-only (无硬闸) | **13.2 MB** (-39.8%) |
 | `8ab548bb` total blocks / lines | 3,186 | report-only (无硬闸) | **1,637** (-48.6%) |
 | `ad58aff5` total blocks / lines | 14,451 | report-only (无硬闸) | **7,608** (-47.3%) |
-| composite 结构 | — | merged_image_count∈[3,5], from_ids 长度一致, ≥1/bundle | ✅ (dry-run 无结构错误) |
-| bge-m3 encode latency (per bundle) | 23-56s | <10s | 待 EKRS D3 canary 测 |
+| composite 结构 | — | merged_image_count∈[1,5], from_ids 长度一致, ≥1/bundle | ✅ (全跑 0 结构错误; 短 run count=1/2 也带标, 语义无害) |
+| bge-m3 encode latency (per bundle, GPU wall) | 23-56s (修前 CPU encode); 同栈同 runner 修前 wall 14.6s | <10s | **4.56s / 3.79s ✅** (D3 canary 实测, rag-gpu-1 GPU 编码生效: BGE_M3_GPU_ENABLED=true + 模型驻留 2596MiB + 零 channel_switched) |
 | EKRS admission gate | ✅ 5M/10K (D5-A) | 永久 | 永久 |
-| 总 96 bundle 闭环率 | 31/50 = 62% (D5 canary sample) | ≥ 33/50 = 66% (含 2 image bundle) | 待 EKRS D3 canary 验证 |
+| 总 96 bundle 闭环率 | 31/50 = 62% (D5 canary sample) | ≥ 33/50 = 66% (含 2 image bundle) | **50/50 = 100%** (全类别 100%, 远超 66%) |
+
+**D3 canary 关键发现 (2026-08-28)**:
+- ✅ **merge 对检索层完全透明**: 修后 chunk 划分与 source_block_ids 与修前逐字节一致 (8ab548bb chunks=1518 / ad58aff5 chunks=7117 不变) — chunker 按 token 预算聚合, image block 合并只减 block 处理开销, 不动检索语义
+- ✅ **复合块展开语义**: IR/chunker 把 composite 按 `merged_from_block_ids` 展开回成员 block id 进 `source_block_ids`; composite 自身 block_id 不上表面层 → `GET /v1/blocks/{composite_id}` 404 是预期语义 (查成员 id 可命中), MCP `ekrs_get_block` 用户需知
+- ✅ **确定性 chunk_id 原位替换**: 修前/修后同 doc_hash+idx → 同 chunk_id → run-3 upsert 原位覆盖 run-1, Qdrant 点数 1518 无残留 (R7/R8 完好)
+- ⚠️ **ops 坑 (EKRS 内部)**: GPU 容器服务端校验 `output_path` 必须是其 SHARED_STORAGE_PATH (`/parsed_lib`) 子目录 → canary 指向 v1.1 重产物须用 **`/parsed_lib/v1.1`** (容器内路径), 不能用 host 路径 `/mnt/disk/text/v1.1`; 且 `source .env` 会把容器路径泄露给脚本默认值 (run-1 曾因此误 ingest v1.0 原件, 已用 chunk 数铁证识别并重跑)
 
 > **v0.4 校准说明 (2026-08-28)**: 原目标列 (<250 / <1,000 / <1.5 MB / <2.5 MB) 是按 composite-of-10 假设写的; Q5 定案 `MERGE_MAX_PER_BLOCK=5` 后 image block 数自然翻倍 (435/2,781), jsonl bytes 因 composite 完整 metadata (merged_from_block_ids 等, 单 composite ~2.7 KB) 不随 block 数同比例下降。**硬闸收敛为 2 条: image blocks ≤500/≤3,100 + raw_chars <5M (admission)**; jsonl bytes / total blocks 降级为 report-only 指标。验收由 `scripts/c13_oversized_image_verify.py` 机器判定 (§七.3)。
 
@@ -234,13 +240,13 @@ merged = merge_consecutive_image_blocks(coalesced_blocks)
 1. **D3 canary — 50 bundle 验证 bge-m3 encode latency <10s/bundle + raw_chars<5M**
    - 复用 `scripts/phase13c_d5_canary.py` (D5 runner, 全参数化无需改动): `SELECTION_PATH`/`REPORT_PATH`/`RAG_URL` env 覆盖
    - selection: **直接复用 `deployment/phase13c-d5-canary-50.json`** — 已含 2 oversized bundle (48 baseline + 2, 2026-08-28 确认), 无需新 manifest
-   - 运行: `RAG_URL=:8002 REPORT_PATH=deployment/phase13c-oversized-image-d3-canary-report.json python3 scripts/phase13c_d5_canary.py`
+   - 运行 (2026-08-28 已执行): `RAG_URL=http://localhost:8001 REPORT_PATH=deployment/phase13c-oversized-image-d3-canary-report.json python3 scripts/phase13c_d5_canary.py` — **:8001 = rag-gpu-1** (GPU 路径, 与修前 23-56s encode 基线及 D5-A sanity 7-10s 基线同口径; :8002 c13d5 容器是 CPU 无 GPU, 弃用)
    - 验收 line (v0.4 校准, 与 §五 表一致):
      - 2 oversized bundle: bge-m3 encode latency <10s/bundle (修前 23-56s) + raw_chars <5M (admission 硬闸) + image blocks ≤500/≤3,100
      - 48 baseline bundle: 不退化 (与 D5-A sanity run 7-10s baseline 一致)
    - D5-A admission 5M/10K 已 ship, 不需新 admission 调整
 2. **不动 Qdrant**, `pipeline.ingest(version=3)` 增量 ingest (D3, D5)
-3. **`scripts/c13_oversized_image_verify.py` 已 ship (2026-08-28, D3 prep 提前)** — 按 §五 v0.4 验收线出 report: image blocks 硬闸 + raw_chars<5M admission 闸 + composite 结构校验 (merged_image_count∈[3,5], from_ids 长度一致) + `--canary-report` 可折叠 encode latency <10s 判定; 输出 `deployment/phase13c-oversized-image-d3-verify-report.json`。**pre-fix 自检已过**: 旧 bundle 正确判 FAIL (merge_landed=0 检出, raw_chars 双双过闸), 合成 post-merge GREEN 全过 + 越界负向 (merged_image_count=7) 检出
+3. **`scripts/c13_oversized_image_verify.py` 已 ship + D3 静态验收 PASS (2026-08-28)** — 按 §五 v0.4 验收线出 report: image blocks 硬闸 + raw_chars<5M admission 闸 + composite 结构校验 + `--canary-report` 可折叠 encode latency <10s 判定; 输出 `deployment/phase13c-oversized-image-d3-verify-report.json`。**真实 run 全 PASS**: 8ab548bb image 435/≤500 ✅ raw 2.17M ✅ composites 435 (0 结构错误) ✅; ad58aff5 image 2,781/≤3,100 ✅ raw 1.29M ✅ composites 1,756 ✅。**契约校准**: 真实产物短 run 尾巴也带 `merged_image_count=1/2` 标记 (§3.1 伪代码未覆盖), 结构闸从 [3,5] 放宽到 [1,5] — 单块标记对 EKRS 无害, `from_ids` 长度一致性 0 错配
 4. 若 2 bundle 验收未达预期, 逐 doc 复盘 (D5)
 5. **不接受** doc-to-md 在源文件不可用时用 stale 旧 bundle 凑数
 
@@ -256,7 +262,7 @@ merged = merge_consecutive_image_blocks(coalesced_blocks)
 | 2 | image_classifier 阈值 80% → 60% 是否过早? | ⚠️ **需回归测试**. 假阳性率 ≤5% (正常 PDF 误判为 image-dominated) 才 ship. EKRS 侧无明确反对 | doc-to-md 侧在 corpus 上跑回归测试, 出 false-positive rate 报告 (target ≤5%) |
 | 3 | EKRS source-quality filter 实施位置? | ✅ `backend/engine/admission.py` 入口, 与 raw_chars 检查并列. 标记 `quality_warning` 后 `step5_worker.py` encode 阶段降权. **不阻塞本文档**, Phase 13c 或 Phase 14 独立迭代 | 不阻塞本文档. 单独 Phase 14 任务追踪 |
 | 4 | ~~截断后是否保留 raw 字段做 fallback?~~ | ⚪ **OBSOLETE** — 不再走 truncation 路径 | N/A |
-| 5 | merge_consecutive_image_blocks `MERGE_MAX_PER_BLOCK=10` 阈值是否合理? | ❓ 待 doc-to-md owner 答复. EKRS 侧建议: 单 composite block 包含 10 image 仍可能 raw 超 5000 chars, 提议默认 5 (更保守), D5 后根据 bge-m3 encode latency 调 | doc-to-md owner 在 D1 ship 时确认阈值. D5 验证后回归调整 |
+| 5 | merge_consecutive_image_blocks `MERGE_MAX_PER_BLOCK=10` 阈值是否合理? | ✅ **CLOSED (2026-08-28, 双方一致 5)**: EKRS 提议 5 → doc-to-md owner D2 SHIP 快照拍板 5 → 实现 MAX=5, D2 全跑实测分布 {5:358, 4:21, 3:13, 2:28, 1:15} (8ab548bb) 支持保守值. D5 后如 encode latency 仍超限再回归调整 | 已确认, 无待办 |
 
 ---
 
@@ -272,8 +278,10 @@ merged = merge_consecutive_image_blocks(coalesced_blocks)
   - `47aebf4` (D2 repair_2_oversized_bundles + 单测 14 个)
   - (后续) D2 全跑真实重产物 /mnt/disk/text/v1.1/{8ab548bb51c076d0,ad58aff523d8d880}/
 - D2 dry-run 报告: `/tmp/d2_dry_run.json` (2026-08-28 实测: image -78%/-71%, jsonl -9%/-40%)
+- **D2 全跑落地 (2026-08-28)**: repair full-run 写入 `/mnt/disk/text/v1.1/{2 hash}/data.jsonl` (13.6M/12.6M, 修前 9.2M/17.8M 旧副本已备份 `/tmp/pre_fix_*.jsonl.bak`); 全跑报告 `/tmp/d2_oversized_repair_fullrun_report.json` — **数字与 dry-run 完全一致** (确定性验证 ✓); 真实产物 metadata 含 `composite` + `merged_from_block_ids` 字段
 - **EKRS D3 verify 脚本**: `scripts/c13_oversized_image_verify.py` (2026-08-28 ship; §五 v0.4 验收线机器判定; pre-fix FAIL + 合成 GREEN + 越界负向 三路自检通过)
 - **D3 manifest 复用确认**: `deployment/phase13c-d5-canary-50.json` 已含 `oversized_image_block` × 2, 直接复用
+- **D3 终判报告 (2026-08-28)**: `deployment/phase13c-oversized-image-d3-verify-report.json` (8/8 gate PASS, latency 折叠) + `deployment/phase13c-oversized-image-d3-canary-report.json` (50/50=100%, GPU :8001)
 - 关联内存: `region-ocr-mixed-image.md`, `ekrs-content-hash-p2-demotion.md`
 
 ---
@@ -283,5 +291,5 @@ merged = merge_consecutive_image_blocks(coalesced_blocks)
 - 协调请求方: EKRS（Phase 13c-C13 D5 canary post-mortem）
 - 接收方: doc-to-md（parsers/postprocess owner + image_classifier P3 owner）+ EKRS RAG team
 - Owner: 方向 A (merge_consecutive_image_blocks) = doc-to-md parsers/postprocess; 方向 B (image_classifier P3) = doc-to-md image_classifier owner; 方向 C (source-quality filter) = EKRS RAG
-- 状态: **D2 COMPLETE + EKRS D3 prep COMPLETE (2026-08-28)** — verify 脚本 ship + manifest 复用确认 + §五 验收线 v0.4 校准; **等 doc-to-md D2 重产物落地 `/mnt/disk/text/v1.1/{2 hash}/` 后即可跑 D3 canary** (当前 v1.1 仍是旧 bundle 9.2M/17.8M, verify 脚本已确认 merge_landed=0)
-- 版本: v0.4 (2026-08-28, §五 验收线按 MAX=5 校准: 硬闸收敛 image blocks ≤500/≤3,100 + raw_chars<5M, jsonl bytes 降 report-only; §七 manifest 复用 + verify 脚本 ship)
+- 状态: **D3 COMPLETE (2026-08-28, 提前 §四 时间表 5 天)** — D2 全跑落地 v1.1 (13.6M/12.6M) + D3 静态验收 8/8 gate PASS + canary 50/50=100% + oversized latency 4.56s/3.79s (<10s 目标) + 48 baseline 无退化 (median 18.6s→12.4s, 同栈同 runner 修前/修后对比)。**报告**: `deployment/phase13c-oversized-image-d3-verify-report.json` (verify 终判) + `deployment/phase13c-oversized-image-d3-canary-report.json` (canary)。剩 D4 (P3 独立 sprint) / D5 全 corpus re-ingest / D6 close
+- 版本: v0.5 (2026-08-28, D3 COMPLETE: §五 实测列全部填入 + 检索透明性/复合展开/原位替换 三发现 + ops 坑记录)

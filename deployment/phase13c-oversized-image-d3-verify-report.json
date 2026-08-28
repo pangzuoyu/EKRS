@@ -1,0 +1,129 @@
+{
+  "generated_at": "2026-08-28T10:48:27",
+  "shared_storage_path": "/mnt/disk/text/v1.1",
+  "canary_report": "deployment/phase13c-oversized-image-d3-canary-report.json",
+  "thresholds": {
+    "merge_min_run": 3,
+    "merge_max_per_block": 5,
+    "raw_chars_admission": 5000000,
+    "latency_target_s": 10.0,
+    "image_blocks_max": {
+      "8ab548bb51c076d0": 500,
+      "ad58aff523d8d880": 3100
+    }
+  },
+  "all_pass": true,
+  "bundles": [
+    {
+      "doc_hash": "8ab548bb51c076d0",
+      "gates": {
+        "image_blocks": {
+          "value": 435,
+          "target": "<=500",
+          "dry_run_post": 435,
+          "pre": 1984,
+          "ok": true
+        },
+        "raw_chars_admission": {
+          "value": 2171016,
+          "target": "<5000000",
+          "ok": true
+        },
+        "merge_landed": {
+          "value": 435,
+          "target": ">=1 composite, 0 structural errors",
+          "errors": [],
+          "ok": true
+        },
+        "encode_latency": {
+          "value_s": 4.56,
+          "target": "<10.0s",
+          "ok": true
+        }
+      },
+      "pass": true,
+      "deltas_vs_dry_run": {
+        "image_blocks": {
+          "pre": 1984,
+          "dry_post": 435,
+          "now": 435
+        },
+        "blocks_total": {
+          "pre": 3186,
+          "dry_post": 1637,
+          "now": 1637
+        }
+      },
+      "scan": {
+        "doc_hash": "8ab548bb51c076d0",
+        "path": "/mnt/disk/text/v1.1/8ab548bb51c076d0/data.jsonl",
+        "blocks_total": 1637,
+        "type_counts": {
+          "text": 967,
+          "image": 435,
+          "table": 235
+        },
+        "image_blocks": 435,
+        "raw_chars": 2171016,
+        "jsonl_bytes": 14255052,
+        "composite_blocks": 435
+      }
+    },
+    {
+      "doc_hash": "ad58aff523d8d880",
+      "gates": {
+        "image_blocks": {
+          "value": 2781,
+          "target": "<=3100",
+          "dry_run_post": 2781,
+          "pre": 9624,
+          "ok": true
+        },
+        "raw_chars_admission": {
+          "value": 1286782,
+          "target": "<5000000",
+          "ok": true
+        },
+        "merge_landed": {
+          "value": 1756,
+          "target": ">=1 composite, 0 structural errors",
+          "errors": [],
+          "ok": true
+        },
+        "encode_latency": {
+          "value_s": 3.79,
+          "target": "<10.0s",
+          "ok": true
+        }
+      },
+      "pass": true,
+      "deltas_vs_dry_run": {
+        "image_blocks": {
+          "pre": 9624,
+          "dry_post": 2781,
+          "now": 2781
+        },
+        "blocks_total": {
+          "pre": 14451,
+          "dry_post": 7608,
+          "now": 7608
+        }
+      },
+      "scan": {
+        "doc_hash": "ad58aff523d8d880",
+        "path": "/mnt/disk/text/v1.1/ad58aff523d8d880/data.jsonl",
+        "blocks_total": 7608,
+        "type_counts": {
+          "header": 774,
+          "text": 3640,
+          "image": 2781,
+          "table": 413
+        },
+        "image_blocks": 2781,
+        "raw_chars": 1286782,
+        "jsonl_bytes": 13232935,
+        "composite_blocks": 1756
+      }
+    }
+  ]
+}

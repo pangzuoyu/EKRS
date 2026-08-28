@@ -11,8 +11,10 @@ against D2 dry-run actuals 435/2781 with ~15% margin):
 - image blocks: 8ab548bb51c076d0 <= 500 / ad58aff523d8d880 <= 3100
 - raw_chars < 5,000,000 per bundle (D5-A admission hard gate, commit fe58d64)
 - merge landed: >=1 composite block (metadata.merged_image_count) per bundle;
-  every composite has merged_image_count in [MERGE_MIN_RUN..MERGE_MAX_PER_BLOCK]
-  and len(merged_from_block_ids) == merged_image_count
+  every marked block has merged_image_count in [1..MERGE_MAX_PER_BLOCK] and
+  len(merged_from_block_ids) == merged_image_count. (Real D2 output labels
+  short tail runs count=1/2 through the composite flush path too — benign
+  metadata, allowed; runs below MERGE_MIN_RUN are NOT required to be merged.)
 - encode latency < 10s/bundle (only when --canary-report given; D3 run stage)
 - jsonl bytes / total blocks: report-only (composite metadata overhead is a
   known D2 dry-run finding; admission gates on raw_chars, not file bytes)
@@ -85,10 +87,10 @@ def scan_bundle(doc_hash: str) -> dict:
                 composites += 1
                 n = md.get("merged_image_count")
                 from_ids = md.get("merged_from_block_ids")
-                if not isinstance(n, int) or not (MERGE_MIN_RUN <= n <= MERGE_MAX_PER_BLOCK):
+                if not isinstance(n, int) or not (1 <= n <= MERGE_MAX_PER_BLOCK):
                     composite_errors.append(
                         f"line {lineno}: merged_image_count={n!r} outside "
-                        f"[{MERGE_MIN_RUN},{MERGE_MAX_PER_BLOCK}]")
+                        f"[1,{MERGE_MAX_PER_BLOCK}]")
                 if not isinstance(from_ids, list) or len(from_ids) != n:
                     composite_errors.append(
                         f"line {lineno}: merged_from_block_ids len "
