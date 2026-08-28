@@ -228,10 +228,18 @@ merged = merge_consecutive_image_blocks(coalesced_blocks)
 
 ## 七、EKRS 端承诺
 
-1. **不动 Qdrant**, `pipeline.ingest(version=3)` 增量 ingest (D3, D5)
-2. **写 `scripts/c13_oversized_image_verify.py`**, 按 §五验收标准出 report (D3)
-3. 若 2 bundle 验收未达预期, 逐 doc 复盘 (D5)
-4. **不接受** doc-to-md 在源文件不可用时用 stale 旧 bundle 凑数
+1. **D3 canary — 50 bundle 验证 bge-m3 encode latency <10s/bundle + raw<2MB**
+   - 复用 `scripts/phase13c_d5_canary.py` (D5 runner), 但 ingestion source 指向 `/mnt/disk/text/v1.1/` (含 2 bundle 重产物)
+   - selection: 50 bundle manifest (48 baseline + 2 oversized) — 与 §五 acceptance 列表对齐
+   - 验收 line:
+     - 2 oversized bundle: bge-m3 encode latency <10s/bundle (修前 23-56s) + jsonl size <2MB (修前 9.2/17.8 MB)
+     - 48 baseline bundle: 不退化 (与 D5-A sanity run 7-10s baseline 一致)
+   - 输出 report: `deployment/phase13c-oversized-image-d3-canary-report.json` (类比 `phase13c-d5-canary-report.json`)
+   - D5-A admission 5M/10K 已 ship, 不需新 admission 调整
+2. **不动 Qdrant**, `pipeline.ingest(version=3)` 增量 ingest (D3, D5)
+3. **写 `scripts/c13_oversized_image_verify.py`**, 按 §五验收标准出 report (D3)
+4. 若 2 bundle 验收未达预期, 逐 doc 复盘 (D5)
+5. **不接受** doc-to-md 在源文件不可用时用 stale 旧 bundle 凑数
 
 ---
 
